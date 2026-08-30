@@ -1,0 +1,27 @@
+folio 1
+rule 1
+target octb
+source local.aml
+source branch.aml local.aml
+source bytes.aml
+source structure.aml
+source complete.aml
+source arithmetic.aml
+source forms.aml
+source orbit.aml
+source shape.aml
+source feed.aml
+source feed_structure.aml
+source feed_result.aml
+root local.aml local
+root branch.aml branch
+root bytes.aml bytes
+root structure.aml structure
+root complete.aml complete
+root arithmetic.aml arithmetic
+root forms.aml forms
+root orbit.aml orbit
+root shape.aml shape
+root feed.aml feed feed.val
+root feed_structure.aml feed-structure feed_structure.val
+root feed_result.aml feed-result feed_result.val

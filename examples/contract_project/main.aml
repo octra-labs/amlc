@@ -1,0 +1,380 @@
+import IOwnable from "interfaces/IOwnable.aml"
+import IVault from "interfaces/IVault.aml"
+import IPrivateVault from "interfaces/IPrivateVault.aml"
+
+contract Showcase implements IOwnable, IVault, IPrivateVault {
+
+  const MIN_DEPOSIT = 1000
+  const VERSION = "1.0"
+  const FEE_BPS = 25
+
+  struct Record {
+    depositor: address,
+    amount: int,
+    epoch_at: int,
+    label: string,
+    verified: bool
+  }
+
+  struct FheBalance {
+    cipher_b64: string,
+    last_epoch: int
+  }
+
+  enum Status {
+    Active,
+    Paused,
+    Closed
+  }
+
+  state {
+    contract_owner: address
+    status: Status
+    total_deposited: int
+    deposit_count: int
+    balances: map[address]int
+    records: map[int]Record
+    tags: map[string]string
+    whitelist: map[address]bool
+    allowances: map[string]int
+    last_message: option[string]
+    fhe_balances: map[address]FheBalance
+    proofs_verified: int
+  }
+
+  event Deposited(from: indexed address, amount: int, epoch_at: int)
+  event Withdrawn(to: indexed address, amount: int)
+  event OwnerChanged(old_owner: address, new_owner: address)
+  event StatusChanged(new_status: int)
+  event Tagged(key: string, value: string)
+  event Approved(owner: address, spender: address, amount: int)
+  event FheDeposit(from: indexed address, verified: bool)
+  event ProofVerified(proof_type: string, result: bool)
+
+  error NotOwner(403, "caller is not the owner")
+  error Paused(503, "contract is paused")
+  error BelowMinimum(400, "below minimum deposit")
+  error Insufficient(400, "insufficient balance")
+
+  constructor(tag: string) {
+    self.contract_owner = caller
+    self.status = Status.Active
+    self.total_deposited = 0
+    self.deposit_count = 0
+    self.proofs_verified = 0
+    self.tags["version"] = VERSION
+    self.tags["created_by"] = tag
+    self.last_message = none()
+    emit OwnerChanged("genesis", caller)
+  }
+
+  private fn only_owner() {
+    require(caller == self.contract_owner, "not owner")
+  }
+
+  private fn ensure_active() {
+    let s = self.status
+    match s {
+      Status.Active => { }
+      Status.Paused => { revert Paused() }
+      Status.Closed => { revert Paused() }
+    }
+  }
+
+  private fn make_key(a: address, b: address): string {
+    return a + ":" + b
+  }
+
+  private fn clamp(val: int, lo: int, hi: int): int {
+    return val < lo ? lo : (val > hi ? hi : val)
+  }
+
+  private fn compute_fee_internal(amount: int): int {
+    let fee = amount * FEE_BPS / 10000
+    return fee < 1 ? 1 : fee
+  }
+
+  private fn get_stats(): (int, int, string) {
+    let avg = self.deposit_count > 0 ? self.total_deposited / self.deposit_count : 0
+    let status_str = self.status == Status.Active ? "active" : "inactive"
+    return (self.total_deposited, avg, status_str)
+  }
+
+  public view fn owner(): address {
+    return self.contract_owner
+  }
+
+  public fn transfer_ownership(new_owner: address): bool {
+    only_owner()
+    assert is_address(new_owner)
+    let old = self.contract_owner
+    self.contract_owner = new_owner
+    emit OwnerChanged(old, new_owner)
+    return true
+  }
+
+  public payable nonreentrant fn deposit(): bool {
+    ensure_active()
+    require(value >= MIN_DEPOSIT, "below minimum deposit")
+    let fee = compute_fee_internal(value)
+    let net = value - fee
+    self.balances[caller] += net
+    self.total_deposited += net
+    let id = self.deposit_count
+    let label = caller + ":" + to_string(net)
+    self.records[id].depositor = caller
+    self.records[id].amount = net
+    self.records[id].epoch_at = epoch
+    self.records[id].label = label
+    self.records[id].verified = true
+    self.deposit_count += 1
+    self.last_message = some("deposit:" + to_string(net))
+    emit Deposited(caller, net, epoch)
+    log("deposit", caller, net, fee)
+    return true
+  }
+
+  public nonreentrant fn withdraw(amount: int): bool {
+    ensure_active()
+    require(amount > 0, "amount must be positive")
+    let bal = self.balances[caller]
+    require(bal >= amount, "insufficient balance")
+    self.balances[caller] -= amount
+    self.total_deposited -= amount
+    let ok = transfer(caller, amount)
+    require(ok, "transfer failed")
+    emit Withdrawn(caller, amount)
+    return true
+  }
+
+  public view fn balance_of(addr: address): int {
+    assert_address(addr)
+    return self.balances[addr]
+  }
+
+  public view fn get_total(): int {
+    return self.total_deposited
+  }
+
+  public fn approve(spender: address, amount: int): bool {
+    assert_address(spender)
+    require(amount >= 0, "amount must be nonnegative")
+    let key = make_key(caller, spender)
+    self.allowances[key] = amount
+    emit Approved(caller, spender, amount)
+    return true
+  }
+
+  public fn transfer_from(from: address, to: address, amount: int): bool {
+    assert_address(from)
+    assert_address(to)
+    require(amount > 0, "amount must be positive")
+    let key = make_key(from, caller)
+    let allowed = self.allowances[key]
+    require(allowed >= amount, "not approved")
+    let bal = self.balances[from]
+    require(bal >= amount, "insufficient balance")
+    self.allowances[key] -= amount
+    self.balances[from] -= amount
+    self.balances[to] += amount
+    return true
+  }
+
+  public view fn allowance(a: address, b: address): int {
+    assert_address(a)
+    assert_address(b)
+    return self.allowances[make_key(a, b)]
+  }
+
+  public fn set_tag(key: string, val: string): bool {
+    only_owner()
+    self.tags[key] = val
+    emit Tagged(key, val)
+    let cleaned = replace(val, " ", "_")
+    self.tags[key + "_clean"] = cleaned
+    return true
+  }
+
+  public view fn get_tag(key: string): string {
+    return self.tags[key]
+  }
+
+  public view fn search_tag(key: string, pattern: string): bool {
+    let val = self.tags[key]
+    return index_of(val, pattern) >= 0
+  }
+
+  public view fn concat_tags(key1: string, key2: string): string {
+    let a = self.tags[key1]
+    let b = self.tags[key2]
+    return a + " | " + b
+  }
+
+  public view fn compute_fee(amount: int): int {
+    let rate = amount > 100000 ? 1 : (amount > 10000 ? 5 : 10)
+    let fee = amount * rate / 1000
+    return clamp(fee, 100, 50000)
+  }
+
+  public view fn sum_deposits(from_id: int, to_id: int): int {
+    let total = 0
+    for i in from_id..to_id {
+      total += self.records[i].amount
+    }
+    return total
+  }
+
+  public view fn get_summary(): string {
+    let (total, avg, status) = get_stats()
+    return "total=" + to_string(total) + " avg=" + to_string(avg) + " status=" + status
+  }
+
+  public view fn get_last_message(): string {
+    if is_some(self.last_message) {
+      return unwrap(self.last_message)
+    }
+    return "no messages"
+  }
+
+  public view fn hash_data(data: string): string {
+    return sha256(data)
+  }
+
+  public view fn keccak_data(data: string): string {
+    return keccak256(data)
+  }
+
+  public view fn verify_addr(addr: string): bool {
+    return is_address(addr)
+  }
+
+  public view fn bit_ops(a: int, b: int): int {
+    let x = bit_and(a, b)
+    let y = bit_or(a, b)
+    let z = bit_xor(x, y)
+    let shifted = bit_shl(z, 2)
+    return bit_shr(shifted, 1)
+  }
+
+  public view fn math_ops(a: int, b: int): string {
+    let mn = min(a, b)
+    let mx = max(a, b)
+    let ab = abs(a - b)
+    return to_string(mn) + "," + to_string(mx) + "," + to_string(ab)
+  }
+
+  public view fn string_ops(data: string, delim: string): string {
+    let parts = split(data, delim)
+    let rejoined = join(parts, "-")
+    let first_part = substr(data, 0, index_of(data, delim))
+    return rejoined + " first=" + first_part
+  }
+
+  public fn pause(): bool {
+    only_owner()
+    self.status = Status.Paused
+    emit StatusChanged(1)
+    return true
+  }
+
+  public fn unpause(): bool {
+    only_owner()
+    self.status = Status.Active
+    emit StatusChanged(0)
+    return true
+  }
+
+  public fn close(): bool {
+    only_owner()
+    self.status = Status.Closed
+    emit StatusChanged(2)
+    return true
+  }
+
+  public view fn get_status(): int {
+    let s = self.status
+    match s {
+      Status.Active => { return 0 }
+      Status.Paused => { return 1 }
+      Status.Closed => { return 2 }
+    }
+    return 0
+  }
+
+  public fn set_whitelist(addr: address, allowed: bool): bool {
+    only_owner()
+    assert_address(addr)
+    self.whitelist[addr] = allowed
+    return true
+  }
+
+  public view fn is_whitelisted(addr: address): bool {
+    assert_address(addr)
+    return self.whitelist[addr]
+  }
+
+  public view fn contract_info(): string {
+    return "addr=" + self_addr + " epoch=" + to_string(epoch) + " bal=" + to_string(balance(self_addr))
+  }
+
+  public view fn get_version(): string {
+    return VERSION
+  }
+
+  public view fn get_record(id: int): string {
+    return self.records[id].label + "@" + to_string(self.records[id].epoch_at) + " verified=" + to_string(self.records[id].verified)
+  }
+
+  public fn private_deposit(ct_amount: bytes, proof: bytes): bool {
+    ensure_active()
+    let pk = fhe_load_pk(caller)
+    require(pk != 0, "no fhe pubkey registered")
+    let ct = fhe_deser(ct_amount)
+    let zero_ok = fhe_verify_zero(pk, ct, proof)
+    emit ProofVerified("zero", zero_ok)
+    self.proofs_verified += 1
+    let existing_b64 = self.fhe_balances[caller].cipher_b64
+    if len(existing_b64) > 0 {
+      let existing_ct = fhe_deser(existing_b64)
+      let new_ct = fhe_add(pk, existing_ct, ct)
+      self.fhe_balances[caller].cipher_b64 = fhe_ser(new_ct)
+      self.fhe_balances[caller].last_epoch = epoch
+    } else {
+      self.fhe_balances[caller].cipher_b64 = fhe_ser(ct)
+      self.fhe_balances[caller].last_epoch = epoch
+    }
+    emit FheDeposit(caller, zero_ok)
+    return zero_ok
+  }
+
+  public view fn get_encrypted_balance(addr: address): bytes {
+    assert_address(addr)
+    return self.fhe_balances[addr].cipher_b64
+  }
+
+  public view fn get_proofs_verified(): int {
+    return self.proofs_verified
+  }
+
+  public fn fhe_scale_balance(addr: address, factor: int): bool {
+    only_owner()
+    assert_address(addr)
+    let pk = fhe_load_pk(addr)
+    let ct = fhe_deser(self.fhe_balances[addr].cipher_b64)
+    let scaled = fhe_scale(pk, ct, factor)
+    self.fhe_balances[addr].cipher_b64 = fhe_ser(scaled)
+    self.fhe_balances[addr].last_epoch = epoch
+    return true
+  }
+
+  public fn fhe_add_to_balance(addr: address, plaintext_add: int): bool {
+    only_owner()
+    assert_address(addr)
+    let pk = fhe_load_pk(addr)
+    let ct = fhe_deser(self.fhe_balances[addr].cipher_b64)
+    let result = fhe_add_const(pk, ct, plaintext_add)
+    self.fhe_balances[addr].cipher_b64 = fhe_ser(result)
+    self.fhe_balances[addr].last_epoch = epoch
+    return true
+  }
+}

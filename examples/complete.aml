@@ -1,0 +1,11 @@
+program Complete {
+  size n = 3
+  data Option tag 1 = None(unit) | Some(int)
+  term case make Option Some(
+    fold vec[int](3, 5, 8) from 0 with
+      many item: int, once sum: int => item + sum
+  ) as Option of {
+    None many none: unit => 0 |
+    Some many payload: int => payload + 1
+  }
+}

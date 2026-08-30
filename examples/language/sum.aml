@@ -1,0 +1,4 @@
+program Sum {
+  term total vec[int](1, 4, 7) with
+    many item: int => item
+}

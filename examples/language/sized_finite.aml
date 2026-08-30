@@ -1,0 +1,23 @@
+program SizedFinite {
+  form pairn size[n] [many ys: vec[n, int]]
+    (many xs: vec[n, int]) ->[many] vec[n, int] marks {} =
+      weave[n, int]
+        braid[n, int] xs, ys with
+          once x: int, once y: int => x + y
+        with once z: int => z + 1
+
+  form tabn size[n] [] (erase blank: unit)
+    ->[many] vec[n, int] marks {} =
+      loom[n, int] with many i: int => i + 1
+
+  form rolln size[n] [] (many seed: int)
+    ->[many] int marks {} =
+      orbit[n] from seed with once state: int => state + 2
+
+  term
+    use pairn size[3] [vec[int](4, 5, 6)](vec[int](1, 2, 3))
+      as many joined: vec[3, int] in
+    use tabn size[3] [](unit) as many made: vec[3, int] in
+    use rolln size[2] [](at[1](joined) + at[2](made))
+      as many out: int in out
+}

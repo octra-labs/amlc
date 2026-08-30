@@ -1,0 +1,3 @@
+program Result {
+  term (vec[int](3, 5, 8), true)
+}

@@ -1,0 +1,4 @@
+interface IPrivateVault {
+  fn private_deposit(ct_amount: bytes, proof: bytes): bool
+  fn get_encrypted_balance(addr: address): bytes
+}

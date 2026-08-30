@@ -1,0 +1,21 @@
+program SizedReduce {
+  form score size[n] [many xs: vec[n, int]] (many needle: int)
+    ->[many] int marks {} =
+      let many all_hit: bool =
+        every xs with many a: int => equal[int](a, needle) in
+      let many one_hit: bool =
+        some xs with many b: int => equal[int](b, needle) in
+      let many hits: int =
+        count xs with many c: int => equal[int](c, needle) in
+      let many sum: int =
+        fold xs from 0 with many d: int, once acc: int => d + acc in
+      let many summed: int =
+        total xs with many e: int => e in
+      if all_hit then sum + summed + hits
+      else if one_hit then sum + summed + hits
+      else 0
+
+  term
+    use score size[4] [vec[int](1, 4, 4, 7)](4)
+      as many out: int in out
+}

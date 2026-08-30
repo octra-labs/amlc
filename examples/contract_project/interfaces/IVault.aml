@@ -1,0 +1,6 @@
+interface IVault {
+  fn deposit(): bool
+  fn withdraw(amount: int): bool
+  fn balance_of(addr: address): int
+  fn get_total(): int
+}

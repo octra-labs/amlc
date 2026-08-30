@@ -1,0 +1,10 @@
+program LocalStore {
+  state {
+    item: string
+  }
+
+  public fn write(text: string): string {
+    self.item = text
+    return self.item
+  }
+}

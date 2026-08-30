@@ -1,0 +1,8 @@
+program PointUse {
+  shape Point tag 3 = { x: int, y: int }
+  term
+    split make Point { x = 3, y = 4 } as Point {
+      x => many px: int,
+      y => many py: int
+    } in px + py
+}

@@ -1,0 +1,8 @@
+program Laws {
+  size n = 32
+  measure width = max(n * 2, 64) - 16
+  law width = 48
+  law width <= 64
+  input many page: bytes[width]
+  term page
+}

@@ -1,0 +1,23 @@
+program SizedChoice {
+  data Choice tag 18 = Yes(int) | No(bool)
+  shape Box tag 19 = { choice: Choice, score: int }
+
+  form wrap size[n] [] (many x: int)
+    ->[many] Choice marks {} = make Choice Yes(x)
+
+  form inspect size[n] [] (many box: Box)
+    ->[many] int marks {} =
+      split box as Box {
+        choice => many item: Choice,
+        score => many value: int
+      } in
+        case item as Choice of {
+          Yes many yes: int => yes + value
+        | No many no: bool => value
+        }
+
+  term
+    use inspect size[2] [](
+      make Box { choice = make Choice Yes(3), score = 4 })
+      as once out: int in out
+}

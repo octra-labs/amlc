@@ -1,0 +1,3 @@
+program Branch {
+  term if equal[int](2 + 3, 5) then 7 else 9
+}

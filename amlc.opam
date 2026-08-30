@@ -1,0 +1,20 @@
+opam-version: "2.0"
+name: "amlc"
+version: "0.1.0~preview"
+synopsis: "Applied ML compiler and local AML executor"
+maintainer: "Octra Labs"
+authors: ["Octra Labs"]
+license: "BSD-3-Clause"
+homepage: "https://applied-ml.org"
+bug-reports: "https://github.com/octra-labs/amlc/issues"
+dev-repo: "git+https://github.com/octra-labs/amlc.git"
+depends: [
+  "ocaml" {= "4.14.2"}
+  "dune" {>= "3.0"}
+  "zarith"
+  "base64"
+  "digestif"
+]
+build: [
+  ["dune" "build" "-p" name "-j" jobs]
+]

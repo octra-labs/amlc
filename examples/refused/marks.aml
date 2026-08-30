@@ -1,0 +1,5 @@
+program Marks {
+  form note [] (once arg: int) ->[many] int
+    marks {emit[2], fail[3]} = emit[2](arg)
+  term use note[](7) as once out: int in out
+}

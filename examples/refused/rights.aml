@@ -1,0 +1,4 @@
+program Rights {
+  permit cap[7] = step
+  term write[7](1)
+}

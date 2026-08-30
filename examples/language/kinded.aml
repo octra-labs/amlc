@@ -1,0 +1,7 @@
+program Kinded {
+  form same kind[a:data] [] (many x: a)
+    ->[many] a marks {} = x
+  term
+    use same kind[int] [](7)
+      as many out: int in out
+}

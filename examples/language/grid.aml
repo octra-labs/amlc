@@ -1,0 +1,3 @@
+program Grid {
+  term loom[4, int] with many i: int => i + i
+}

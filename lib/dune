@@ -1,0 +1,18 @@
+(include_subdirs unqualified)
+
+(library
+ (name octra_vm)
+ (public_name amlc.vm)
+ (modules (:standard \ Aml_cli Aml_dump Amlc_cli Contract_cli))
+ (libraries
+  zarith
+  threads
+  base64
+  digestif
+  digestif.c))
+
+(library
+ (name amlc_command)
+ (wrapped false)
+ (modules Aml_cli Aml_dump Amlc_cli Contract_cli)
+ (libraries octra_vm zarith digestif unix))

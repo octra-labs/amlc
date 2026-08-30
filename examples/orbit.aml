@@ -1,0 +1,3 @@
+program Advance {
+  term orbit[4] from 1 with once state: int => state + 2
+}

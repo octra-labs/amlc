@@ -1,0 +1,4 @@
+program Structure {
+  term split (3, 5) as once x: int, once y: int in
+    x + y + at[1](vcat(vec[int](8), vec[int](13, 21)))
+}

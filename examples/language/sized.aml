@@ -1,0 +1,7 @@
+program Sized {
+  form same size[n] law[1 <= n] [] (many page: bytes[n])
+    ->[many] bool marks {} = equal[bytes[n]](page, page)
+  term
+    use same size[3] [](0x010203)
+      as once out: bool in out
+}

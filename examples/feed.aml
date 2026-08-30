@@ -1,0 +1,6 @@
+program Feed {
+  input many x: int
+  input once y: int
+  term let once z: int = y + 1 in
+    x + z
+}

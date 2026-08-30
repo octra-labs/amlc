@@ -1,0 +1,5 @@
+folio 1
+rule 1
+target octb
+source result.aml
+root result.aml main

@@ -1,0 +1,4 @@
+program Bytes {
+  term let many raw: bytes[4] = cat(0x0102, 0x0304) in
+    cat(take[2](raw), drop[2](raw))
+}

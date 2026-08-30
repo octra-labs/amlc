@@ -1,0 +1,7 @@
+program Predicates {
+  term
+    (every vec[int](4, 4, 4) with
+       many item: int => equal[int](item, 4),
+     some vec[int](1, 4, 7) with
+       many item: int => equal[int](item, 4))
+}

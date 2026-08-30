@@ -1,0 +1,5 @@
+(executable
+ (name amlc)
+ (public_name amlc)
+ (modules amlc)
+ (libraries amlc_command))

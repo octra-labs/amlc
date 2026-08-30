@@ -1,0 +1,9 @@
+(test
+ (name profile)
+ (modules profile)
+ (libraries octra_vm zarith))
+
+(test
+ (name feed_large)
+ (modules feed_large)
+ (libraries octra_vm))

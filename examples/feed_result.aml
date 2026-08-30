@@ -1,0 +1,7 @@
+program FeedResult {
+  input many choice: result[int, bool]
+  term
+    case choice of
+      ok many value: int => value + 1
+    | err many flag: bool => if flag then 1 else 0
+}

@@ -1,0 +1,5 @@
+program Local {
+  term let many x: int = 7 + 5 in
+    let once y: int = 3 in
+      if equal[int](x, 12) then x + y else 0 + y
+}

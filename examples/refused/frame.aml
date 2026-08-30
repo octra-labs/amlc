@@ -1,0 +1,13 @@
+program Frame {
+  size n = 4
+  measure m = n + 1
+  law n <= m
+  data Cell tag 3 = Empty(unit) | Raw(bytes[m])
+  shape Batch tag 4 = { row: vec[n, Cell] }
+  input many batch: Batch
+  permit cap[7] = close
+  input once gate: cap[7]
+  form end_cap [once held: cap[7]] (erase arg: unit)
+    ->[once] unit marks {close[7]} = close(held)
+  term close(gate)
+}

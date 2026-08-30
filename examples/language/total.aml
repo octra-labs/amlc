@@ -1,0 +1,9 @@
+program Total {
+  size n = 3
+  term
+    if equal[bytes[n]](0x010203, 0x010203) then
+      fold vec[int](3, 5, 8) from 0 with
+        many item: int, once sum: int => item + sum
+    else
+      0
+}

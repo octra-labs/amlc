@@ -1,0 +1,5 @@
+program Under {
+  form id [] (once arg: int) ->[many] int marks {}
+    under {steps[1], depth[0], work[1]} = arg
+  term use id[](7) as once out: int in out
+}

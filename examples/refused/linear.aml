@@ -1,0 +1,7 @@
+program Linear {
+  permit cap[7] = step + close
+  input once handle: cap[7]
+  term
+    split step(handle, 42) as once next: cap[7], once out: int in
+    (close(next), out)
+}

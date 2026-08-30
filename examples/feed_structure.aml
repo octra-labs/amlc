@@ -1,0 +1,7 @@
+program Structured {
+  input erase u: unit
+  input many p: int * int
+  input many xs: vec[3, int]
+  term split p as many x: int, many y: int in
+    x + y + at[1](xs)
+}

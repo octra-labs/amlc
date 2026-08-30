@@ -1,0 +1,6 @@
+program Measure {
+  size n = 32
+  measure width = max(n * 2, 64) - 16
+  input many page: bytes[width]
+  term page
+}

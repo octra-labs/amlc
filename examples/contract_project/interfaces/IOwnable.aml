@@ -1,0 +1,4 @@
+interface IOwnable {
+  fn owner(): address
+  fn transfer_ownership(new_owner: address): bool
+}

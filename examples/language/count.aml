@@ -1,0 +1,4 @@
+program Count {
+  term count vec[int](1, 4, 4, 7) with
+    many item: int => equal[int](item, 4)
+}

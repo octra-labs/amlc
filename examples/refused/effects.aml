@@ -1,0 +1,3 @@
+program Effects {
+  term if true then emit[2](1) else fail[3](0)
+}

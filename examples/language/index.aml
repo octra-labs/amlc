@@ -1,0 +1,5 @@
+program Index {
+  size n = 32
+  input many xs: vec[4, bytes[max(n * 2, 64) - 16]]
+  term xs
+}
