@@ -223,6 +223,11 @@ Fixpoint norm (env : ienv) (scope : list sbind) (term : rtm) : option rtm :=
       | Some lhs, Some rhs => Some (REq typ lhs rhs)
       | _, _ => None
       end
+  | RCmp relation lhs0 rhs0 =>
+      match norm env scope lhs0, norm env scope rhs0 with
+      | Some lhs, Some rhs => Some (RCmp relation lhs rhs)
+      | _, _ => None
+      end
   | RCat lhs0 rhs0 =>
       match norm env scope lhs0, norm env scope rhs0 with
       | Some lhs, Some rhs => Some (RCat lhs rhs)
@@ -342,6 +347,15 @@ Fixpoint norm (env : ienv) (scope : list sbind) (term : rtm) : option rtm :=
           | None => None
           end
       | _, _ => None
+      end
+  | ROrbitTo count turns seed item body =>
+      match norm env scope turns, norm env scope seed, rb_elab env item with
+      | Some rounds, Some value, Some bind =>
+          match norm env (spush scope bind) body with
+          | Some term => Some (ROrbitTo count rounds value item term)
+          | None => None
+          end
+      | _, _, _ => None
       end
   | RWake count seed item body =>
       match norm env scope seed, rb_elab env item with

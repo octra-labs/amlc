@@ -52,12 +52,22 @@ let compile_ast ast =
       match Contract_vm.Verifier.verify code with
       | Error error -> Error (verifier_text error)
       | Ok () ->
+        let state =
+          match ast.Oct_lang.declaration with
+          | Oct_lang.ProgramDecl ->
+            begin
+              match Aml_input.storage_kinds ast with
+              | [] -> None
+              | rows -> Some rows
+            end
+          | Oct_lang.ContractDecl | Oct_lang.InterfaceDecl -> None
+        in
         Ok {
           name = ast.Oct_lang.name;
           declaration = ast.declaration;
           ast;
           code;
-          octb = Bytecode.encode code;
+          octb = Bytecode.encode ?state code;
         }
 
 let diagnostic source line column message =
@@ -77,10 +87,11 @@ let caught ?source action =
   try action () with
   | Oct_lex.LexError (message, line, column) ->
     Error (diagnostic source line (Some column) message)
-  | Oct_parse.ParseError (message, line) ->
-    Error (diagnostic source line None message)
-  | Oct_gen.GenError (message, line) ->
-    Error (diagnostic source line None message)
+  | Oct_parse.ParseError (message, line, column) ->
+    Error (diagnostic source line (Some column) message)
+  | Oct_gen.GenError (message, line, column) ->
+    let column = if column < 1 then None else Some column in
+    Error (diagnostic source line column message)
   | Stack_overflow -> Error "stack capacity exceeded"
   | Out_of_memory -> Error "memory capacity exceeded"
   | Failure message | Invalid_argument message -> Error message

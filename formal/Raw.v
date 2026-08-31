@@ -18,6 +18,7 @@ Require Import Orbit.
 Require Import Wake.
 Require Import Rift.
 Require Import Quant.
+Require Import Cmp.
 
 Import ListNotations.
 
@@ -53,6 +54,7 @@ Inductive rtm : Type :=
 | RNeg : rtm -> rtm
 | RAbs : rtm -> rtm
 | REq : ity -> rtm -> rtm -> rtm
+| RCmp : Cmp.rel -> rtm -> rtm -> rtm
 | RCat : rtm -> rtm -> rtm
 | RTake : nat -> rtm -> rtm
 | RDrop : nat -> rtm -> rtm
@@ -68,6 +70,7 @@ Inductive rtm : Type :=
 | RBraid : ix -> ity -> rtm -> rtm -> rbind -> rbind -> rtm -> rtm
 | RLoom : ix -> ity -> rbind -> rtm -> rtm
 | ROrbit : ix -> rtm -> rbind -> rtm -> rtm
+| ROrbitTo : ix -> rtm -> rtm -> rbind -> rtm -> rtm
 | RWake : ix -> rtm -> rbind -> rtm -> rtm
 | RRift : ix -> ix -> ity -> rtm -> rtm
 | RExact : rbind -> ty -> rtm -> rtm
@@ -92,6 +95,22 @@ Fixpoint rseek (fuel index : nat) (used : list nat) (binds : list sbind)
 Definition rpick (used : list nat) (binds : list sbind)
     (terms : list stm) : option nat :=
   rseek Low.pmax 0 used binds terms.
+
+Definition rcmp (relation : Cmp.rel) (left right : stm) : option stm :=
+  match rpick [] [] [left; right] with
+  | Some left_name =>
+      match rpick [left_name] [] [left; right] with
+      | Some right_name =>
+          match rpick [left_name; right_name] [] [left; right] with
+          | Some delta_name =>
+              Some (Cmp.term relation left_name right_name delta_name
+                left right)
+          | None => None
+          end
+      | None => None
+      end
+  | None => None
+  end.
 
 Lemma rseek_clear : forall fuel index used binds terms name,
   rseek fuel index used binds terms = Some name ->
@@ -268,6 +287,11 @@ Fixpoint relab (env : ienv) (term : rtm) : option stm :=
       | Some typ, Some lhs, Some rhs => Some (SEq typ lhs rhs)
       | _, _, _ => None
       end
+  | RCmp relation lhs rhs =>
+      match relab env lhs, relab env rhs with
+      | Some lout, Some rout => rcmp relation lout rout
+      | _, _ => None
+      end
   | RCat lhs rhs =>
       match relab env lhs, relab env rhs with
       | Some lhs, Some rhs => Some (SCat lhs rhs)
@@ -359,6 +383,32 @@ Fixpoint relab (env : ienv) (term : rtm) : option stm :=
       | Some count, Some value, Some item, Some term =>
           Orbit.oterm count value item term
       | _, _, _, _ => None
+      end
+  | ROrbitTo raw_count turns seed raw_item body =>
+      match ieval env raw_count, relab env turns, relab env seed,
+          rb_elab env raw_item, relab env body with
+      | Some count, Some rounds, Some value, Some item, Some term =>
+          match rpick [] [item] [rounds; value; term] with
+          | Some turn_name =>
+              match rpick [turn_name] [item] [rounds; value; term] with
+              | Some left_name =>
+                  match rpick [turn_name; left_name] [item]
+                      [rounds; value; term] with
+                  | Some right_name =>
+                      match rpick [turn_name; left_name; right_name] [item]
+                          [rounds; value; term] with
+                      | Some delta_name =>
+                          Orbit.oterm_to left_name right_name delta_name
+                            turn_name count rounds value item term
+                      | None => None
+                      end
+                  | None => None
+                  end
+              | None => None
+              end
+          | None => None
+          end
+      | _, _, _, _, _ => None
       end
   | RWake raw_count seed raw_item body =>
       match ieval env raw_count, relab env seed, rb_elab env raw_item,
@@ -474,6 +524,11 @@ Inductive relabR (env : ienv) : rtm -> stm -> Prop :=
     relabR env left lhs ->
     relabR env right rhs ->
     relabR env (REq raw left right) (SEq typ lhs rhs)
+| RRCmp : forall relation left right lhs rhs out,
+    relabR env left lhs ->
+    relabR env right rhs ->
+    rcmp relation lhs rhs = Some out ->
+    relabR env (RCmp relation left right) out
 | RRCat : forall left right lhs rhs,
     relabR env left lhs ->
     relabR env right rhs ->
@@ -544,6 +599,22 @@ Inductive relabR (env : ienv) : rtm -> stm -> Prop :=
     relabR env body term ->
     Orbit.oterm count value item term = Some result ->
     relabR env (ROrbit raw_count seed raw_item body) result
+| RROrbitTo : forall raw_count turns seed raw_item body count rounds value
+    item term turn_name left_name right_name delta_name result,
+    ieval env raw_count = Some count ->
+    relabR env turns rounds ->
+    relabR env seed value ->
+    rbR env raw_item item ->
+    relabR env body term ->
+    rpick [] [item] [rounds; value; term] = Some turn_name ->
+    rpick [turn_name] [item] [rounds; value; term] = Some left_name ->
+    rpick [turn_name; left_name] [item] [rounds; value; term] =
+      Some right_name ->
+    rpick [turn_name; left_name; right_name] [item]
+      [rounds; value; term] = Some delta_name ->
+    Orbit.oterm_to left_name right_name delta_name turn_name count rounds
+      value item term = Some result ->
+    relabR env (ROrbitTo raw_count turns seed raw_item body) result
 | RRWake : forall raw_count seed raw_item body count value item term keep result,
     ieval env raw_count = Some count ->
     relabR env seed value ->
@@ -615,11 +686,65 @@ Proof.
   reflexivity.
 Qed.
 
+Local Opaque rcmp Orbit.oterm_to.
+
 Theorem relab_sound : forall env raw out,
   relab env raw = Some out -> relabR env raw out.
 Proof.
   intros env raw.
-  induction raw; intros out accepted; simpl in accepted;
+  induction raw; intros out accepted; simpl in accepted.
+  all: lazymatch goal with
+  | |- relabR ?env (RCmp ?relation ?left ?right) _ =>
+      destruct (relab env left) as [lhs |] eqn:left_ok; try discriminate;
+      destruct (relab env right) as [rhs |] eqn:right_ok; try discriminate;
+      destruct (rcmp relation lhs rhs) as [result |] eqn:result_ok;
+        try discriminate;
+      inversion accepted; subst;
+      eapply RRCmp;
+      [eauto 2
+      |eauto 2
+      |exact result_ok]
+  | |- _ => idtac
+  end.
+  all: lazymatch goal with
+  | |- relabR ?env (ROrbitTo ?raw_count ?turns ?seed ?raw_item ?body) _ =>
+      destruct (ieval env raw_count) as [count |] eqn:count_ok;
+        try discriminate;
+      destruct (relab env turns) as [rounds |] eqn:turns_ok;
+        try discriminate;
+      destruct (relab env seed) as [value |] eqn:seed_ok;
+        try discriminate;
+      destruct (rb_elab env raw_item) as [item |] eqn:item_ok;
+        try discriminate;
+      destruct (relab env body) as [term |] eqn:body_ok;
+        try discriminate;
+      destruct (rpick [] [item] [rounds; value; term]) as [turn_name |]
+        eqn:turn_ok; try discriminate;
+      destruct (rpick [turn_name] [item] [rounds; value; term])
+        as [left_name |] eqn:left_ok; try discriminate;
+      destruct (rpick [turn_name; left_name] [item] [rounds; value; term])
+        as [right_name |] eqn:right_ok; try discriminate;
+      destruct (rpick [turn_name; left_name; right_name] [item]
+        [rounds; value; term]) as [delta_name |] eqn:delta_ok;
+        try discriminate;
+      destruct (Orbit.oterm_to left_name right_name delta_name turn_name count
+        rounds value item term) as [result |] eqn:result_ok;
+        try discriminate;
+      inversion accepted; subst;
+      eapply RROrbitTo;
+      [exact count_ok
+      |eauto 2
+      |eauto 2
+      |eapply rb_elab_soundR; exact item_ok
+      |eauto 2
+      |exact turn_ok
+      |exact left_ok
+      |exact right_ok
+      |exact delta_ok
+      |exact result_ok]
+  | |- _ => idtac
+  end.
+  all:
     repeat match type of accepted with
     | context [yelab ?ienv ?item] =>
         destruct (yelab ienv item) eqn:?; try discriminate
@@ -713,6 +838,8 @@ Proof.
     | H : Braid.bterm _ _ _ _ _ _ _ _ _ = Some _ |- _ => rewrite H
     | H : Loom.lterm _ _ _ _ = Some _ |- _ => rewrite H
     | H : Orbit.oterm _ _ _ _ = Some _ |- _ => rewrite H
+    | H : Orbit.oterm_to _ _ _ _ _ _ _ _ _ = Some _ |- _ => rewrite H
+    | H : rcmp _ _ _ = Some _ |- _ => rewrite H
     | H : Wake.kterm _ _ _ _ _ = Some _ |- _ => rewrite H
     | H : Rift.rift_make _ _ _ _ = Some _ |- _ => rewrite H
     | H : rexact _ _ _ = true |- _ => rewrite H

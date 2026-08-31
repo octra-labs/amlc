@@ -8,7 +8,8 @@ type error =
   | Shadow of C_term.id
   | Need of C_type.t * C_type.t
   | Bad of C_type.t
-  | Index of C_nat.t * C_nat.t
+  | Byte_index of C_nat.t * C_nat.t
+  | Vec_index of C_nat.t * C_nat.t
   | Size
   | Mode of C_term.id * C_type.mul
   | Split of C_term.id list
@@ -31,6 +32,11 @@ type info = {
 type selected = {
   rule : C_rule.id;
   info : info;
+}
+
+type failure = {
+  error : error;
+  term : C_term.t option;
 }
 
 type rule_error =
@@ -225,7 +231,14 @@ let fold_info len vector seed body =
     res = C_limit.succ (C_limit.add vector.res (C_limit.add seed.res turns));
   }
 
+exception Infer_error of error * C_term.t
+
 let rec infer env term =
+  match infer_node env term with
+  | Ok value -> Ok value
+  | Error error -> raise (Infer_error (error, term))
+
+and infer_node env term =
   match term with
   | C_term.Unit -> Ok (leaf C_type.Unit, env)
   | C_term.Bool _ -> Ok (leaf C_type.Bool, env)
@@ -415,7 +428,7 @@ let rec infer env term =
       match value_info.typ with
       | C_type.Bytes total when C_nat.le len total ->
         Ok (copy_one (C_type.Bytes len) len value_info, next_env)
-      | C_type.Bytes total -> Error (Index (len, total))
+      | C_type.Bytes total -> Error (Byte_index (len, total))
       | actual -> Error (Need (C_type.Bytes C_nat.zero, actual))
     end
   | C_term.Drop (len, value) ->
@@ -427,7 +440,7 @@ let rec infer env term =
           match C_nat.sub total len with
           | Some rest ->
             Ok (copy_one (C_type.Bytes rest) rest value_info, next_env)
-          | None -> Error (Index (len, total))
+          | None -> Error (Byte_index (len, total))
         end
       | actual -> Error (Need (C_type.Bytes C_nat.zero, actual))
     end
@@ -453,7 +466,7 @@ let rec infer env term =
     begin
       match value_info.typ with
       | C_type.Vec (len, _) when not (C_nat.lt index len) ->
-        Error (Index (index, len))
+        Error (Vec_index (index, len))
       | C_type.Vec (_, elem) when C_type.kind elem = C_type.Res ->
         Error (Access elem)
       | C_type.Vec (_, elem) ->
@@ -470,7 +483,7 @@ let rec infer env term =
           | Some rest ->
             let typ = C_type.Pair (elem, C_type.Vec (rest, elem)) in
             Ok (copy_one typ rest value_info, next_env)
-          | None -> Error (Index (C_nat.zero, C_nat.zero))
+          | None -> Error (Vec_index (C_nat.zero, C_nat.zero))
         end
       | actual -> Error (Need (C_type.Vec (C_nat.zero, C_type.Unit), actual))
     end
@@ -542,18 +555,74 @@ let rec input_limit count = function
   | _ when count = max_inputs -> Error (Inputs (max_inputs, max_inputs + 1))
   | _ :: rest -> input_limit (count + 1) rest
 
-let check_in binds term =
-  let* () = input_limit 0 binds in
-  let* () = shape term in
-  let* env = open_all [] binds in
-  match infer env term with
-  | Ok (info, env) ->
+let rec binding_term id = function
+  | C_term.Let (bind, _, _) as term when C_nat.equal bind.id id -> Some term
+  | C_term.Unpair (_, left, right, _) as term
+      when C_nat.equal left.id id || C_nat.equal right.id id -> Some term
+  | C_term.Case (_, left, _, right, _) as term
+      when C_nat.equal left.id id || C_nat.equal right.id id -> Some term
+  | C_term.Vfold (_, _, fold) as term
+      when C_nat.equal fold.item.id id || C_nat.equal fold.state.id id -> Some term
+  | term ->
+    let children =
+      match term with
+      | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Bytes _
+      | C_term.Var _ -> []
+      | C_term.Vec (_, values) -> values
+      | C_term.Let (_, value, body)
+      | C_term.Unpair (value, _, _, body)
+      | C_term.Pair (value, body)
+      | C_term.Add (value, body)
+      | C_term.Sub (value, body)
+      | C_term.Mul (value, body)
+      | C_term.Div (value, body)
+      | C_term.Mod (value, body)
+      | C_term.Eq (_, value, body)
+      | C_term.Cat (value, body)
+      | C_term.Vcat (value, body)
+      | C_term.Step (value, body) -> [value; body]
+      | C_term.If (guard, yes, no) -> [guard; yes; no]
+      | C_term.Fst value | C_term.Snd value | C_term.Inl (value, _)
+      | C_term.Inr (_, value) | C_term.Act (_, value) | C_term.Neg value
+      | C_term.Abs value | C_term.Take (_, value) | C_term.Drop (_, value)
+      | C_term.At (_, value) | C_term.Uncons value | C_term.Close value -> [value]
+      | C_term.Case (value, _, yes, _, no) -> [value; yes; no]
+      | C_term.Vfold (vector, seed, fold) -> [vector; seed; fold.body]
+    in
+    List.find_map (binding_term id) children
+
+let check_in_located binds term =
+  match input_limit 0 binds with
+  | Error error -> Error { error; term = None }
+  | Ok () ->
     begin
-      match pending env with
-      | None -> Ok info
-      | Some id -> Error (Unused id)
+      match shape term with
+      | Error error -> Error { error; term = Some term }
+      | Ok () ->
+        begin
+          match open_all [] binds with
+          | Error error -> Error { error; term = None }
+          | Ok env ->
+            try
+              match infer env term with
+              | Error error -> Error { error; term = Some term }
+              | Ok (info, env) ->
+                begin
+                  match pending env with
+                  | None -> Ok info
+                  | Some id -> Error {
+                      error = Unused id;
+                      term = binding_term id term;
+                    }
+                end
+            with
+            | Infer_error (error, failed) ->
+              Error { error; term = Some failed }
+        end
     end
-  | Error error -> Error error
+
+let check_in binds term =
+  Result.map_error (fun failure -> failure.error) (check_in_located binds term)
 
 let check term = check_in [] term
 
@@ -590,8 +659,10 @@ let raw = function
   | Need (expected, actual) ->
     "type expected = " ^ C_type.text expected ^ " actual = " ^ C_type.text actual
   | Bad typ -> "invalid type = " ^ C_type.text typ
-  | Index (len, total) ->
+  | Byte_index (len, total) ->
     "byte index = " ^ C_nat.text len ^ " size = " ^ C_nat.text total
+  | Vec_index (index, total) ->
+    "vec index = " ^ C_nat.text index ^ " size = " ^ C_nat.text total
   | Size -> "byte size overflow"
   | Mode (id, mul) ->
     "resource mode id = " ^ C_nat.text id ^ " mode = " ^ C_type.mul_text mul

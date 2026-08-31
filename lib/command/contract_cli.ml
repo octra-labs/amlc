@@ -36,12 +36,59 @@ let probe_source source =
     Accept
   with
   | Octra_vm.Oct_lex.LexError (_, line, col) -> Refuse (line, col)
-  | Octra_vm.Oct_parse.ParseError (_, line) -> Refuse (line, 1)
+  | Octra_vm.Oct_parse.ParseError (_, line, col) -> Refuse (line, col)
 
 let accepts_source source =
   match probe_source source with
   | Accept -> true
   | Refuse _ -> false
+
+let legacy_member = function
+  | Octra_vm.Oct_lang.TkState
+  | Octra_vm.Oct_lang.TkEvent
+  | Octra_vm.Oct_lang.TkConstructor
+  | Octra_vm.Oct_lang.TkFn
+  | Octra_vm.Oct_lang.TkView
+  | Octra_vm.Oct_lang.TkPure
+  | Octra_vm.Oct_lang.TkPublic
+  | Octra_vm.Oct_lang.TkPrivate
+  | Octra_vm.Oct_lang.TkInternal
+  | Octra_vm.Oct_lang.TkPayable
+  | Octra_vm.Oct_lang.TkError
+  | Octra_vm.Oct_lang.TkStruct
+  | Octra_vm.Oct_lang.TkEnum
+  | Octra_vm.Oct_lang.TkConst
+  | Octra_vm.Oct_lang.TkInterface
+  | Octra_vm.Oct_lang.TkImport
+  | Octra_vm.Oct_lang.TkIdent "nonreentrant"
+  | Octra_vm.Oct_lang.TkIdent "invariant" -> true
+  | _ -> false
+
+let legacy_source source =
+  try
+    let stream = Octra_vm.Oct_lex.make_stream source in
+    let rec seek () =
+      match Octra_vm.Oct_lex.peek_token stream with
+      | Octra_vm.Oct_lang.TkContract
+      | Octra_vm.Oct_lang.TkIdent "Contract" -> true
+      | Octra_vm.Oct_lang.TkProgram
+      | Octra_vm.Oct_lang.TkIdent "Program" ->
+        Octra_vm.Oct_lex.eat stream;
+        let rec body () =
+          match Octra_vm.Oct_lex.peek_token stream with
+          | Octra_vm.Oct_lang.TkLBrace ->
+            Octra_vm.Oct_lex.eat stream;
+            legacy_member (Octra_vm.Oct_lex.peek_token stream)
+          | Octra_vm.Oct_lang.TkEOF -> false
+          | _ -> Octra_vm.Oct_lex.eat stream; body ()
+        in
+        body ()
+      | Octra_vm.Oct_lang.TkEOF -> false
+      | _ -> Octra_vm.Oct_lex.eat stream; seek ()
+    in
+    seek ()
+  with
+  | Octra_vm.Oct_lex.LexError _ -> false
 
 let image_result raw =
   match Octra_vm.Bytecode.decode_image raw with
@@ -412,8 +459,10 @@ let local_octb_as command trace path args =
     | None -> Aml_cli.fail command "method is required for contract OCTB"
   in
   let values = List.mapi (raw_value command) options.values in
-  let code = (image command (Aml_cli.source path)).code in
-  execute command trace (Filename.basename path) options method_name values [] code
+  let image = image command (Aml_cli.source path) in
+  let storage_kinds = Option.value ~default:[] image.state in
+  execute command trace (Filename.basename path) options method_name values
+    storage_kinds image.code
 
 let run_octb_as command path args = local_octb_as command false path args
 let debug_octb_as command path args = local_octb_as command true path args
@@ -454,6 +503,8 @@ let const_text = function
       Printf.sprintf "int:%s... digits = %d sha256 = %s"
         (String.sub value 0 32) (String.length value) (Aml_cli.sha value)
   | Octra_vm.Bytecode.CBool value -> "bool:" ^ string_of_bool value
+  | Octra_vm.Bytecode.CStr value when Octra_vm.Bytecode.state_value value ->
+    "state:schema"
   | Octra_vm.Bytecode.CStr value ->
     if String.length value <= 48 then "text:\"" ^ String.escaped value ^ "\""
     else

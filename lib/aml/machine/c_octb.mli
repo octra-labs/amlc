@@ -26,6 +26,8 @@ type t = private {
   code : op array;
   octb : string;
   result : C_emit.lit;
+  veils : int;
+  veil_depth : C_nat.t;
   map : C_smap.t;
   live : C_live.t;
 }

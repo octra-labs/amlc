@@ -7,3 +7,13 @@
  (name feed_large)
  (modules feed_large)
  (libraries octra_vm))
+
+(test
+ (name compiler_regression)
+ (modules
+  compiler_regression
+  regression_support
+  regression_storage
+  regression_types
+  regression_source)
+ (libraries octra_vm amlc_command zarith))

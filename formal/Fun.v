@@ -32,6 +32,7 @@ Record fn : Type := Fn {
 
 Inductive ftm : Type :=
 | FRet : stm -> ftm
+| FLet : sbind -> stm -> ftm -> ftm
 | FIf : stm -> ftm -> ftm -> ftm
 | FCall : sbind -> nat -> list stm -> stm -> ftm -> ftm.
 
@@ -148,6 +149,17 @@ Fixpoint flow (fns : list fn) (env : senv) (next : nat) (term : ftm)
     : option (tm * nat) :=
   match term with
   | FRet body => low env next body
+  | FLet result value rest =>
+      match low env next value with
+      | Some (out, after_value) =>
+          match flow fns ((sname result, after_value) :: env)
+              (S after_value) rest with
+          | Some (body, last) =>
+              Some (Let (put after_value result) out body, last)
+          | None => None
+          end
+      | None => None
+      end
   | FIf guard yes no =>
       match low env next guard with
       | Some (gout, after_guard) =>
@@ -180,6 +192,18 @@ Fixpoint flow (fns : list fn) (env : senv) (next : nat) (term : ftm)
       | None => None
       end
   end.
+
+Theorem flow_let : forall fns env next result value rest out after body last,
+  low env next value = Some (out, after) ->
+  flow fns ((sname result, after) :: env) (S after) rest = Some (body, last) ->
+  flow fns env next (FLet result value rest) =
+    Some (Let (put after result) out body, last).
+Proof.
+  intros fns env next result value rest out after body last value_ok body_ok.
+  simpl.
+  rewrite value_ok, body_ok.
+  reflexivity.
+Qed.
 
 Definition fprog (items : list sbind) (fns : list fn) (body : ftm)
     : option (list bind * tm) :=

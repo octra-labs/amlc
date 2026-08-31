@@ -20,6 +20,7 @@ type fdecl =
 
 type flow_marks =
   | Ret_marks of C_lex.span option list
+  | Let_marks of C_lex.span option list * flow_marks * C_lex.span option
   | If_marks of C_lex.span option list * flow_marks * flow_marks
       * C_lex.span option
   | Call_marks of C_syn.name * C_lex.span option list list
@@ -68,6 +69,7 @@ type t = {
   input_spans : (string * C_lex.span) list;
   decls : fdecl list;
   fns : C_fun.fn list;
+  form_marks : (C_syn.name * form_marks) list;
   body : C_fun.t;
   perms : C_perm.set;
   dtypes : (Z.t * C_data.decl) list;
@@ -99,6 +101,7 @@ type cause =
   | Orbit of C_orbit.error
   | Wake of C_wake.error
   | Rift of C_rift.error
+  | Private
   | Fhe of C_fhe.error
   | Hfhe of C_hfhe.error
   | Hpar of C_hpar.error
@@ -321,6 +324,9 @@ let bind_marks at actuals body =
 
 let rec expand_marks fmarks = function
   | Ret_marks marks -> Ok marks
+  | Let_marks (value, body, at) ->
+      let* body = expand_marks fmarks body in
+      Ok (join_marks value (join_marks body [at]))
   | If_marks (guard, yes, no, at) ->
       let* yes = expand_marks fmarks yes in
       let* no = expand_marks fmarks no in
@@ -395,6 +401,16 @@ let rec kind_find name = function
   | [] -> None
   | (key, kind) :: _ when C_syn.name_equal name key -> Some kind
   | _ :: rest -> kind_find name rest
+
+let rec form_find name = function
+  | [] -> None
+  | Mono item :: _ when C_syn.name_equal name item.C_fun.name ->
+      Some (Mono item)
+  | Spec item :: _ when C_syn.name_equal name item.C_spec.name ->
+      Some (Spec item)
+  | Poly item :: _ when C_syn.name_equal name (C_poly.name item) ->
+      Some (Poly item)
+  | _ :: rest -> form_find name rest
 
 let mul state =
   match tok state with
@@ -601,6 +617,7 @@ let raw_cause = function
   | C_raw.Orbit_error error -> Orbit error
   | C_raw.Wake_error error -> Wake error
   | C_raw.Rift_error error -> Rift error
+  | C_raw.Fresh -> Private
   | C_raw.Depth (limit, actual) -> Depth (limit, actual)
   | C_raw.Nodes (limit, actual) -> Nodes (limit, actual)
 
@@ -862,14 +879,25 @@ and loom depth state =
 and orbit depth state =
   let* state = take C_lex.F_lbrack (next state) in
   let* raw_count, state = idx state in
-  let* state = take C_lex.F_rbrack state in
+  let* turns, state =
+    match tok state with
+    | C_lex.Comma ->
+        let* turns, state = raw_expr (depth + 1) (next state) in
+        let* state = take C_lex.F_rbrack state in
+        Ok (Some turns, state)
+    | C_lex.Rbrack -> Ok (None, next state)
+    | _ -> need [C_lex.F_comma; C_lex.F_rbrack] state
+  in
   let* state = take C_lex.F_from state in
   let* seed, state = raw_expr (depth + 1) state in
   let* state = take C_lex.F_with state in
   let* item, state = raw_bind state in
   let* state = take C_lex.F_arrow state in
   let* body, state = raw_expr (depth + 1) state in
-  put state (C_raw.Orbit (raw_count, seed, item, body))
+  match turns with
+  | None -> put state (C_raw.Orbit (raw_count, seed, item, body))
+  | Some turns -> put state (C_raw.Orbit_to
+      (raw_count, turns, seed, item, body))
 
 and wake depth state =
   let* state = take C_lex.F_lbrack (next state) in
@@ -947,7 +975,11 @@ and atom depth state =
   | C_lex.Unit -> put ~first (next state) C_raw.KUnit
   | C_lex.Ident _ ->
       let* name, state = name (fun value -> Name value) state in
-      put ~first state (C_raw.Var name)
+      begin
+        match tok state with
+        | C_lex.Lparen -> direct_call depth first name state
+        | _ -> put ~first state (C_raw.Var name)
+      end
   | C_lex.Lparen ->
       let state = next state in
       begin
@@ -1001,6 +1033,65 @@ and atom depth state =
         C_lex.F_vcat; C_lex.F_at; C_lex.F_uncons; C_lex.F_step;
         C_lex.F_close; C_lex.F_abs] state
 
+and direct_call depth first name state =
+  let* fn =
+    match form_find name state.defs with
+    | Some (Mono item) when C_fun.direct item -> Ok item
+    | Some (Mono _) | Some (Spec _) | Some (Poly _) ->
+        Error {
+          cause = Fun (C_fun.Direct (C_syn.name_text name));
+          span = first;
+        }
+    | None ->
+        Error {
+          cause = Fun (C_fun.Fn (C_syn.name_text name));
+          span = first;
+        }
+  in
+  let rec args out state =
+    match tok state with
+    | C_lex.Rparen -> Ok (List.rev out, next state)
+    | _ ->
+        let* value, state = raw_expr (depth + 1) state in
+        begin
+          match tok state with
+          | C_lex.Comma -> args (value :: out) (next state)
+          | C_lex.Rparen -> Ok (List.rev (value :: out), next state)
+          | _ -> need [C_lex.F_comma; C_lex.F_rparen] state
+        end
+  in
+  let rec elab out = function
+    | [] -> Ok (List.rev out)
+    | value :: rest ->
+        let* value =
+          match C_raw.elab state.sizes value with
+          | Ok value -> Ok value
+          | Error error -> Error { cause = raw_cause error; span = first }
+        in
+        elab (value :: out) rest
+  in
+  let* values, state = args [] (next state) in
+  let* values = elab [] values in
+  let* value =
+    match C_fun.apply fn values with
+    | Ok value -> Ok value
+    | Error error -> Error { cause = Fun error; span = first }
+  in
+  let* id =
+    match C_nat.of_int state.nodes with
+    | Some value -> Ok value
+    | None ->
+        Error {
+          cause = Nodes (C_rule.local.tm_nodes, state.nodes);
+          span = first;
+        }
+  in
+  let result =
+    C_syn.bind (C_syn.dslot id) C_type.Many fn.C_fun.arr.out
+  in
+  let value = C_syn.Let (result, value, C_syn.Var result.name) in
+  put ~first state (C_raw.of_syn value)
+
 and product depth state =
   let first = span state in
   let* left, state = atom depth state in
@@ -1039,6 +1130,23 @@ and add depth state =
   in
   walk left state
 
+and order depth state =
+  let first = span state in
+  let* left, state = add depth state in
+  let rel =
+    match tok state with
+    | C_lex.Lt -> Some C_syn.Lt
+    | C_lex.Le -> Some C_syn.Le
+    | C_lex.Gt -> Some C_syn.Gt
+    | C_lex.Ge -> Some C_syn.Ge
+    | _ -> None
+  in
+  match rel with
+  | None -> Ok (left, state)
+  | Some rel ->
+      let* right, state = add (depth + 1) (next state) in
+      put ~first state (C_raw.Cmp (rel, left, right))
+
 and raw_expr depth state =
   let* () = guard depth state in
   match tok state with
@@ -1057,7 +1165,7 @@ and raw_expr depth state =
   | C_lex.Orbit -> orbit depth state
   | C_lex.Wake -> wake depth state
   | C_lex.Rift -> rift depth state
-  | _ -> add depth state
+  | _ -> order depth state
 
 let expr depth state =
   let mark = span state in
@@ -1074,12 +1182,25 @@ let expr depth state =
 let rec flow depth state =
   let* () = guard depth state in
   match tok state with
+  | C_lex.Let -> flow_let depth state
   | C_lex.If -> flow_if depth state
   | C_lex.Use -> use_term depth state
   | _ ->
       let start = state.mcount in
       let* term, state = expr depth state in
       Ok ((C_fun.Ret term, Ret_marks (marks_since start state)), state)
+
+and flow_let depth state =
+  let first = span state in
+  let* result, state = bind (next state) in
+  let* state = take C_lex.F_eq state in
+  let value_start = state.mcount in
+  let* value, state = expr (depth + 1) state in
+  let value_marks = marks_since value_start state in
+  let* state = take C_lex.F_in state in
+  let* (body, body_marks), state = flow (depth + 1) state in
+  let* term, state = put_fun ~first state (C_fun.Let (result, value, body)) in
+  Ok ((term, Let_marks (value_marks, body_marks, top_mark state)), state)
 
 and flow_if depth state =
   let first = span state in
@@ -1096,17 +1217,7 @@ and flow_if depth state =
 and use_term depth state =
   let first = span state in
   let* fn_name, state = name (fun value -> Name value) (next state) in
-  let rec find = function
-    | [] -> None
-    | Mono item :: _ when C_syn.name_equal fn_name item.C_fun.name ->
-        Some (Mono item)
-    | Spec item :: _ when C_syn.name_equal fn_name item.C_spec.name ->
-        Some (Spec item)
-    | Poly item :: _ when C_syn.name_equal fn_name (C_poly.name item) ->
-        Some (Poly item)
-    | _ :: rest -> find rest
-  in
-  let found = find state.defs in
+  let found = form_find fn_name state.defs in
   let* type_args, state =
     match found with
     | Some (Poly _) ->
@@ -2047,7 +2158,8 @@ let parse src =
             span = decl_span body_span input_spans error }
         | Ok _ ->
             Ok { name; sizes; inputs; input_spans;
-              decls = List.rev state.defs; fns; body;
+              decls = List.rev state.defs; fns;
+              form_marks = state.fmarks; body;
               perms = state.perms;
               dtypes = List.rev_map
                 (fun (item : dtype) -> item.code, item.decl) state.data;
@@ -2083,10 +2195,13 @@ let vpeak (program : t) =
       if C_nat.compare item.vinfo.peak peak > 0 then item.vinfo.peak else peak)
     C_nat.zero program.veils
 
+let veil_count (program : t) = List.length program.veils
+let veil_depth program = vpeak program
+
 let res (program : t) (core : C_limit.t) =
   C_limit.max core (C_limit.level (C_nat.to_z (vpeak program)))
 
-let lower (program : t) =
+let lower_base (program : t) =
   match C_decl.binds_in program.sizes program.inputs with
   | Error error -> Error { cause = Decl error;
       span = decl_span program.body_span program.input_spans error }
@@ -2098,13 +2213,116 @@ let lower (program : t) =
         | Error error -> Error { cause = Fun error; span = program.body_span }
       end
 
+let rec term_order term tail =
+  match term with
+  | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Bytes _
+  | C_term.Var _ -> term :: tail
+  | C_term.Vec (_, values) ->
+    List.fold_left
+      (fun out value -> term_order value out)
+      (term :: tail) (List.rev values)
+  | C_term.Let (_, value, body)
+  | C_term.Unpair (value, _, _, body)
+  | C_term.Pair (value, body)
+  | C_term.Add (value, body)
+  | C_term.Sub (value, body)
+  | C_term.Mul (value, body)
+  | C_term.Div (value, body)
+  | C_term.Mod (value, body)
+  | C_term.Eq (_, value, body)
+  | C_term.Cat (value, body)
+  | C_term.Vcat (value, body)
+  | C_term.Step (value, body) ->
+    term_order value (term_order body (term :: tail))
+  | C_term.If (guard, yes, no) ->
+    term_order guard
+      (term_order yes (term_order no (term :: tail)))
+  | C_term.Fst value | C_term.Snd value | C_term.Inl (value, _)
+  | C_term.Inr (_, value) | C_term.Act (_, value) | C_term.Neg value
+  | C_term.Abs value | C_term.Take (_, value) | C_term.Drop (_, value)
+  | C_term.At (_, value) | C_term.Uncons value | C_term.Close value ->
+    term_order value (term :: tail)
+  | C_term.Case (value, _, yes, _, no) ->
+    term_order value
+      (term_order yes (term_order no (term :: tail)))
+  | C_term.Vfold (vector, seed, fold) ->
+    term_order vector
+      (term_order seed (term_order fold.body (term :: tail)))
+
+let marked_failure_span default marks term failure =
+  match failure.C_check.term with
+  | None -> default
+  | Some failed ->
+    let rec find terms marks =
+      match terms, marks with
+      | term :: _, Some at :: _ when term == failed -> at
+      | _ :: terms, _ :: marks -> find terms marks
+      | _ -> default
+    in
+    find (term_order term []) marks
+
+let failure_span program term failure =
+  marked_failure_span program.body_span program.body_marks term failure
+
+let form_mark program name =
+  match find_marks name program.form_marks with
+  | Some marks -> marks
+  | None -> { seq = []; root = Some program.body_span }
+
+let form_error_span program fn error =
+  let marks = form_mark program fn.C_fun.name in
+  let root = Option.value ~default:program.body_span marks.root in
+  match error with
+  | C_fun.Check _ ->
+    let values = fn.arr.caps @ [fn.arr.arg] in
+    begin
+      match C_low.prog values fn.body with
+      | Error _ -> root
+      | Ok lowered ->
+        begin
+          match C_check.check_in_located lowered.inputs lowered.term with
+          | Ok _ -> root
+          | Error failure ->
+            marked_failure_span root marks.seq lowered.term failure
+        end
+    end
+  | _ -> root
+
+let rec locate_form_error program prior = function
+  | [] -> Error prior
+  | fn :: rest ->
+    begin
+      match C_fun.def fn with
+      | Ok () -> locate_form_error program prior rest
+      | Error error ->
+        Error {
+          cause = Fun error;
+          span = form_error_span program fn error;
+        }
+    end
+
+let lower program =
+  match lower_base program with
+  | Error ({ cause = Fun _; _ } as error) ->
+    locate_form_error program error program.fns
+  | result -> result
+
 let compile (program : t) =
   let* program_low = lower program in
-  match C_perm.check program.perms program_low.inputs program_low.term with
-  | Ok info -> Ok (program_low, { info with res = res program info.res })
-  | Error (C_perm.Check error) ->
-      Error { cause = Check error; span = program.body_span }
-  | Error error -> Error { cause = Perm error; span = program.body_span }
+  match C_check.check_in_located program_low.inputs program_low.term with
+  | Error failure ->
+    Error {
+      cause = Check failure.error;
+      span = failure_span program program_low.term failure;
+    }
+  | Ok info ->
+    begin
+      match C_perm.check_info program.perms info with
+      | Ok info -> Ok (program_low, { info with res = res program info.res })
+      | Error (C_perm.Check error) ->
+        Error { cause = Check error; span = program.body_span }
+      | Error error -> Error { cause = Perm error; span = program.body_span }
+    end
 
 let check program =
   let* _, info = compile program in
@@ -2147,6 +2365,7 @@ let text error =
         | Orbit error -> C_orbit.text error
         | Wake error -> C_wake.text error
         | Rift error -> C_rift.text error
+        | Private -> "private name space exhausted"
         | Fhe error -> C_fhe.text error
         | Hfhe error -> C_hfhe.text error
         | Hpar error -> C_hpar.text error

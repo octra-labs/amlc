@@ -117,10 +117,7 @@ let allow set atom =
         | Some perm -> Error (Deny (kind, use, perm))
       end
 
-let check set inputs term =
-  let* info =
-    Result.map_error (fun error -> Check error) (C_check.check_in inputs term)
-  in
+let check_info set (info : C_check.info) =
   let rec walk = function
     | [] -> Ok info
     | atom :: rest ->
@@ -128,6 +125,12 @@ let check set inputs term =
         walk rest
   in
   walk (C_eff.to_list info.eff)
+
+let check set inputs term =
+  let* info =
+    Result.map_error (fun error -> Check error) (C_check.check_in inputs term)
+  in
+  check_info set info
 
 let prog set inputs term =
   let* prog = Result.map_error (fun error -> Low error) (C_low.prog inputs term) in

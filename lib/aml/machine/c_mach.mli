@@ -69,6 +69,8 @@ type t = private {
   code : code;
   loc : loc;
   result : C_emit.lit;
+  veils : int;
+  veil_depth : C_nat.t;
   span : C_lex.span;
 }
 

@@ -252,6 +252,10 @@ let rec term env = function
       let* left = term env left in
       let* right = term env right in
       Ok (C_raw.Eq (raw, left, right))
+  | C_raw.Cmp (rel, left, right) ->
+      let* left = term env left in
+      let* right = term env right in
+      Ok (C_raw.Cmp (rel, left, right))
   | C_raw.Cat (left, right) ->
       let* left = term env left in
       let* right = term env right in
@@ -330,6 +334,12 @@ let rec term env = function
       let* item = bind env item in
       let* body = term env body in
       Ok (C_raw.Orbit (count, seed, item, body))
+  | C_raw.Orbit_to (count, turns, seed, item, body) ->
+      let* turns = term env turns in
+      let* seed = term env seed in
+      let* item = bind env item in
+      let* body = term env body in
+      Ok (C_raw.Orbit_to (count, turns, seed, item, body))
   | C_raw.Wake (count, seed, item, body) ->
       let* seed = term env seed in
       let* item = bind env item in

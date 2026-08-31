@@ -36,6 +36,7 @@ type t =
   | Neg of t
   | Abs of t
   | Eq of C_decl.typ * t * t
+  | Cmp of C_syn.rel * t * t
   | Cat of t * t
   | Take of Z.t * t
   | Drop of Z.t * t
@@ -54,6 +55,7 @@ type t =
   | Braid of C_idx.t * C_decl.typ * t * t * bind * bind * t
   | Loom of C_idx.t * C_decl.typ * bind * t
   | Orbit of C_idx.t * t * bind * t
+  | Orbit_to of C_idx.t * t * t * bind * t
   | Wake of C_idx.t * t * bind * t
   | Rift of C_idx.t * C_idx.t * C_decl.typ * t
 
@@ -75,6 +77,7 @@ type error =
   | Orbit_error of C_orbit.error
   | Wake_error of C_wake.error
   | Rift_error of C_rift.error
+  | Fresh
   | Depth of int * int
   | Nodes of int * int
 

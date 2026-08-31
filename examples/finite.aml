@@ -1,0 +1,4 @@
+program Finite {
+  input once turns: int
+  term orbit[64, turns] from 1 with many state: int => state + 2
+}

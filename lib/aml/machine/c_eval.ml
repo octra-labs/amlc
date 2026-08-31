@@ -40,7 +40,8 @@ type error =
   | Need_bytes
   | Need_vec
   | Need_cap
-  | Index of C_nat.t * C_nat.t
+  | Byte_index of C_nat.t * C_nat.t
+  | Vec_index of C_nat.t * C_nat.t
   | Input of C_term.id
   | Input_type of C_term.id * C_type.t
   | Input_depth of C_term.id * int * int
@@ -508,7 +509,7 @@ let rec eval env term =
         if C_nat.le len total then
           let count = C_nat.to_int len in
           Ok (byte_one len value (String.sub raw 0 count))
-        else Error (Index (len, total))
+        else Error (Byte_index (len, total))
       | _ -> Error Need_bytes
     end
   | C_term.Drop (len, value) ->
@@ -522,7 +523,7 @@ let rec eval env term =
           | Some rest ->
             Ok (byte_one rest value
               (String.sub raw (C_nat.to_int len) (C_nat.to_int rest)))
-          | None -> Error (Index (len, total))
+          | None -> Error (Byte_index (len, total))
         end
       | _ -> Error Need_bytes
     end
@@ -546,7 +547,7 @@ let rec eval env term =
         if C_nat.lt index len then
           Ok { value with value = values.(C_nat.to_int index);
             steps = Z.succ value.steps; work = Z.succ value.work }
-        else Error (Index (index, len))
+        else Error (Vec_index (index, len))
       | _ -> Error Need_vec
     end
   | C_term.Uncons value ->
@@ -565,7 +566,7 @@ let rec eval env term =
         }
       | Vec values ->
         let* len = host_len (Array.length values) in
-        Error (Index (C_nat.zero, len))
+        Error (Vec_index (C_nat.zero, len))
       | _ -> Error Need_vec
     end
   | C_term.Vfold (vector, seed, fold) ->
@@ -710,8 +711,10 @@ let text = function
   | Need_bytes -> "value expected = bytes"
   | Need_vec -> "value expected = vec"
   | Need_cap -> "value expected = cap"
-  | Index (len, total) ->
+  | Byte_index (len, total) ->
     "byte index = " ^ C_nat.text len ^ " size = " ^ C_nat.text total
+  | Vec_index (index, total) ->
+    "vec index = " ^ C_nat.text index ^ " size = " ^ C_nat.text total
   | Input id -> "duplicate input id = " ^ C_nat.text id
   | Input_type (id, expected) ->
     "input id = " ^ C_nat.text id ^ " expected = " ^ C_type.text expected

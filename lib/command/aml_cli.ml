@@ -158,10 +158,12 @@ let check path feed_path =
       end
   end;
   Printf.printf
-    "status = pass command = check program = %s type = %s effects = %s\n"
+    "status = pass command = check program = %s type = %s effects = %s veils = %d veil_depth = %s\n"
     (Octra_vm.C_syn.name_text (Parse.name parsed))
     (Octra_vm.C_type.text info.Octra_vm.C_check.typ)
     (Octra_vm.C_eff.text info.eff)
+    (Parse.veil_count parsed)
+    (Octra_vm.C_nat.text (Parse.veil_depth parsed))
 
 let build_as command input output feed_path =
   if String.equal input output || String.equal input (output ^ ".next") then
@@ -172,8 +174,9 @@ let build_as command input output feed_path =
     with Sys_error reason -> fail command reason
   end;
   Printf.printf
-    "status = pass command = %s bytes = %d sha256 = %s output = %s\n"
-    command (String.length artifact.octb) (sha artifact.octb) output
+    "status = pass command = %s bytes = %d sha256 = %s veils = %d veil_depth = %s output = %s\n"
+    command (String.length artifact.octb) (sha artifact.octb) artifact.veils
+    (Octra_vm.C_nat.text artifact.veil_depth) output
 
 let build input output feed_path = build_as "build" input output feed_path
 
@@ -616,14 +619,17 @@ let test path feed_path =
       || left.code <> right.code
       || not (Octra_vm.C_smap.equal left.map right.map)
       || not (Live.equal left.live right.live)
+      || left.veils <> right.veils
+      || not (Octra_vm.C_nat.equal left.veil_depth right.veil_depth)
       || not (Octra_vm.C_mach.equal left.result right.result) then
     fail "test" "repeated compilation differs";
   let result = run_octb "test" left.octb in
   if not (Octra_vm.C_mach.equal result left.result) then
     fail "test" "VM result differs from the checked machine";
   Printf.printf
-    "status = pass command = test repeats = 2 result = %s sha256 = %s\n"
-    (lit_text result) (sha left.octb)
+    "status = pass command = test repeats = 2 result = %s sha256 = %s veils = %d veil_depth = %s\n"
+    (lit_text result) (sha left.octb) left.veils
+    (Octra_vm.C_nat.text left.veil_depth)
 
 type project_input = {
   image : Pfile.image;

@@ -1,0 +1,12 @@
+program Calls {
+  form add [many left: int] (many right: int) ->[many] int marks {} =
+    left + right
+  form triple [] (many value: int) ->[many] int marks {} =
+    add(value, value) + value
+  form keep [] (once value: int) ->[many] int marks {} = value
+  term
+    let many base: int = 14 in
+    let once value: int = triple(base) in
+    use keep[](value) as many out: int in
+    out
+}

@@ -3,6 +3,10 @@
 
 let magic = "OCTB"
 let version = 1
+let max_consts = 32768
+let max_instrs = 1_048_576
+let max_const_len = 16_777_216
+let max_octb_bytes = 67_108_864
 
 type const =
   | CInt of string
@@ -30,6 +34,7 @@ type image = {
   consts : const_cell array;
   cells : code_cell array;
   text_at : int;
+  state : (string * Contract_vm.storage_kind) list option;
   code : Contract_vm.instr array;
 }
 
@@ -104,32 +109,153 @@ let get_u32le s pos =
   ((Char.code (Bytes.get s (pos + 2))) lsl 16) lor
   ((Char.code (Bytes.get s (pos + 3))) lsl 24)
 
+let state_prefix = "\000OCTRA_STATE_V1\000"
+
+let state_value value =
+  String.starts_with ~prefix:state_prefix value
+
+let state_tag = function
+  | Contract_vm.StorageInt -> 0
+  | Contract_vm.StorageBool -> 1
+  | Contract_vm.StorageString -> 2
+  | Contract_vm.StorageBytes -> 3
+  | Contract_vm.StorageBytes32 -> 4
+  | Contract_vm.StorageU64 -> 5
+  | Contract_vm.StorageU128 -> 6
+  | Contract_vm.StorageU256 -> 7
+  | Contract_vm.StorageAddr -> 8
+
+let state_kind = function
+  | 0 -> Some Contract_vm.StorageInt
+  | 1 -> Some Contract_vm.StorageBool
+  | 2 -> Some Contract_vm.StorageString
+  | 3 -> Some Contract_vm.StorageBytes
+  | 4 -> Some Contract_vm.StorageBytes32
+  | 5 -> Some Contract_vm.StorageU64
+  | 6 -> Some Contract_vm.StorageU128
+  | 7 -> Some Contract_vm.StorageU256
+  | 8 -> Some Contract_vm.StorageAddr
+  | _ -> None
+
+let name_head = function
+  | 'a' .. 'z' | 'A' .. 'Z' | '_' -> true
+  | _ -> false
+
+let name_tail value =
+  name_head value || (value >= '0' && value <= '9')
+
+let state_name name =
+  let size = String.length name in
+  size > 0
+  && size <= 65_535
+  && name_head name.[0]
+  && String.for_all name_tail name
+
+let state_rows rows =
+  let rows = List.sort (fun (left, _) (right, _) -> String.compare left right) rows in
+  let rec check prior = function
+    | [] -> rows
+    | (name, _) :: rest ->
+      if not (state_name name)
+          || Option.fold ~none:false ~some:(fun value -> String.equal value name) prior
+      then invalid_arg "state schema is invalid"
+      else check (Some name) rest
+  in
+  if List.length rows > Program_limits.max_facts then
+    invalid_arg "state schema exceeds capacity";
+  check None rows
+
+let state_raw rows =
+  let rows = state_rows rows in
+  let out = Buffer.create 128 in
+  put_u16le out (List.length rows);
+  List.iter
+    (fun (name, kind) ->
+      put_u16le out (String.length name);
+      Buffer.add_string out name;
+      put_u8 out (state_tag kind))
+    rows;
+  Buffer.contents out
+
+let state_encode rows =
+  let value = state_prefix ^ Base64.encode_exn (state_raw rows) in
+  if String.length value > max_const_len then
+    invalid_arg "state schema exceeds byte capacity";
+  value
+
+let state_decode value =
+  let fail () = failwith "OCTB state schema is invalid" in
+  if not (state_value value) then fail ();
+  let at = String.length state_prefix in
+  let body = String.sub value at (String.length value - at) in
+  let raw = match Base64.decode body with Ok raw -> raw | Error _ -> fail () in
+  if not (String.equal (Base64.encode_exn raw) body) then fail ();
+  let bytes = Bytes.of_string raw in
+  let size = Bytes.length bytes in
+  if size < 2 then fail ();
+  let count = get_u16le bytes 0 in
+  if count > Program_limits.max_facts then fail ();
+  let rec read index at out =
+    if index = count then
+      if at = size then List.rev out else fail ()
+    else if at + 2 > size then fail ()
+    else
+      let name_size = get_u16le bytes at in
+      let name_at = at + 2 in
+      let kind_at = name_at + name_size in
+      if kind_at >= size then fail ();
+      let name = Bytes.sub_string bytes name_at name_size in
+      let kind = match state_kind (get_u8 bytes kind_at) with
+        | Some kind -> kind
+        | None -> fail ()
+      in
+      read (index + 1) (kind_at + 1) ((name, kind) :: out)
+  in
+  let rows = read 0 2 [] in
+  let exact = try state_encode rows with Invalid_argument _ -> fail () in
+  if String.equal exact value then rows else fail ()
+
+let image_state consts =
+  let found =
+    Array.fold_left
+      (fun out cell ->
+        match cell.value with
+        | CStr value when state_value value -> value :: out
+        | _ -> out)
+      []
+      consts
+  in
+  match found with
+  | [] -> None
+  | [value] -> Some (state_decode value)
+  | _ -> failwith "OCTB state schema is repeated"
+
 let op_tag = function
-  | Contract_vm.ADD _ -> 0x00 | Contract_vm.SUB _ -> 0x01
-  | Contract_vm.MUL _ -> 0x02 | Contract_vm.DIV _ -> 0x03
-  | Contract_vm.MOD _ -> 0x04 | Contract_vm.NEG _ -> 0x05
-  | Contract_vm.ABS _ -> 0x06 | Contract_vm.EQ _ -> 0x07
-  | Contract_vm.LT _ -> 0x08 | Contract_vm.GT _ -> 0x09
-  | Contract_vm.NEQ _ -> 0x0A | Contract_vm.LDI _ -> 0x0B
-  | Contract_vm.MOV _ -> 0x0C | Contract_vm.SLOAD _ -> 0x0D
+  | Contract_vm.ADD _ -> 0x00  | Contract_vm.SUB _ -> 0x01
+  | Contract_vm.MUL _ -> 0x02  | Contract_vm.DIV _ -> 0x03
+  | Contract_vm.MOD _ -> 0x04  | Contract_vm.NEG _ -> 0x05
+  | Contract_vm.ABS _ -> 0x06  | Contract_vm.EQ _ -> 0x07
+  | Contract_vm.LT _ -> 0x08   | Contract_vm.GT _ -> 0x09
+  | Contract_vm.NEQ _ -> 0x0A  | Contract_vm.LDI _ -> 0x0B
+  | Contract_vm.MOV _ -> 0x0C  | Contract_vm.SLOAD _ -> 0x0D
   | Contract_vm.SSTORE _ -> 0x0E | Contract_vm.SDEL _ -> 0x0F
   | Contract_vm.SLOADK _ -> 0x10 | Contract_vm.SSTOREK _ -> 0x11
   | Contract_vm.SDELK _ -> 0x54
-  | Contract_vm.MLOAD _ -> 0x12 | Contract_vm.MSTORE _ -> 0x13
-  | Contract_vm.JMP _ -> 0x14 | Contract_vm.JIF _ -> 0x15
-  | Contract_vm.JDEST _ -> 0x16 | Contract_vm.STOP -> 0x17
-  | Contract_vm.REVERT -> 0x18 | Contract_vm.CALLER _ -> 0x19
+  | Contract_vm.MLOAD _ -> 0x12  | Contract_vm.MSTORE _ -> 0x13
+  | Contract_vm.JMP _ -> 0x14    | Contract_vm.JIF _ -> 0x15
+  | Contract_vm.JDEST _ -> 0x16  | Contract_vm.STOP -> 0x17
+  | Contract_vm.REVERT -> 0x18   | Contract_vm.CALLER _ -> 0x19
   | Contract_vm.ORIGIN _ -> 0x1A | Contract_vm.SELF _ -> 0x1B
-  | Contract_vm.EPOCH _ -> 0x1C | Contract_vm.VALUE _ -> 0x1D
+  | Contract_vm.EPOCH _ -> 0x1C  | Contract_vm.VALUE _ -> 0x1D
   | Contract_vm.EPOCH_TIME _ -> 0x7B
   | Contract_vm.BALANCE _ -> 0x1E | Contract_vm.TREEHASH _ -> 0x1F
-  | Contract_vm.NODEID _ -> 0x20 | Contract_vm.XCALL _ -> 0x21
+  | Contract_vm.NODEID _ -> 0x20  | Contract_vm.XCALL _ -> 0x21
   | Contract_vm.TXHASH _ -> 0x7A
-  | Contract_vm.SPAWN _ -> 0x22 | Contract_vm.TRANSFER _ -> 0x23
+  | Contract_vm.SPAWN _ -> 0x22   | Contract_vm.TRANSFER _ -> 0x23
   | Contract_vm.CHECKPOINT -> 0x24 | Contract_vm.ROLLBACK -> 0x25
-  | Contract_vm.COMMIT -> 0x26 | Contract_vm.EMIT _ -> 0x27
-  | Contract_vm.CONCAT _ -> 0x28 | Contract_vm.ASSERT _ -> 0x29
-  | Contract_vm.EFFORT _ -> 0x2A | Contract_vm.NOP -> 0x2B
+  | Contract_vm.COMMIT -> 0x26    | Contract_vm.EMIT _ -> 0x27
+  | Contract_vm.CONCAT _ -> 0x28  | Contract_vm.ASSERT _ -> 0x29
+  | Contract_vm.EFFORT _ -> 0x2A  | Contract_vm.NOP -> 0x2B
   | Contract_vm.STRLEN _ -> 0x2C
   | Contract_vm.CALL_INT _ -> 0x2D
   | Contract_vm.MLOADR _ -> 0x2E
@@ -161,12 +287,12 @@ let op_tag = function
   | Contract_vm.FSTORE _ -> 0x4F
   | Contract_vm.FLOAD _ -> 0x50
   | Contract_vm.FHE_LOAD_PK _ -> 0x30 | Contract_vm.FHE_ADD _ -> 0x31
-  | Contract_vm.FHE_SUB _ -> 0x32 | Contract_vm.FHE_SCALE _ -> 0x33
+  | Contract_vm.FHE_SUB _ -> 0x32     | Contract_vm.FHE_SCALE _ -> 0x33
   | Contract_vm.FHE_ADD_CONST _ -> 0x34 | Contract_vm.FHE_SUB_CONST _ -> 0x35
   | Contract_vm.FHE_VERIFY_ZERO _ -> 0x36 | Contract_vm.FHE_VERIFY_RANGE _ -> 0x37
   | Contract_vm.FHE_VERIFY_BOUND _ -> 0x38 | Contract_vm.FHE_COMMIT _ -> 0x39
   | Contract_vm.FHE_PEDERSEN _ -> 0x3A | Contract_vm.FHE_SER _ -> 0x3B
-  | Contract_vm.FHE_DESER _ -> 0x3C | Contract_vm.FHE_SER_PK _ -> 0x3D
+  | Contract_vm.FHE_DESER _ -> 0x3C   | Contract_vm.FHE_SER_PK _ -> 0x3D
   | Contract_vm.FHE_DESER_PK _ -> 0x3E
   | Contract_vm.GROTH16_VERIFY_BN254 _ -> 0x3F
   | Contract_vm.FHE_MUL _ -> 0x5B
@@ -401,11 +527,16 @@ let encode_instr buf pool instr =
   | Contract_vm.CHECKPOINT | Contract_vm.ROLLBACK
   | Contract_vm.COMMIT | Contract_vm.NOP -> ()
 
-let encode instrs =
+let encode ?state instrs =
   let pool = Pool.create () in
+  Option.iter
+    (fun rows -> ignore (Pool.intern pool (CStr (state_encode rows))))
+    state;
   let instr_buf = Buffer.create 1024 in
   Array.iter (encode_instr instr_buf pool) instrs;
   let consts = Pool.to_list pool in
+  if List.length consts > max_consts then
+    invalid_arg "constant count exceeds capacity";
   let buf = Buffer.create 2048 in
   Buffer.add_string buf magic;
   put_u16le buf version;
@@ -419,11 +550,6 @@ let encode instrs =
   ) consts;
   Buffer.add_buffer buf instr_buf;
   Buffer.contents buf
-
-let max_consts = 32768
-let max_instrs = 1_048_576
-let max_const_len = 16_777_216
-let max_octb_bytes = 67_108_864
 
 let decode_const s pos total_len =
   if pos + 5 > total_len then failwith "OCTB truncated constant header";
@@ -650,6 +776,7 @@ let decode_image raw =
       pos := next;
       { id; at; size = next - at; tag; data; value }
     ) in
+    let state = image_state const_cells in
     let consts = Array.map (fun cell -> cell.value) const_cells in
     let text_at = !pos in
     let cells = Array.make n_instrs { pc = 0; at = 0; size = 0 } in
@@ -672,7 +799,7 @@ let decode_image raw =
       code;
     if !pos <> len then
       failwith (Printf.sprintf "OCTB trailing bytes: %d" (len - !pos));
-    Ok { consts = const_cells; cells; text_at; code }
+    Ok { consts = const_cells; cells; text_at; state; code }
   with Failure msg -> Error (trim_error msg)
     | exn -> Error (trim_error (Printexc.to_string exn))
 

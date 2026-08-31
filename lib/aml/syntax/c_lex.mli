@@ -103,7 +103,10 @@ type token =
   | Colon
   | Comma
   | Eq
+  | Lt
   | Le
+  | Gt
+  | Ge
   | Arrow
   | Thin
   | Bar
@@ -201,7 +204,10 @@ type form =
   | F_colon
   | F_comma
   | F_eq
+  | F_lt
   | F_le
+  | F_gt
+  | F_ge
   | F_arrow
   | F_thin
   | F_bar

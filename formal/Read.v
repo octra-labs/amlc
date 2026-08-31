@@ -95,6 +95,15 @@ Definition pnat (input : list lex) : pout nat :=
   | _ => None
   end.
 
+Definition order_rel (input : list lex) : option (Cmp.rel * list lex) :=
+  match input with
+  | LKey TLt :: rest => Some (Cmp.Lt, rest)
+  | LKey TLe :: rest => Some (Cmp.Le, rest)
+  | LKey TGt :: rest => Some (Cmp.Gt, rest)
+  | LKey TGe :: rest => Some (Cmp.Ge, rest)
+  | _ => None
+  end.
+
 Fixpoint pix_add (fuel : nat) (input : list lex) {struct fuel} : pout ix :=
   match fuel with
   | O => None
@@ -953,6 +962,50 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                   end
               | None => None
               end
+          | Some (raw_count, LKey TComma :: turns) =>
+              match ieval env raw_count,
+                  pexpr fuel' env types data shapes turns with
+              | Some count, Some (rounds, LKey TRbrack :: LKey TFrom :: seed) =>
+                  match pexpr fuel' env types data shapes seed with
+                  | Some (value, LKey TWith :: bind) =>
+                      match pbind fuel' env types bind with
+                      | Some (item, LKey TArrow :: body) =>
+                          match pexpr fuel' env types data shapes body with
+                          | Some (term, tail) =>
+                              match rpick [] [item] [rounds; value; term] with
+                              | Some turn_name =>
+                                  match rpick [turn_name] [item]
+                                      [rounds; value; term] with
+                                  | Some left_name =>
+                                      match rpick [turn_name; left_name] [item]
+                                          [rounds; value; term] with
+                                      | Some right_name =>
+                                          match rpick
+                                              [turn_name; left_name; right_name]
+                                              [item] [rounds; value; term] with
+                                          | Some delta_name =>
+                                              match Orbit.oterm_to left_name
+                                                  right_name delta_name turn_name
+                                                  count rounds value item term with
+                                              | Some result => Some (result, tail)
+                                              | None => None
+                                              end
+                                          | None => None
+                                          end
+                                      | None => None
+                                      end
+                                  | None => None
+                                  end
+                              | None => None
+                              end
+                          | None => None
+                          end
+                      | _ => None
+                      end
+                  | _ => None
+                  end
+              | _, _ => None
+              end
           | _ => None
           end
       | LKey TWake :: LKey TLbrack :: rest =>
@@ -1003,7 +1056,30 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
               end
           | _ => None
           end
-      | _ => padd fuel' env types data shapes input
+      | _ => porder fuel' env types data shapes input
+      end
+  end
+with porder (fuel : nat) (env : ienv) (types : tenv)
+    (data : list dtype) (shapes : list rtype)
+    (input : list lex) {struct fuel} : pout stm :=
+  match fuel with
+  | O => None
+  | S fuel' =>
+      match padd fuel' env types data shapes input with
+      | Some (lhs, rest) =>
+          match order_rel rest with
+          | Some (relation, more) =>
+              match padd fuel' env types data shapes more with
+              | Some (rhs, tail) =>
+                  match rcmp relation lhs rhs with
+                  | Some out => Some (out, tail)
+                  | None => None
+                  end
+              | None => None
+              end
+          | None => Some (lhs, rest)
+          end
+      | None => None
       end
   end
 with padd (fuel : nat) (env : ienv) (types : tenv)
@@ -1587,6 +1663,25 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                   end
               | _ => None
               end
+          | Some (raw_count, LKey TComma :: turns) =>
+              match prexpr fuel' vars types data shapes turns with
+              | Some (rounds, LKey TRbrack :: LKey TFrom :: seed) =>
+                  match prexpr fuel' vars types data shapes seed with
+                  | Some (value, LKey TWith :: bind) =>
+                      match prbind fuel' vars types bind with
+                      | Some (item, LKey TArrow :: body) =>
+                          match prexpr fuel' vars types data shapes body with
+                          | Some (term, tail) =>
+                              Some (ROrbitTo raw_count rounds value item term,
+                                tail)
+                          | None => None
+                          end
+                      | _ => None
+                      end
+                  | _ => None
+                  end
+              | _ => None
+              end
           | _ => None
           end
       | LKey TWake :: LKey TLbrack :: rest =>
@@ -1625,7 +1720,26 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
               end
           | _ => None
           end
-      | _ => pradd fuel' vars types data shapes input
+      | _ => prorder fuel' vars types data shapes input
+      end
+  end
+with prorder (fuel : nat) (vars : list nat) (types : tenv)
+    (data : list dtype) (shapes : list rtype) (input : list lex)
+    {struct fuel} : pout rtm :=
+  match fuel with
+  | O => None
+  | S fuel' =>
+      match pradd fuel' vars types data shapes input with
+      | Some (lhs, rest) =>
+          match order_rel rest with
+          | Some (relation, more) =>
+              match pradd fuel' vars types data shapes more with
+              | Some (rhs, tail) => Some (RCmp relation lhs rhs, tail)
+              | None => None
+              end
+          | None => Some (lhs, rest)
+          end
+      | None => None
       end
   end
 with pradd (fuel : nat) (vars : list nat) (types : tenv)
@@ -2536,6 +2650,21 @@ Fixpoint pflow (fuel : nat) (env : ienv) (types : tenv)
   | O => None
   | S fuel' =>
       match input with
+      | LKey TLet :: rest =>
+          match pbind fuel' env types rest with
+          | Some (result, LKey TEq :: more) =>
+              match pelab fuel' env types data shapes scope more with
+              | Some (value, LKey TIn :: body) =>
+                  match pflow fuel' env types data shapes
+                      (spush scope result) ctx body with
+                  | Some ((next, last_ctx), tail) =>
+                      Some ((FLet result value next, last_ctx), tail)
+                  | None => None
+                  end
+              | _ => None
+              end
+          | _ => None
+          end
       | LKey TIf :: rest =>
           match pelab fuel' env types data shapes scope rest with
           | Some (guard, LKey TThen :: more) =>

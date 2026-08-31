@@ -48,6 +48,7 @@ and t =
   | Neg of t
   | Abs of t
   | Eq of C_decl.typ * t * t
+  | Cmp of C_syn.rel * t * t
   | Cat of t * t
   | Take of Z.t * t
   | Drop of Z.t * t
@@ -66,6 +67,7 @@ and t =
   | Braid of C_idx.t * C_decl.typ * t * t * bind * bind * t
   | Loom of C_idx.t * C_decl.typ * bind * t
   | Orbit of C_idx.t * t * bind * t
+  | Orbit_to of C_idx.t * t * t * bind * t
   | Wake of C_idx.t * t * bind * t
   | Rift of C_idx.t * C_idx.t * C_decl.typ * t
 
@@ -87,6 +89,7 @@ type error =
   | Orbit_error of C_orbit.error
   | Wake_error of C_wake.error
   | Rift_error of C_rift.error
+  | Fresh
   | Depth of int * int
   | Nodes of int * int
 
@@ -153,61 +156,78 @@ let ( let* ) value next =
 let push depth values rest =
   List.fold_left (fun out value -> (depth, value) :: out) rest values
 
+let cost = function
+  | Cmp ((C_syn.Lt | C_syn.Gt), _, _) -> 15
+  | Cmp ((C_syn.Le | C_syn.Ge), _, _) -> 10
+  | _ -> 1
+
+let reach = function
+  | Cmp ((C_syn.Lt | C_syn.Gt), _, _) -> 6
+  | Cmp ((C_syn.Le | C_syn.Ge), _, _) -> 5
+  | _ -> 0
+
 let stat term =
   let rec walk nodes high = function
     | [] -> Ok ()
-    | (depth, _) :: _ when depth > C_rule.local.tm_depth ->
-        Error (Depth (C_rule.local.tm_depth, depth))
-    | _ when nodes >= C_rule.local.tm_nodes ->
-        Error (Nodes (C_rule.local.tm_nodes, nodes + 1))
     | (depth, term) :: rest ->
-        let next = depth + 1 in
-        let rest =
-          match term with
-          | KUnit | KBool _ | KInt _ | KBytes _ | Var _ -> rest
-          | KVec (_, values) -> push next values rest
-          | Let (_, value, body)
-          | Pair (value, body)
-          | Add (value, body)
-          | Sub (value, body)
-          | Mul (value, body)
-          | Div (value, body)
-          | Mod (value, body)
-          | Eq (_, value, body)
-          | Cat (value, body)
-          | Vcat (value, body)
-          | Step (value, body) -> (next, value) :: (next, body) :: rest
-          | If (guard, yes, no) ->
-              (next, guard) :: (next, yes) :: (next, no) :: rest
-          | Unpair (value, _, _, body) ->
-              (next, value) :: (next, body) :: rest
-          | Fst value | Snd value | Inl (value, _) | Inr (_, value)
-          | Act (_, value) | Neg value | Abs value | Take (_, value)
-          | Drop (_, value) | At (_, value)
-          | Uncons value | Close value | Dmake (_, _, value) ->
-              (next, value) :: rest
-          | Case (value, _, yes, _, no) ->
-              (next, value) :: (next, yes) :: (next, no) :: rest
-          | Vfold (vector, seed, item) ->
-              (next, vector) :: (next, seed) :: (next, item.fbody) :: rest
-          | Dcase (_, value, arms) ->
-              let bodies = List.map (fun item -> item.abody) arms in
-              (next, value) :: push next bodies rest
-          | Rmake (_, items) ->
-              push next (List.map (fun item -> item.ivalue) items) rest
-          | Rsplit (_, value, _, body) ->
-              (next, value) :: (next, body) :: rest
-          | Quant (_, source, _, body)
-          | Weave (_, _, source, _, body)
-          | Orbit (_, source, _, body)
-          | Wake (_, source, _, body) ->
-              (next, source) :: (next, body) :: rest
-          | Rift (_, _, _, source) -> (next, source) :: rest
-          | Braid (_, _, left, right, _, _, body) ->
-              (next, left) :: (next, right) :: (next, body) :: rest
-          | Loom (_, _, _, body) -> (next, body) :: rest
-        in
-        walk (nodes + 1) (max high depth) rest
+        let cost = cost term in
+        let reach = reach term in
+        if depth > C_rule.local.tm_depth - reach then
+          Error (Depth (C_rule.local.tm_depth, depth + reach))
+        else if nodes > C_rule.local.tm_nodes - cost then
+          Error (Nodes (C_rule.local.tm_nodes, nodes + cost))
+        else
+          let next = depth + 1 in
+          let rest =
+            match term with
+            | KUnit | KBool _ | KInt _ | KBytes _ | Var _ -> rest
+            | KVec (_, values) -> push next values rest
+            | Let (_, value, body)
+            | Pair (value, body)
+            | Add (value, body)
+            | Sub (value, body)
+            | Mul (value, body)
+            | Div (value, body)
+            | Mod (value, body)
+            | Eq (_, value, body)
+            | Cat (value, body)
+            | Vcat (value, body)
+            | Step (value, body) -> (next, value) :: (next, body) :: rest
+            | Cmp (_, left, right) ->
+                (next, left) :: (next + 1, right) :: rest
+            | If (guard, yes, no) ->
+                (next, guard) :: (next, yes) :: (next, no) :: rest
+            | Unpair (value, _, _, body) ->
+                (next, value) :: (next, body) :: rest
+            | Fst value | Snd value | Inl (value, _) | Inr (_, value)
+            | Act (_, value) | Neg value | Abs value | Take (_, value)
+            | Drop (_, value) | At (_, value)
+            | Uncons value | Close value | Dmake (_, _, value) ->
+                (next, value) :: rest
+            | Case (value, _, yes, _, no) ->
+                (next, value) :: (next, yes) :: (next, no) :: rest
+            | Vfold (vector, seed, item) ->
+                (next, vector) :: (next, seed) :: (next, item.fbody) :: rest
+            | Dcase (_, value, arms) ->
+                let bodies = List.map (fun item -> item.abody) arms in
+                (next, value) :: push next bodies rest
+            | Rmake (_, items) ->
+                push next (List.map (fun item -> item.ivalue) items) rest
+            | Rsplit (_, value, _, body) ->
+                (next, value) :: (next, body) :: rest
+            | Quant (_, source, _, body)
+            | Weave (_, _, source, _, body)
+            | Orbit (_, source, _, body)
+            | Wake (_, source, _, body) ->
+                (next, source) :: (next, body) :: rest
+            | Orbit_to (_, count, source, _, body) ->
+                (next, count) :: (next, source) :: (next, body) :: rest
+            | Rift (_, _, _, source) -> (next, source) :: rest
+            | Braid (_, _, left, right, _, _, body) ->
+                (next, left) :: (next, right) :: (next, body) :: rest
+            | Loom (_, _, _, body) -> (next, body) :: rest
+          in
+          walk (nodes + cost) (max high (depth + reach)) rest
   in
   walk 0 0 [0, term]
 
@@ -333,6 +353,15 @@ and term env trace = function
       let* left, trace = term env trace left in
       let* right, trace = term env trace right in
       node (C_syn.Eq (typ, left, right)) trace
+  | Cmp (rel, left, right) ->
+      let* left, trace = term env trace left in
+      let* right, trace = term env trace right in
+      begin
+        match C_fin.pickn 3 [] [] [left; right] with
+        | Some [left_name; right_name; delta_name] ->
+            node (C_syn.cmp rel left_name right_name delta_name left right) trace
+        | _ -> Error Fresh
+      end
   | Cat (left, right) ->
       let* left, trace = term env trace left in
       let* right, trace = term env trace right in
@@ -433,6 +462,15 @@ and term env trace = function
       let* value = Result.map_error (fun error -> Orbit_error error)
         (C_orbit.make count seed item body) in
       node value trace
+  | Orbit_to (raw_count, turns, seed, item, body) ->
+      let* count = index env raw_count in
+      let* turns, trace = term env trace turns in
+      let* seed, trace = term env trace seed in
+      let* item = bind_in env item in
+      let* body, trace = term env trace body in
+      let* value = Result.map_error (fun error -> Orbit_error error)
+        (C_orbit.upto count turns seed item body) in
+      node value trace
   | Wake (raw_count, seed, item, body) ->
       let* count = index env raw_count in
       let* seed, trace = term env trace seed in
@@ -469,6 +507,7 @@ let text = function
   | Orbit_error error -> C_orbit.text error
   | Wake_error error -> C_wake.text error
   | Rift_error error -> C_rift.text error
+  | Fresh -> "private name space exhausted"
   | Depth (limit, actual) ->
       "raw term depth limit = " ^ string_of_int limit ^ " actual = "
       ^ string_of_int actual

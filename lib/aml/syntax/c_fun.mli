@@ -18,6 +18,7 @@ type fn = {
 
 type t =
   | Ret of C_syn.t
+  | Let of C_syn.bind * C_syn.t * t
   | If of C_syn.t * t * t
   | Call of C_syn.bind * C_syn.name * C_syn.t list * C_syn.t * t
 
@@ -26,6 +27,7 @@ type error =
   | Check of C_check.error
   | Dup of string
   | Fn of string
+  | Direct of string
   | Mode of string
   | Arity of string * int * int
   | Out of string
@@ -43,6 +45,8 @@ val under : arr -> C_limit.t -> arr
 val fn : C_syn.name -> arr -> C_syn.t -> fn
 val def : fn -> (unit, error) result
 val defs : fn list -> (unit, error) result
+val direct : fn -> bool
+val apply : fn -> C_syn.t list -> (C_syn.t, error) result
 val lower : C_syn.bind list -> fn list -> t -> (C_low.prog, error) result
 val check : C_syn.bind list -> fn list -> t -> (C_check.info, error) result
 val text : error -> string

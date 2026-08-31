@@ -66,10 +66,12 @@ type expr =
   | ETernary of expr * expr * expr
 
 type stmt =
+  | SLocated of int * int * stmt
   | SLet of string * typ option * expr
   | SAssign of string * expr
   | SFieldSet of string * expr
   | SIndexSet of string * expr list * expr
+  | SIndexUpdate of string * expr list * binop * expr
   | SReturn of expr option
   | SAssert of expr
   | SRequire of expr * expr
@@ -79,6 +81,7 @@ type stmt =
   | SFor of string * expr * expr * stmt list
   | SFieldCall of string * string * expr list
   | SStoragePathSet of string * expr list * string list * expr
+  | SStoragePathUpdate of string * expr list * string list * binop * expr
   | SIndexFieldSet of string * expr list * string * expr
   | SForEach of string * string * stmt list
   | SMatch of expr * (string * string * stmt list) list

@@ -69,6 +69,8 @@ type t = {
   code : code;
   loc : loc;
   result : C_emit.lit;
+  veils : int;
+  veil_depth : C_nat.t;
   span : C_lex.span;
 }
 
@@ -1005,11 +1007,22 @@ let source_tree parsed term =
   | Ok (value, []) -> Ok value
   | Ok (_, _ :: _) | Error _ -> Error Map
 
-let closed result span = {
-  code = Push (result, Done);
-  loc = LPush (span, LDone);
+let image parsed code loc result = {
+  code;
+  loc;
   result;
-  span;
+  veils = C_parse.veil_count parsed;
+  veil_depth = C_parse.veil_depth parsed;
+  span = C_parse.body_span parsed;
+}
+
+let closed parsed result = {
+  code = Push (result, Done);
+  loc = LPush (C_parse.body_span parsed, LDone);
+  result;
+  veils = C_parse.veil_count parsed;
+  veil_depth = C_parse.veil_depth parsed;
+  span = C_parse.body_span parsed;
 }
 
 let finish ?marks parsed term (info : C_check.info) (out : C_eval.out) =
@@ -1020,7 +1033,7 @@ let finish ?marks parsed term (info : C_check.info) (out : C_eval.out) =
   in
   match lower term with
   | None ->
-    if out.C_eval.plan = [] then Ok (closed result (C_parse.body_span parsed))
+    if out.C_eval.plan = [] then Ok (closed parsed result)
     else Error (Plan out.plan)
   | Some code ->
     begin
@@ -1040,11 +1053,11 @@ let finish ?marks parsed term (info : C_check.info) (out : C_eval.out) =
           match replay_plan code with
           | Some ([actual], plan)
               when equal actual result && plan_equal plan out.plan ->
-            Ok { code; loc; result; span = C_parse.body_span parsed }
+            Ok (image parsed code loc result)
           | _ -> Error Replay
         end
       | Some _ ->
-        if out.plan = [] then Ok (closed result (C_parse.body_span parsed))
+        if out.plan = [] then Ok (closed parsed result)
         else Error (Plan out.plan)
       | None -> Error Term
     end

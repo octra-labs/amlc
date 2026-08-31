@@ -2327,12 +2327,18 @@ let exec_one st op =
     st.undo_stack <- restore st.undo_stack;
     true
   | COMMIT ->
-    let rec discard = function
-      | [] -> []
-      | UndoMarker _ :: rest -> rest
-      | _ :: rest -> discard rest
+    let rec has_marker = function
+      | [] -> false
+      | UndoMarker _ :: _ -> true
+      | UndoWrite _ :: rest -> has_marker rest
     in
-    st.undo_stack <- discard st.undo_stack;
+    let rec merge writes = function
+      | [] -> []
+      | UndoMarker _ :: rest ->
+        if has_marker rest then List.rev_append writes rest else rest
+      | (UndoWrite _ as write) :: rest -> merge (write :: writes) rest
+    in
+    st.undo_stack <- merge [] st.undo_stack;
     true
   | EMIT (event, regs_list) ->
     if List.length !(st.logs) >= 256 then revert st

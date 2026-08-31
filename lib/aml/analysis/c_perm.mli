@@ -31,6 +31,7 @@ val add : set -> Z.t -> t -> (set, error) result
 val set : (Z.t * t) list -> (set, error) result
 val vals : set -> (C_nat.t * t) list
 val cut : set -> Z.t -> t -> (set, error) result
+val check_info : set -> C_check.info -> (C_check.info, error) result
 val check : set -> C_term.bind list -> C_term.t -> (C_check.info, error) result
 val prog :
   set -> C_syn.bind list -> C_syn.t -> (C_low.prog * C_check.info, error) result

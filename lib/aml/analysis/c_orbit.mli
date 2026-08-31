@@ -5,10 +5,13 @@ type error =
   | Low of C_low.error
   | Check of C_check.error
   | Need of C_type.t * C_type.t
+  | Fresh
   | Nodes of Z.t
   | Depth of int
 
 val make : C_nat.t -> C_syn.t -> C_syn.bind -> C_syn.t ->
+  (C_syn.t, error) result
+val upto : C_nat.t -> C_syn.t -> C_syn.t -> C_syn.bind -> C_syn.t ->
   (C_syn.t, error) result
 val lower : C_syn.bind list -> C_nat.t -> C_syn.t -> C_syn.bind ->
   C_syn.t -> (C_low.prog, error) result

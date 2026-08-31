@@ -18,6 +18,7 @@ type fn = {
 
 type t =
   | Ret of C_syn.t
+  | Let of C_syn.bind * C_syn.t * t
   | If of C_syn.t * t * t
   | Call of C_syn.bind * C_syn.name * C_syn.t list * C_syn.t * t
 
@@ -26,6 +27,7 @@ type error =
   | Check of C_check.error
   | Dup of string
   | Fn of string
+  | Direct of string
   | Mode of string
   | Arity of string * int * int
   | Out of string
@@ -208,6 +210,32 @@ let call item caps arg =
     (fun formal actual body -> C_syn.Let (formal, actual, body))
     aliases actuals body)
 
+let data typ =
+  match C_low.typ typ with
+  | Ok typ -> C_type.kind typ = C_type.Data
+  | Error _ -> false
+
+let direct item =
+  C_eff.equal item.arr.eff C_eff.empty
+  && data item.arr.out
+  && List.for_all
+    (fun (value : C_syn.bind) -> value.mul = C_type.Many)
+    (item.arr.caps @ [item.arr.arg])
+
+let apply item actuals =
+  let expected = List.length item.arr.caps + 1 in
+  let actual = List.length actuals in
+  if expected <> actual then
+    Error (Arity (C_syn.name_text item.name, expected, actual))
+  else
+    let rec split caps = function
+      | [arg] -> Ok (List.rev caps, arg)
+      | value :: rest -> split (value :: caps) rest
+      | [] -> Error (Arity (C_syn.name_text item.name, expected, actual))
+    in
+    let* caps, arg = split [] actuals in
+    call item caps arg
+
 let same_type left right =
   match C_low.typ left, C_low.typ right with
   | Ok left, Ok right -> C_type.equal left right
@@ -267,6 +295,9 @@ let shape fns body =
       begin
         match term with
         | Ret term -> walk count (Syn (depth, term) :: rest)
+        | Let (_, value, body) ->
+          let next = depth + 1 in
+          walk (count + 1) (Syn (next, value) :: Fun (next, body) :: rest)
         | If (guard, yes, no) ->
           let next = depth + 1 in
           walk (count + 1)
@@ -306,6 +337,9 @@ let shape fns body =
 
 let rec expand fns = function
   | Ret term -> Ok term
+  | Let (bind, value, body) ->
+    let* body = expand fns body in
+    Ok (C_syn.Let (bind, value, body))
   | If (guard, yes, no) ->
     let* yes = expand fns yes in
     let* no = expand fns no in
@@ -343,6 +377,7 @@ let text = function
   | Check error -> C_check.text error
   | Dup name -> "duplicate name = " ^ name
   | Fn name -> "unknown function = " ^ name
+  | Direct name -> "function requires explicit use = " ^ name
   | Mode name -> "function mode invalid = " ^ name
   | Arity (name, expected, actual) ->
     "function arity name = " ^ name ^ " expected = " ^ string_of_int expected

@@ -30,6 +30,7 @@ type cause =
   | Orbit of C_orbit.error
   | Wake of C_wake.error
   | Rift of C_rift.error
+  | Private
   | Fhe of C_fhe.error
   | Hfhe of C_hfhe.error
   | Hpar of C_hpar.error
@@ -73,6 +74,8 @@ val veil_param : veil -> C_fhe.param
 val veil_host : veil -> C_fhe.host
 val veil_stage : veil -> C_hfhe.info option
 val veil_link : veil -> C_hpar.link option
+val veil_count : t -> int
+val veil_depth : t -> C_nat.t
 val res : t -> C_limit.t -> C_limit.t
 val lower : t -> (C_low.prog, error) result
 val compile : t -> (C_low.prog * C_check.info, error) result

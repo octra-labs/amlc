@@ -92,7 +92,10 @@ Inductive tok : Type :=
 | TColon
 | TComma
 | TEq
+| TLt
 | TLe
+| TGt
+| TGe
 | TArrow
 | TThin
 | TBar
@@ -534,6 +537,19 @@ Fixpoint pexpr (fuel : nat) (input : list tok) {struct fuel} : out :=
                   end
               | _ => None
               end
+          | Some (TComma :: rest) =>
+              match pexpr fuel' rest with
+              | Some (TRbrack :: TFrom :: rest) =>
+                  match pexpr fuel' rest with
+                  | Some (TWith :: rest) =>
+                      match pbind fuel' rest with
+                      | Some (TArrow :: rest) => pexpr fuel' rest
+                      | _ => None
+                      end
+                  | _ => None
+                  end
+              | _ => None
+              end
           | _ => None
           end
       | TWake :: TLbrack :: rest =>
@@ -566,7 +582,18 @@ Fixpoint pexpr (fuel : nat) (input : list tok) {struct fuel} : out :=
               end
           | _ => None
           end
-      | _ => padd fuel' input
+      | _ => porder fuel' input
+      end
+  end
+with porder (fuel : nat) (input : list tok) {struct fuel} : out :=
+  match fuel with
+  | O => None
+  | S fuel' =>
+      match padd fuel' input with
+      | Some (TLt :: rest) | Some (TLe :: rest)
+      | Some (TGt :: rest) | Some (TGe :: rest) => padd fuel' rest
+      | Some rest => Some rest
+      | None => None
       end
   end
 with padd (fuel : nat) (input : list tok) {struct fuel} : out :=
@@ -1037,6 +1064,15 @@ Fixpoint pflow (fuel : nat) (input : list tok) {struct fuel} : out :=
   | O => None
   | S fuel' =>
       match input with
+      | TLet :: rest =>
+          match pbind fuel' rest with
+          | Some (TEq :: rest) =>
+              match pexpr fuel' rest with
+              | Some (TIn :: rest) => pflow fuel' rest
+              | _ => None
+              end
+          | _ => None
+          end
       | TIf :: rest =>
           match pexpr fuel' rest with
           | Some (TThen :: rest) =>

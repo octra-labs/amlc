@@ -4,9 +4,10 @@
 open Oct_lang
 open Oct_lex
 
-exception ParseError of string * int
+exception ParseError of string * int * int
 
-let perr ts msg = raise (ParseError (msg, current_line ts))
+let perr ts msg =
+  raise (ParseError (msg, current_line ts, current_column ts))
 
 let eat_newlines ts =
   let rec go () =
@@ -87,6 +88,8 @@ let parse_params ts =
     | _ ->
       if acc <> [] then expect ts TkComma;
       let name = expect_ident ts in
+      if List.exists (fun param -> String.equal param.p_name name) acc then
+        perr ts ("duplicate parameter name = " ^ name);
       expect ts TkColon;
       let typ = parse_type ts in
       let refine = match peek_token ts with
@@ -313,33 +316,39 @@ let parse_revert ts =
 
 let rec parse_stmt ts =
   skip_stmt_end ts;
-  match peek_token ts with
-  | TkLet -> parse_let ts
-  | TkReturn -> parse_return ts
-  | TkAssert -> parse_assert ts
-  | TkRequire -> parse_require ts
-  | TkEmit -> parse_emit ts
-  | TkIf -> parse_if ts
-  | TkWhile -> parse_while ts
-  | TkFor -> parse_for ts
-  | TkMatch -> parse_match ts
-  | TkRevert -> parse_revert ts
-  | TkSelf -> parse_self_stmt ts
-  | TkIdent "log" ->
-    eat ts;
-    expect ts TkLParen;
-    let rec args acc =
-      match peek_token ts with
-      | TkRParen -> eat ts; List.rev acc
-      | _ ->
-        if acc <> [] then expect ts TkComma;
-        let e = parse_expr ts in
-        args (e :: acc)
-    in
-    SEmit ("Log", args [])
-  | TkIdent _ | TkEpoch | TkEpochTime | TkValue | TkBalance ->
-    parse_ident_stmt ts
-  | _ -> perr ts "expected statement"
+  let token = peek_token ts in
+  let line = current_line ts in
+  let column = current_column ts in
+  let statement =
+    match token with
+    | TkLet -> parse_let ts
+    | TkReturn -> parse_return ts
+    | TkAssert -> parse_assert ts
+    | TkRequire -> parse_require ts
+    | TkEmit -> parse_emit ts
+    | TkIf -> parse_if ts
+    | TkWhile -> parse_while ts
+    | TkFor -> parse_for ts
+    | TkMatch -> parse_match ts
+    | TkRevert -> parse_revert ts
+    | TkSelf -> parse_self_stmt ts
+    | TkIdent "log" ->
+      eat ts;
+      expect ts TkLParen;
+      let rec args acc =
+        match peek_token ts with
+        | TkRParen -> eat ts; List.rev acc
+        | _ ->
+          if acc <> [] then expect ts TkComma;
+          let e = parse_expr ts in
+          args (e :: acc)
+      in
+      SEmit ("Log", args [])
+    | TkIdent _ | TkEpoch | TkEpochTime | TkValue | TkBalance ->
+      parse_ident_stmt ts
+    | _ -> perr ts "expected statement"
+  in
+  SLocated (line, column, statement)
 
 and parse_let ts =
   eat ts;
@@ -348,6 +357,8 @@ and parse_let ts =
     eat ts;
     let rec names acc =
       let n = expect_ident ts in
+      if List.exists (String.equal n) acc then
+        perr ts ("duplicate tuple binding name = " ^ n);
       match peek_token ts with
       | TkComma -> eat ts; names (n :: acc)
       | TkRParen -> eat ts; List.rev (n :: acc)
@@ -492,7 +503,7 @@ and parse_self_stmt ts =
      | TkPlusEq | TkMinusEq | TkStarEq | TkSlashEq ->
        let op = match compound_op ts with Some o -> o | None -> assert false in
        let e = parse_expr ts in
-       SStoragePathSet (field, keys, path, EBinop (op, EStoragePath (field, keys, path), e))
+       SStoragePathUpdate (field, keys, path, op, e)
      | _ ->
        expect ts TkEq;
        let e = parse_expr ts in
@@ -502,7 +513,7 @@ and parse_self_stmt ts =
      | TkPlusEq | TkMinusEq | TkStarEq | TkSlashEq ->
        let op = match compound_op ts with Some o -> o | None -> assert false in
        let e = parse_expr ts in
-       SIndexSet (field, keys, EBinop (op, EIndex (field, keys), e))
+       SIndexUpdate (field, keys, op, e)
      | _ ->
        expect ts TkEq;
        let e = parse_expr ts in
@@ -528,7 +539,7 @@ and parse_self_stmt ts =
         | TkPlusEq | TkMinusEq | TkStarEq | TkSlashEq ->
           let op = match compound_op ts with Some o -> o | None -> assert false in
           let e = parse_expr ts in
-          SStoragePathSet (field, [], path, EBinop (op, EStoragePath (field, [], path), e))
+          SStoragePathUpdate (field, [], path, op, e)
         | _ ->
           expect ts TkEq;
           let e = parse_expr ts in
@@ -578,6 +589,8 @@ let parse_state ts =
     | TkRBrace -> eat ts; List.rev acc
     | _ ->
       let name = expect_ident ts in
+      if List.exists (fun field -> String.equal field.sf_name name) acc then
+        perr ts ("duplicate state field name = " ^ name);
       expect ts TkColon;
       let typ = parse_type ts in
       (match peek_token ts with TkComma -> eat ts | _ -> ());
@@ -593,6 +606,8 @@ let parse_event ts =
     | _ ->
       if acc <> [] then expect ts TkComma;
       let fname = expect_ident ts in
+      if List.exists (fun (name, _, _) -> String.equal name fname) acc then
+        perr ts ("duplicate event field name = " ^ fname);
       expect ts TkColon;
       let indexed = match peek_token ts with
         | TkIdent "indexed" -> eat ts; true
@@ -650,6 +665,8 @@ let parse_struct_def ts =
     | TkRBrace -> eat ts; List.rev acc
     | _ ->
       let fname = expect_ident ts in
+      if List.exists (fun (name, _) -> String.equal name fname) acc then
+        perr ts ("duplicate struct field name = " ^ fname);
       expect ts TkColon;
       let typ = parse_type ts in
       (match peek_token ts with TkComma -> eat ts | _ -> ());
@@ -682,6 +699,8 @@ let parse_enum_def ts =
         (match peek_token ts with TkComma -> eat ts | _ -> ());
       skip_stmt_end ts;
       let v = expect_ident ts in
+      if List.exists (String.equal v) acc then
+        perr ts ("duplicate enum variant name = " ^ v);
       go (v :: acc)
   in
   { en_name = name; en_variants = go [] }
@@ -743,7 +762,11 @@ let rec parse_fn_modifiers ts ~vis ~is_view ~is_pure ~is_payable ~nonreentrant f
   | TkPure -> eat ts; parse_fn_modifiers ts ~vis ~is_view ~is_pure:true ~is_payable ~nonreentrant funcs
   | TkPayable -> eat ts; parse_fn_modifiers ts ~vis ~is_view:false ~is_pure:false ~is_payable:true ~nonreentrant funcs
   | TkIdent "nonreentrant" -> eat ts; parse_fn_modifiers ts ~vis ~is_view ~is_pure ~is_payable ~nonreentrant:true funcs
-  | TkFn -> funcs := parse_function ts is_view is_pure is_payable ~nonreentrant vis :: !funcs
+  | TkFn ->
+    let fn = parse_function ts is_view is_pure is_payable ~nonreentrant vis in
+    if List.exists (fun prior -> String.equal prior.fn_name fn.fn_name) !funcs then
+      perr ts ("duplicate function name = " ^ fn.fn_name);
+    funcs := fn :: !funcs
   | _ -> perr ts "expected fn after modifiers"
 
 let parse_contract ts =
@@ -790,6 +813,7 @@ let parse_contract ts =
   let consts = ref [] in
   let invariants_decl = ref [] in
   let state = ref [] in
+  let state_seen = ref false in
   let events = ref [] in
   let errors = ref [] in
   let ctor = ref None in
@@ -802,10 +826,19 @@ let parse_contract ts =
     | TkEnum -> eat ts; enums := parse_enum_def ts :: !enums; go ()
     | TkConst -> eat ts; consts := parse_const ts :: !consts; go ()
     | TkIdent "invariant" -> invariants_decl := parse_invariant ts :: !invariants_decl; go ()
-    | TkState -> eat ts; state := parse_state ts; go ()
+    | TkState ->
+      eat ts;
+      if !state_seen then perr ts "duplicate state declaration";
+      state_seen := true;
+      state := parse_state ts;
+      go ()
     | TkError -> eat ts; errors := parse_error_def ts :: !errors; go ()
     | TkEvent -> eat ts; events := parse_event ts :: !events; go ()
-    | TkConstructor -> eat ts; ctor := Some (parse_constructor ts); go ()
+    | TkConstructor ->
+      eat ts;
+      if Option.is_some !ctor then perr ts "duplicate constructor";
+      ctor := Some (parse_constructor ts);
+      go ()
     | TkPublic | TkPrivate | TkInternal ->
       let vis = match peek_token ts with
         | TkPublic -> eat ts; Public
@@ -830,7 +863,12 @@ let parse_contract ts =
       eat ts;
       parse_fn_modifiers ts ~vis:Public ~is_view:false ~is_pure:false ~is_payable:false ~nonreentrant:true funcs;
       go ()
-    | TkFn -> funcs := parse_function ts false false false Public :: !funcs; go ()
+    | TkFn ->
+      let fn = parse_function ts false false false Public in
+      if List.exists (fun prior -> String.equal prior.fn_name fn.fn_name) !funcs then
+        perr ts ("duplicate function name = " ^ fn.fn_name);
+      funcs := fn :: !funcs;
+      go ()
     | _ -> perr ts "expected struct, enum, const, state, event, constructor, fn, or }"
   in
   go ();
@@ -851,7 +889,12 @@ let parse_contract ts =
 
 let syntax source =
   let ts = make_stream source in
-  parse_contract ts
+  let parsed = parse_contract ts in
+  begin
+    match peek_token ts with
+    | TkEOF -> parsed
+    | _ -> perr ts "trailing source after declaration"
+  end
 
 let parse ?(resolve_import = fun _names _path -> None) source =
   let ct = syntax source in

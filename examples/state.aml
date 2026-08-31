@@ -1,0 +1,18 @@
+program State {
+  state {
+    total: int
+  }
+
+  public view fn read(): int {
+    return self.total
+  }
+
+  public view fn next(): int {
+    return self.total + 1
+  }
+
+  public fn write(amount: int): int {
+    self.total = amount
+    return self.total
+  }
+}

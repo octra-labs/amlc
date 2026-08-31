@@ -26,6 +26,8 @@ type t = {
   code : op array;
   octb : string;
   result : C_emit.lit;
+  veils : int;
+  veil_depth : C_nat.t;
   map : C_smap.t;
   live : C_live.t;
 }
@@ -1083,7 +1085,16 @@ let finish (image : C_mach.t) =
     | Error error -> Error (Lmap error)
   in
   let* octb = encode code in
-  Ok { plan = image.code; code; octb; result = image.result; map; live }
+  Ok {
+    plan = image.code;
+    code;
+    octb;
+    result = image.result;
+    veils = image.veils;
+    veil_depth = image.veil_depth;
+    map;
+    live;
+  }
 
 let compile source =
   let* image =

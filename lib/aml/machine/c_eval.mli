@@ -40,7 +40,8 @@ type error =
   | Need_bytes
   | Need_vec
   | Need_cap
-  | Index of C_nat.t * C_nat.t
+  | Byte_index of C_nat.t * C_nat.t
+  | Vec_index of C_nat.t * C_nat.t
   | Input of C_term.id
   | Input_type of C_term.id * C_type.t
   | Input_depth of C_term.id * int * int

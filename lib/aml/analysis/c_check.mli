@@ -8,7 +8,8 @@ type error =
   | Shadow of C_term.id
   | Need of C_type.t * C_type.t
   | Bad of C_type.t
-  | Index of C_nat.t * C_nat.t
+  | Byte_index of C_nat.t * C_nat.t
+  | Vec_index of C_nat.t * C_nat.t
   | Size
   | Mode of C_term.id * C_type.mul
   | Split of C_term.id list
@@ -33,6 +34,11 @@ type selected = private {
   info : info;
 }
 
+type failure = {
+  error : error;
+  term : C_term.t option;
+}
+
 type rule_error =
   | Rule of C_rule.error
   | Check of error
@@ -42,6 +48,8 @@ val max_nodes : int
 val max_inputs : int
 val check : C_term.t -> (info, error) result
 val check_in : C_term.bind list -> C_term.t -> (info, error) result
+val check_in_located :
+  C_term.bind list -> C_term.t -> (info, failure) result
 val check_at : C_rule.schedule -> epoch:Z.t -> C_term.t -> (selected, rule_error) result
 val check_in_at :
   C_rule.schedule -> epoch:Z.t -> C_term.bind list -> C_term.t ->

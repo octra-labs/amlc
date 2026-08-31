@@ -9,6 +9,7 @@ source complete.aml
 source arithmetic.aml
 source forms.aml
 source orbit.aml
+source finite.aml
 source shape.aml
 source feed.aml
 source feed_structure.aml
@@ -21,6 +22,7 @@ root complete.aml complete
 root arithmetic.aml arithmetic
 root forms.aml forms
 root orbit.aml orbit
+root finite.aml finite finite.val
 root shape.aml shape
 root feed.aml feed feed.val
 root feed_structure.aml feed-structure feed_structure.val

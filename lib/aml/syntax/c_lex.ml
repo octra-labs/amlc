@@ -103,7 +103,10 @@ type token =
   | Colon
   | Comma
   | Eq
+  | Lt
   | Le
+  | Gt
+  | Ge
   | Arrow
   | Thin
   | Bar
@@ -201,7 +204,10 @@ type form =
   | F_colon
   | F_comma
   | F_eq
+  | F_lt
   | F_le
+  | F_gt
+  | F_ge
   | F_arrow
   | F_thin
   | F_bar
@@ -467,7 +473,10 @@ let form = function
   | Colon -> F_colon
   | Comma -> F_comma
   | Eq -> F_eq
+  | Lt -> F_lt
   | Le -> F_le
+  | Gt -> F_gt
+  | Ge -> F_ge
   | Arrow -> F_arrow
   | Thin -> F_thin
   | Bar -> F_bar
@@ -565,7 +574,10 @@ let form_text = function
   | F_colon -> ":"
   | F_comma -> ","
   | F_eq -> "="
+  | F_lt -> "<"
   | F_le -> "<="
+  | F_gt -> ">"
+  | F_ge -> ">="
   | F_arrow -> "=>"
   | F_thin -> "->"
   | F_bar -> "|"
@@ -665,6 +677,10 @@ let punct state =
   | Some '%' -> Ok (next state, first, Percent, 0)
   | Some '<' when char_at state 1 = Some '=' ->
       Ok (next (next state), first, Le, 0)
+  | Some '<' -> Ok (next state, first, Lt, 0)
+  | Some '>' when char_at state 1 = Some '=' ->
+      Ok (next (next state), first, Ge, 0)
+  | Some '>' -> Ok (next state, first, Gt, 0)
   | Some '=' when char_at state 1 = Some '>' ->
       Ok (next (next state), first, Arrow, 0)
   | Some '=' -> Ok (next state, first, Eq, 0)

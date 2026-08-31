@@ -19,6 +19,8 @@ type typ =
   | TPair of typ * typ
   | TSum of typ * typ
 
+type rel = Lt | Le | Gt | Ge
+
 type atom =
   | ARead of Z.t
   | AWrite of Z.t
@@ -75,4 +77,5 @@ and fold = {
 
 val bind : name -> C_type.mul -> typ -> bind
 val fold : bind -> bind -> t -> fold
+val cmp : rel -> name -> name -> name -> t -> t -> t
 val has : name -> t -> bool

@@ -321,8 +321,16 @@ Definition punct (src : string) : option pcut :=
       else if byte value 60 then
         match rest with
         | String next tail =>
-            if byte next 61 then pair value next tail TLe else None
-        | EmptyString => None
+            if byte next 61 then pair value next tail TLe
+            else single value rest TLt Stay
+        | EmptyString => single value rest TLt Stay
+        end
+      else if byte value 62 then
+        match rest with
+        | String next tail =>
+            if byte next 61 then pair value next tail TGe
+            else single value rest TGt Stay
+        | EmptyString => single value rest TGt Stay
         end
       else if byte value 61 then
         match rest with

@@ -167,12 +167,15 @@ let storage_kind (ast : Oct_lang.contract) = function
   | Oct_lang.TVoid -> None
 
 let storage_kinds (ast : Oct_lang.contract) =
-  List.filter_map
-    (fun field ->
-      Option.map
-        (fun kind -> field.Oct_lang.sf_name, kind)
-        (storage_kind ast field.sf_typ))
-    ast.state
+  match ast.declaration with
+  | Oct_lang.ProgramDecl ->
+    List.filter_map
+      (fun field ->
+        Option.map
+          (fun kind -> field.Oct_lang.sf_name, kind)
+          (storage_kind ast field.sf_typ))
+      ast.state
+  | Oct_lang.ContractDecl | Oct_lang.InterfaceDecl -> []
 
 let error_text = function
   | Method_absent name -> Printf.sprintf "method is absent method = %s" name

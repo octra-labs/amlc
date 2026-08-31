@@ -42,6 +42,9 @@ let rec expr env = function
 let rec block env body = fst (statements env body)
 
 and statement env = function
+  | SLocated (line, column, value) ->
+    let resolved, next = statement env value in
+    SLocated (line, column, resolved), next
   | SLet (name, typ, value) ->
     SLet (name, typ, expr env value), add name env
   | SLetTuple (names, value) ->
@@ -50,6 +53,8 @@ and statement env = function
   | SFieldSet (name, value) -> SFieldSet (name, expr env value), env
   | SIndexSet (name, keys, value) ->
     SIndexSet (name, List.map (expr env) keys, expr env value), env
+  | SIndexUpdate (name, keys, op, value) ->
+    SIndexUpdate (name, List.map (expr env) keys, op, expr env value), env
   | SReturn value -> SReturn (Option.map (expr env) value), env
   | SAssert value -> SAssert (expr env value), env
   | SRequire (cond, message) ->
@@ -67,6 +72,9 @@ and statement env = function
   | SStoragePathSet (name, keys, path, value) ->
     SStoragePathSet
       (name, List.map (expr env) keys, path, expr env value), env
+  | SStoragePathUpdate (name, keys, path, op, value) ->
+    SStoragePathUpdate
+      (name, List.map (expr env) keys, path, op, expr env value), env
   | SIndexFieldSet (name, keys, field, value) ->
     SIndexFieldSet
       (name, List.map (expr env) keys, field, expr env value), env

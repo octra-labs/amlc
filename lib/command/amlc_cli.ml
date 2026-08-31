@@ -68,37 +68,17 @@ let source_offset raw line col =
   in
   min (String.length raw) (walk 0 1)
 
-let program_mark raw =
-  match Octra_vm.C_lex.scan raw with
-  | Error _ -> false
-  | Ok items ->
-    Array.exists
-      (fun (item : Octra_vm.C_lex.item) ->
-        match item.tok with
-        | Octra_vm.C_lex.Size
-        | Octra_vm.C_lex.Measure
-        | Octra_vm.C_lex.Law
-        | Octra_vm.C_lex.Input
-        | Octra_vm.C_lex.Term
-        | Octra_vm.C_lex.Form
-        | Octra_vm.C_lex.Kind
-        | Octra_vm.C_lex.Marks
-        | Octra_vm.C_lex.Under
-        | Octra_vm.C_lex.Permit
-        | Octra_vm.C_lex.Shape -> true
-        | _ -> false)
-      items
-
 let source_form path =
   let raw = source path in
-  match Octra_vm.C_parse.parse raw, Contract_cli.probe_source raw with
-  | Ok _, _ -> Program_source
-  | Error _, Contract_cli.Accept -> Contract_source
-  | Error current, Contract_cli.Refuse (line, col) ->
-    if program_mark raw then Program_source
-    else if source_offset raw line col > current.span.first.off then
-      Contract_source
-    else Program_source
+  if Contract_cli.legacy_source raw then Contract_source
+  else
+    match Octra_vm.C_parse.parse raw, Contract_cli.probe_source raw with
+    | Ok _, _ -> Program_source
+    | Error _, Contract_cli.Accept -> Contract_source
+    | Error current, Contract_cli.Refuse (line, col) ->
+      if source_offset raw line col > current.span.first.off then
+        Contract_source
+      else Program_source
 
 let choose command wanted names =
   let present name = List.exists (String.equal name) names in

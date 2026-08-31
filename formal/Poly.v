@@ -235,6 +235,11 @@ Fixpoint rsub (env : penv) (term : rtm) : option rtm :=
       | Some out, Some lout, Some rout => Some (REq out lout rout)
       | _, _, _ => None
       end
+  | RCmp relation lhs rhs =>
+      match rsub env lhs, rsub env rhs with
+      | Some lout, Some rout => Some (RCmp relation lout rout)
+      | _, _ => None
+      end
   | RCat lhs rhs =>
       match rsub env lhs, rsub env rhs with
       | Some lout, Some rout => Some (RCat lout rout)
@@ -316,6 +321,12 @@ Fixpoint rsub (env : penv) (term : rtm) : option rtm :=
       match rsub env seed, rbsub env item, rsub env body with
       | Some value, Some bind, Some term => Some (ROrbit count value bind term)
       | _, _, _ => None
+      end
+  | ROrbitTo count turns seed item body =>
+      match rsub env turns, rsub env seed, rbsub env item, rsub env body with
+      | Some rounds, Some value, Some bind, Some term =>
+          Some (ROrbitTo count rounds value bind term)
+      | _, _, _, _ => None
       end
   | RWake count seed item body =>
       match rsub env seed, rbsub env item, rsub env body with

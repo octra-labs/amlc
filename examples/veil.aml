@@ -1,0 +1,13 @@
+program Veil {
+  size d = 2
+  veil Budget key[1] depth[d] under {
+    add[1], mul[7], renew[20]
+  } {
+    param[10] room[1]
+    param[20] room[2]
+    input x: enc[1,d]
+    input y: enc[1,d]
+    term renew((x * y) * trim[1](x))
+  }
+  term 0
+}
