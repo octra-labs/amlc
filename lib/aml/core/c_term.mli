@@ -9,6 +9,8 @@ type bind = {
   typ : C_type.t;
 }
 
+type rel = Lt | Le | Gt | Ge
+
 type t =
   | Unit
   | Bool of bool
@@ -34,6 +36,7 @@ type t =
   | Neg of t
   | Abs of t
   | Eq of C_type.t * t * t
+  | Cmp of rel * t * t
   | Cat of t * t
   | Take of C_nat.t * t
   | Drop of C_nat.t * t

@@ -186,6 +186,32 @@ Inductive atom : Type :=
 | AFail : nat -> atom
 | AClose : nat -> atom.
 
+Inductive origin : Type :=
+| ODirect : origin
+| OHeld : nat -> nat -> origin.
+
+Record action : Type := Action {
+  aa : atom;
+  av : value;
+  ao : origin
+}.
+
+Definition atoms (actions : list action) : list atom := map aa actions.
+
+Inductive rel : Type :=
+| RLt : rel
+| RLe : rel
+| RGt : rel
+| RGe : rel.
+
+Definition relb (kind : rel) (left right : Z) : bool :=
+  match kind with
+  | RLt => Z.ltb left right
+  | RLe => Z.leb left right
+  | RGt => Z.ltb right left
+  | RGe => Z.leb right left
+  end.
+
 Definition within (plan row : list atom) : Prop :=
   Forall (fun action => In action row) plan.
 
@@ -218,6 +244,7 @@ Inductive tm : Type :=
 | Neg : tm -> tm
 | Abs : tm -> tm
 | Eq : ty -> tm -> tm -> tm
+| Cmp : rel -> tm -> tm -> tm
 | Cat : tm -> tm -> tm
 | Take : nat -> tm -> tm
 | Drop : nat -> tm -> tm
@@ -486,6 +513,11 @@ Inductive check : ctx -> tm -> ty -> list atom -> res -> ctx -> Prop :=
     check mid right typ rowr costr next ->
     check gamma (Eq typ left right) TBool (rowl ++ rowr)
       (radd (rsucc (radd costl costr)) (reffort (eqw typ))) next
+| CCmp : forall gamma kind left right rowl rowr costl costr mid next,
+    check gamma left TInt rowl costl mid ->
+    check mid right TInt rowr costr next ->
+    check gamma (Cmp kind left right) TBool (rowl ++ rowr)
+      (rsucc (radd costl costr)) next
 | CCat : forall gamma left right ln rn rowl rowr costl costr mid next,
     check gamma left (TBytes ln) rowl costl mid ->
     check mid right (TBytes rn) rowr costr next ->
@@ -594,6 +626,7 @@ Inductive closev : bind -> env -> env -> Prop :=
 Record run : Type := Run {
   rv : value;
   rp : list atom;
+  ra : list action;
   rs : nat;
   rw : nat
 }.
@@ -630,19 +663,24 @@ Ltac rnia :=
     | unfold used, rzero, rone, rscan, reffort, radd, rsucc, rmax, rscale in *;
       simpl in *; nia ].
 
-Definition one (value : value) : run := Run value [] 1 1.
+Definition one (value : value) : run := Run value [] [] 1 1.
 
 Definition seq (left right : run) (value : value) : run :=
-  Run value (rp left ++ rp right) (S (rs left + rs right))
+  Run value (rp left ++ rp right) (ra left ++ ra right)
+    (S (rs left + rs right))
     (S (rw left + rw right)).
 
 Definition eqrun (typ : ty) (left right : run) : run :=
   Run (VBool (value_eqb (rv left) (rv right))) (rp left ++ rp right)
+    (ra left ++ ra right)
     (S (rs left + rs right))
     (cmpw typ (rv left) (rv right) + S (rw left + rw right)).
 
-Definition add_plan (out : run) (action : atom) : run :=
-  Run (rv out) (rp out ++ [action]) (S (rs out)) (S (rw out)).
+Definition add_action (out : run) (atom : atom) (payload : value)
+    (origin : origin) : run :=
+  Run (rv out) (atom :: rp out)
+    (Action atom payload origin :: ra out)
+    (S (rs out)) (S (rw out)).
 
 Fixpoint takef (id : nat) (sigma : env) : option (value * env) :=
   match sigma with
@@ -708,7 +746,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
       | K value _ => keep fuel (one value) sigma
       | Bytes bytes =>
           keep fuel
-            (Run (VBytes bytes) [] (S (length bytes)) (S (length bytes))) sigma
+            (Run (VBytes bytes) [] [] (S (length bytes)) (S (length bytes))) sigma
       | Vnil _ => keep fuel (one (VVec [])) sigma
       | Var id =>
           match takef id sigma with
@@ -721,7 +759,8 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
               match run_fuel rest sigma body with
               | Done out next =>
                   keep fuel
-                    (Run (rv out) (rp out) (S (rs out)) (S (rw out))) next
+                    (Run (rv out) (rp out) (ra out)
+                      (S (rs out)) (S (rw out))) next
               | Rejected reason => Rejected reason
               | OutOfFuel => OutOfFuel
               | Stuck => Stuck
@@ -823,7 +862,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
               match rv pair_out with
               | VPair first _ =>
                   keep fuel
-                    (Run first (rp pair_out) (S (rs pair_out))
+                    (Run first (rp pair_out) (ra pair_out) (S (rs pair_out))
                       (S (rw pair_out))) next
               | _ => Stuck
               end
@@ -837,7 +876,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
               match rv pair_out with
               | VPair _ second =>
                   keep fuel
-                    (Run second (rp pair_out) (S (rs pair_out))
+                    (Run second (rp pair_out) (ra pair_out) (S (rs pair_out))
                       (S (rw pair_out))) next
               | _ => Stuck
               end
@@ -849,7 +888,8 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
           match run_fuel rest sigma value with
           | Done out next =>
               keep fuel
-                (Run (VInl (rv out)) (rp out) (S (rs out)) (S (rw out))) next
+                (Run (VInl (rv out)) (rp out) (ra out)
+                  (S (rs out)) (S (rw out))) next
           | Rejected reason => Rejected reason
           | OutOfFuel => OutOfFuel
           | Stuck => Stuck
@@ -858,7 +898,8 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
           match run_fuel rest sigma value with
           | Done out next =>
               keep fuel
-                (Run (VInr (rv out)) (rp out) (S (rs out)) (S (rw out))) next
+                (Run (VInr (rv out)) (rp out) (ra out)
+                  (S (rs out)) (S (rw out))) next
           | Rejected reason => Rejected reason
           | OutOfFuel => OutOfFuel
           | Stuck => Stuck
@@ -909,7 +950,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
           match run_fuel rest sigma body with
           | Done out next =>
               keep fuel
-                (Run (rv out) (action :: rp out) (S (rs out)) (S (rw out))) next
+                (add_action out action (rv out) ODirect) next
           | Rejected reason => Rejected reason
           | OutOfFuel => OutOfFuel
           | Stuck => Stuck
@@ -1015,6 +1056,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
               | VInt number =>
                   keep fuel
                     (Run (VInt (Z.opp number)) (rp out)
+                      (ra out)
                       (S (rs out)) (S (rw out))) next
               | _ => Stuck
               end
@@ -1029,6 +1071,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
               | VInt number =>
                   keep fuel
                     (Run (VInt (Z.abs number)) (rp out)
+                      (ra out)
                       (S (rs out)) (S (rw out))) next
               | _ => Stuck
               end
@@ -1050,6 +1093,26 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
           | OutOfFuel => OutOfFuel
           | Stuck => Stuck
           end
+      | Cmp kind x y =>
+          match run_fuel rest sigma x with
+          | Done left_out mid =>
+              match run_fuel rest mid y with
+              | Done right_out next =>
+                  match rv left_out, rv right_out with
+                  | VInt lhs, VInt rhs =>
+                      keep fuel
+                        (seq left_out right_out (VBool (relb kind lhs rhs)))
+                        next
+                  | _, _ => Stuck
+                  end
+              | Rejected reason => Rejected reason
+              | OutOfFuel => OutOfFuel
+              | Stuck => Stuck
+              end
+          | Rejected reason => Rejected reason
+          | OutOfFuel => OutOfFuel
+          | Stuck => Stuck
+          end
       | Cat x y =>
           match run_fuel rest sigma x with
           | Done left_out mid =>
@@ -1059,6 +1122,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
                   | VBytes x, VBytes y =>
                       keep fuel
                         (Run (VBytes (x ++ y)) (rp left_out ++ rp right_out)
+                          (ra left_out ++ ra right_out)
                           (S (rs left_out + rs right_out + length x + length y))
                           (S (rw left_out + rw right_out + length x + length y))) next
                   | _, _ => Stuck
@@ -1079,6 +1143,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
                   if Nat.leb len (length bytes) then
                     keep fuel
                       (Run (VBytes (firstn len bytes)) (rp out)
+                        (ra out)
                         (S (rs out + len)) (S (rw out + len))) next
                   else Stuck
               | _ => Stuck
@@ -1095,6 +1160,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
                   if Nat.leb len (length bytes) then
                     keep fuel
                       (Run (VBytes (skipn len bytes)) (rp out)
+                        (ra out)
                         (S (rs out + length bytes - len))
                         (S (rw out + length bytes - len))) next
                   else Stuck
@@ -1133,6 +1199,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
                   | VVec x, VVec y =>
                       keep fuel
                         (Run (VVec (x ++ y)) (rp left_out ++ rp right_out)
+                          (ra left_out ++ ra right_out)
                           (S (rs left_out + rs right_out + length x + length y))
                           (S (rw left_out + rw right_out + length x + length y))) next
                   | _, _ => Stuck
@@ -1153,7 +1220,8 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
                   match nth_error values index with
                   | Some item =>
                       keep fuel
-                        (Run item (rp out) (S (rs out)) (S (rw out))) next
+                        (Run item (rp out) (ra out)
+                          (S (rs out)) (S (rw out))) next
                   | None => Stuck
                   end
               | _ => Stuck
@@ -1169,6 +1237,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
               | VVec (first :: tail) =>
                   keep fuel
                     (Run (VPair first (VVec tail)) (rp out)
+                      (ra out)
                       (S (rs out + length tail))
                       (S (rw out + length tail))) next
               | _ => Stuck
@@ -1190,6 +1259,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
                             keep fuel
                               (Run (rv fold_out)
                                 (rp vector_out ++ rp seed_out ++ rp fold_out)
+                                (ra vector_out ++ ra seed_out ++ ra fold_out)
                                 (S (rs vector_out + rs seed_out + rs fold_out))
                                 (S (rw vector_out + rw seed_out + rw fold_out))) next
                         | Rejected reason => Rejected reason
@@ -1217,6 +1287,8 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
                       keep fuel
                         (Run (VPair (VCap kind id) (rv value_out))
                           (rp cap_out ++ rp value_out ++ [AWrite kind])
+                          (ra cap_out ++ ra value_out ++
+                            [Action (AWrite kind) (rv value_out) (OHeld kind id)])
                           (S (rs cap_out + rs value_out))
                           (S (rw cap_out + rw value_out))) next
                   | _ => Stuck
@@ -1233,9 +1305,10 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
           match run_fuel rest sigma cap with
           | Done out next =>
               match rv out with
-              | VCap kind _ =>
+              | VCap kind id =>
                   keep fuel
                     (Run VUnit (rp out ++ [AClose kind])
+                      (ra out ++ [Action (AClose kind) VUnit (OHeld kind id)])
                       (S (rs out)) (S (rw out))) next
               | _ => Stuck
               end
@@ -1249,7 +1322,7 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
 with fold_fuel (fuel : nat) (sigma : env) (item state : bind) (body : tm)
     (values : list value) (seed : value) {struct fuel} : ans :=
   match values with
-  | [] => Done (Run seed [] 0 0) sigma
+  | [] => Done (Run seed [] [] 0 0) sigma
   | first :: rest =>
       match fuel with
       | 0 => OutOfFuel
@@ -1268,6 +1341,7 @@ with fold_fuel (fuel : nat) (sigma : env) (item state : bind) (body : tm)
                               | Done tail next =>
                                   keep fuel
                                     (Run (rv tail) (rp head ++ rp tail)
+                                      (ra head ++ ra tail)
                                       (S (rs head + rs tail))
                                       (S (rw head + rw tail))) next
                               | Rejected reason => Rejected reason
@@ -1294,7 +1368,7 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
     evalR sigma (K value typ) (one value) sigma
 | EBytes : forall sigma bytes,
     evalR sigma (Bytes bytes)
-      (Run (VBytes bytes) [] (S (length bytes)) (S (length bytes))) sigma
+      (Run (VBytes bytes) [] [] (S (length bytes)) (S (length bytes))) sigma
 | EVnil : forall sigma elem,
     evalR sigma (Vnil elem) (one (VVec [])) sigma
 | EVar : forall sigma id value next,
@@ -1303,7 +1377,7 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
 | ELet0 : forall sigma id typ value body out next,
     evalR sigma body out next ->
     evalR sigma (Let (Bind id M0 typ) value body)
-      (Run (rv out) (rp out) (S (rs out)) (S (rw out))) next
+      (Run (rv out) (rp out) (ra out) (S (rs out)) (S (rw out))) next
 | ELet1 : forall sigma id typ value body value_out mid opened body_out prior next,
     evalR sigma value value_out mid ->
     openv (Bind id M1 typ) (rv value_out) mid opened ->
@@ -1349,20 +1423,24 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
     evalR sigma pair pair_out next ->
     rv pair_out = VPair left right ->
     evalR sigma (Fst pair)
-      (Run left (rp pair_out) (S (rs pair_out)) (S (rw pair_out))) next
+      (Run left (rp pair_out) (ra pair_out)
+        (S (rs pair_out)) (S (rw pair_out))) next
 | ESnd : forall sigma pair pair_out next left right,
     evalR sigma pair pair_out next ->
     rv pair_out = VPair left right ->
     evalR sigma (Snd pair)
-      (Run right (rp pair_out) (S (rs pair_out)) (S (rw pair_out))) next
+      (Run right (rp pair_out) (ra pair_out)
+        (S (rs pair_out)) (S (rw pair_out))) next
 | EInl : forall sigma value right out next,
     evalR sigma value out next ->
     evalR sigma (Inl value right)
-      (Run (VInl (rv out)) (rp out) (S (rs out)) (S (rw out))) next
+      (Run (VInl (rv out)) (rp out) (ra out)
+        (S (rs out)) (S (rw out))) next
 | EInr : forall sigma left value out next,
     evalR sigma value out next ->
     evalR sigma (Inr left value)
-      (Run (VInr (rv out)) (rp out) (S (rs out)) (S (rw out))) next
+      (Run (VInr (rv out)) (rp out) (ra out)
+        (S (rs out)) (S (rw out))) next
 | ECaseL : forall sigma value left yes right no value_out mid payload opened body_out prior next,
     evalR sigma value value_out mid ->
     rv value_out = VInl payload ->
@@ -1382,7 +1460,7 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
 | EAct : forall sigma action body out next,
     evalR sigma body out next ->
     evalR sigma (Act action body)
-      (Run (rv out) (action :: rp out) (S (rs out)) (S (rw out))) next
+      (add_action out action (rv out) ODirect) next
 | EAdd : forall sigma left right left_out mid right_out next x y,
     evalR sigma left left_out mid ->
     evalR mid right right_out next ->
@@ -1424,16 +1502,25 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
     evalR sigma value out next ->
     rv out = VInt number ->
     evalR sigma (Neg value)
-      (Run (VInt (Z.opp number)) (rp out) (S (rs out)) (S (rw out))) next
+      (Run (VInt (Z.opp number)) (rp out) (ra out)
+        (S (rs out)) (S (rw out))) next
 | EAbs : forall sigma value out next number,
     evalR sigma value out next ->
     rv out = VInt number ->
     evalR sigma (Abs value)
-      (Run (VInt (Z.abs number)) (rp out) (S (rs out)) (S (rw out))) next
+      (Run (VInt (Z.abs number)) (rp out) (ra out)
+        (S (rs out)) (S (rw out))) next
 | EEq : forall sigma typ left right left_out mid right_out next,
     evalR sigma left left_out mid ->
     evalR mid right right_out next ->
     evalR sigma (Eq typ left right) (eqrun typ left_out right_out) next
+| ECmp : forall sigma kind left right left_out mid right_out next x y,
+    evalR sigma left left_out mid ->
+    evalR mid right right_out next ->
+    rv left_out = VInt x ->
+    rv right_out = VInt y ->
+    evalR sigma (Cmp kind left right)
+      (seq left_out right_out (VBool (relb kind x y))) next
 | ECat : forall sigma left right left_out mid right_out next x y,
     evalR sigma left left_out mid ->
     evalR mid right right_out next ->
@@ -1441,6 +1528,7 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
     rv right_out = VBytes y ->
     evalR sigma (Cat left right)
       (Run (VBytes (x ++ y)) (rp left_out ++ rp right_out)
+        (ra left_out ++ ra right_out)
         (S (rs left_out + rs right_out + length x + length y))
         (S (rw left_out + rw right_out + length x + length y))) next
 | ETake : forall sigma len value out next bytes,
@@ -1449,6 +1537,7 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
     len <= length bytes ->
     evalR sigma (Take len value)
       (Run (VBytes (firstn len bytes)) (rp out)
+        (ra out)
         (S (rs out + len)) (S (rw out + len))) next
 | EDrop : forall sigma len value out next bytes,
     evalR sigma value out next ->
@@ -1456,6 +1545,7 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
     len <= length bytes ->
     evalR sigma (Drop len value)
       (Run (VBytes (skipn len bytes)) (rp out)
+        (ra out)
         (S (rs out + length bytes - len))
         (S (rw out + length bytes - len))) next
 | EVcons : forall sigma first rest first_out mid rest_out next values,
@@ -1471,6 +1561,7 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
     rv right_out = VVec y ->
     evalR sigma (Vcat left right)
       (Run (VVec (x ++ y)) (rp left_out ++ rp right_out)
+        (ra left_out ++ ra right_out)
         (S (rs left_out + rs right_out + length x + length y))
         (S (rw left_out + rw right_out + length x + length y))) next
 | EAt : forall sigma index value out next values item,
@@ -1478,12 +1569,13 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
     rv out = VVec values ->
     nth_error values index = Some item ->
     evalR sigma (At index value)
-      (Run item (rp out) (S (rs out)) (S (rw out))) next
+      (Run item (rp out) (ra out) (S (rs out)) (S (rw out))) next
 | EUncons : forall sigma value out next first rest,
     evalR sigma value out next ->
     rv out = VVec (first :: rest) ->
     evalR sigma (Uncons value)
       (Run (VPair first (VVec rest)) (rp out)
+        (ra out)
         (S (rs out + length rest)) (S (rw out + length rest))) next
 | EFold : forall sigma n vector seed item state body vector_out mid values seed_out outer fold_out next,
     evalR sigma vector vector_out mid ->
@@ -1493,6 +1585,7 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
     foldR outer item state body values (rv seed_out) fold_out next ->
     evalR sigma (Fold n vector seed item state body)
       (Run (rv fold_out) (rp vector_out ++ rp seed_out ++ rp fold_out)
+        (ra vector_out ++ ra seed_out ++ ra fold_out)
         (S (rs vector_out + rs seed_out + rs fold_out))
         (S (rw vector_out + rw seed_out + rw fold_out))) next
 | EStep : forall sigma cap value cap_out mid value_out next kind id,
@@ -1502,17 +1595,21 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
     evalR sigma (Step cap value)
       (Run (VPair (VCap kind id) (rv value_out))
         (rp cap_out ++ rp value_out ++ [AWrite kind])
+        (ra cap_out ++ ra value_out ++
+          [Action (AWrite kind) (rv value_out) (OHeld kind id)])
         (S (rs cap_out + rs value_out))
         (S (rw cap_out + rw value_out))) next
 | EClose : forall sigma cap out next kind id,
     evalR sigma cap out next ->
     rv out = VCap kind id ->
     evalR sigma (Close cap)
-      (Run VUnit (rp out ++ [AClose kind]) (S (rs out)) (S (rw out))) next
+      (Run VUnit (rp out ++ [AClose kind])
+        (ra out ++ [Action (AClose kind) VUnit (OHeld kind id)])
+        (S (rs out)) (S (rw out))) next
 
 with foldR : env -> bind -> bind -> tm -> list value -> value -> run -> env -> Prop :=
 | FRNil : forall sigma item state body value,
-    foldR sigma item state body [] value (Run value [] 0 0) sigma
+    foldR sigma item state body [] value (Run value [] [] 0 0) sigma
 | FRCons : forall sigma item state body first rest value opened_item opened_state head prior after_state outer tail next,
     openv item first sigma opened_item ->
     openv state value opened_item opened_state ->
@@ -1522,12 +1619,46 @@ with foldR : env -> bind -> bind -> tm -> list value -> value -> run -> env -> P
     foldR outer item state body rest (rv head) tail next ->
     foldR sigma item state body (first :: rest) value
       (Run (rv tail) (rp head ++ rp tail)
+        (ra head ++ ra tail)
         (S (rs head + rs tail)) (S (rw head + rw tail))) next.
 
 Scheme evalR_ind' := Induction for evalR Sort Prop
 with foldR_ind' := Induction for foldR Sort Prop.
 
 Combined Scheme run_ind from evalR_ind', foldR_ind'.
+
+Theorem run_actions :
+  (forall sigma term out next,
+    evalR sigma term out next ->
+    atoms (ra out) = rp out) /\
+  (forall sigma item state body values seed out next,
+    foldR sigma item state body values seed out next ->
+    atoms (ra out) = rp out).
+Proof.
+  apply run_ind; intros;
+    cbn [one seq eqrun add_action] in *;
+    unfold atoms in *;
+    cbn in *;
+    repeat rewrite map_app;
+    repeat match goal with
+    | same : map aa (ra ?out) = rp ?out |- _ => rewrite same
+    end;
+    reflexivity.
+Qed.
+
+Corollary eval_actions : forall sigma term out next,
+  evalR sigma term out next ->
+  atoms (ra out) = rp out.
+Proof.
+  exact (proj1 run_actions).
+Qed.
+
+Corollary fold_actions : forall sigma item state body values seed out next,
+  foldR sigma item state body values seed out next ->
+  atoms (ra out) = rp out.
+Proof.
+  exact (proj2 run_actions).
+Qed.
 
 Lemma takef_run : forall id sigma value next,
   takev id sigma value next ->
@@ -1796,7 +1927,7 @@ Proof.
   induction values as [|first rest repeat]; intros seed sigma
     item_open state_open state_close item_close item_ty state_ty body_safe
     values_ok seed_has sigma_ok.
-  - exists (Run seed [] 0 0), sigma.
+  - exists (Run seed [] [] 0 0), sigma.
     split.
     + constructor.
     + repeat split; try assumption.
@@ -1819,6 +1950,7 @@ Proof.
       item_ty state_ty body_safe rest_has head_has outer_ok)
       as [tail_out [next [tail_run [next_ok [tail_has [tail_eff tail_cost]]]]]].
     exists (Run (rv tail_out) (rp head_out ++ rp tail_out)
+      (ra head_out ++ ra tail_out)
       (S (rs head_out + rs tail_out))
       (S (rw head_out + rw tail_out))), next.
     split.
@@ -2243,6 +2375,18 @@ Proof.
       * apply within_right; exact right_eff.
     + pose proof (cmpw_limit typ (rv left_out) (rv right_out) left_has right_has).
       rlia.
+  - pose proof (IHchecked1 sigma fuel sigma_ok ltac:(rlia)) as left_safe.
+    inspect_answer left_safe left_out mid_env mid_ok left_has left_eff left_used.
+    pose proof (IHchecked2 mid_env fuel mid_ok ltac:(rlia)) as right_safe.
+    inspect_answer right_safe right_out final final_ok right_has right_eff right_used.
+    inversion left_has; inversion right_has; subst.
+    rewrite keep_run by rlia.
+    repeat split; try assumption.
+    + constructor.
+    + apply within_app.
+      * apply within_left; exact left_eff.
+      * apply within_right; exact right_eff.
+    + rlia.
   - pose proof (IHchecked1 sigma fuel sigma_ok ltac:(rlia)) as left_safe.
     inspect_answer left_safe left_out mid_env mid_ok left_has left_eff left_used.
     pose proof (IHchecked2 mid_env fuel mid_ok ltac:(rlia)) as right_safe.

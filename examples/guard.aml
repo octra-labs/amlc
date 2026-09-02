@@ -1,0 +1,18 @@
+program Guard {
+  state { total: int }
+  error Denied(403, "denied")
+
+  form expect [] (many value: int) ->[many] int marks {read[7]:total} =
+    read[7](value)
+
+  form deny [] (many value: int) ->[many] int marks {fail[9]:Denied} =
+    fail[9](value)
+
+  public view fn check(value: int): int {
+    return use expect[](value) as many out: int in out
+  }
+
+  public fn reject(value: int): int {
+    return use deny[](value) as many out: int in out
+  }
+}

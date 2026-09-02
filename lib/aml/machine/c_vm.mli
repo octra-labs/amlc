@@ -5,6 +5,7 @@ type t
 
 type error =
   | Work_cap of int
+  | Input_count of int
   | Program_counter of int
   | Value_type of int
   | Integer_range of int
@@ -12,6 +13,12 @@ type error =
   | Modulo_zero of int
 
 val make : ?cap:int -> ?activate:Z.t option -> ?epoch:Z.t -> unit -> t
+val make_in :
+  ?cap:int ->
+  ?activate:Z.t option ->
+  ?epoch:Z.t ->
+  C_emit.lit list ->
+  (t, error) result
 val pc : t -> int
 val steps : t -> int
 val work : t -> Z.t

@@ -6,6 +6,11 @@ type shape =
   | SAtom
   | SPair of shape * shape
   | SVec of C_nat.t * shape
+  | SSum of shape
+
+type emission =
+  | Lowered
+  | Specialized
 
 type code =
   | Done
@@ -20,6 +25,7 @@ type code =
   | Negate of code
   | Absolute of code
   | Same of code
+  | Order of C_term.rel * code
   | Join of code
   | Clip of C_nat.t * code
   | Skip of C_nat.t * code
@@ -31,9 +37,13 @@ type code =
   | Append of code
   | Pick of C_nat.t * code
   | Unhead of code
-  | Effect of C_eff.atom * code
+  | Left of code
+  | Right of code
+  | Effect of int * C_eff.atom * code * code
   | Scope of C_term.bind * code * code
   | Scope2 of C_term.bind * C_term.bind * code * code
+  | Iter of C_nat.t * C_term.bind * C_term.bind * code * code
+  | Choice of C_term.bind * code * C_term.bind * code * shape * code
   | Fork of shape * code * code * code
 
 type loc =
@@ -49,6 +59,7 @@ type loc =
   | LNegate of C_lex.span * loc
   | LAbsolute of C_lex.span * loc
   | LSame of C_lex.span * loc
+  | LOrder of C_term.rel * C_lex.span * loc
   | LJoin of C_lex.span * loc
   | LClip of C_nat.t * C_lex.span * loc
   | LSkip of C_nat.t * C_lex.span * loc
@@ -60,15 +71,22 @@ type loc =
   | LAppend of C_lex.span * loc
   | LPick of C_nat.t * C_lex.span * loc
   | LUnhead of C_lex.span * loc
-  | LEffect of C_lex.span * loc
+  | LLeft of C_lex.span * loc
+  | LRight of C_lex.span * loc
+  | LEffect of C_lex.span * loc * loc
   | LScope of C_lex.span * loc * loc
   | LScope2 of C_lex.span * loc * loc
+  | LIter of C_lex.span * loc * loc
+  | LChoice of C_lex.span * C_lex.span * C_lex.span * loc * loc * loc
   | LFork of C_lex.span * C_lex.span * C_lex.span * loc * loc * loc
 
 type t = private {
+  inputs : C_term.bind list;
   code : code;
   loc : loc;
-  result : C_emit.lit;
+  typ : C_type.t;
+  result : C_emit.lit option;
+  emission : emission;
   veils : int;
   veil_depth : C_nat.t;
   span : C_lex.span;
@@ -77,6 +95,7 @@ type t = private {
 type error =
   | Source of C_parse.error
   | Feed of C_feed.error
+  | Input of C_term.id * C_type.t
   | Inputs of int
   | Effects of C_eff.atom list
   | Term
@@ -89,11 +108,21 @@ type error =
 val compile : string -> (t, error) result
 val compile_feed : string -> C_feed.t -> (t, error) result
 val lower : C_term.t -> code option
+val lower_in : C_term.bind list -> C_term.t -> code option
+val locate : C_lex.span -> code -> loc
+val replay_actions : code -> (C_emit.lit list * C_eval.action list) option
 val replay_plan : code -> (C_emit.lit list * C_eff.atom list) option
 val replay : code -> C_emit.lit list option
+val replay_actions_in : code -> (C_term.bind * C_emit.lit) list ->
+  (C_emit.lit list * C_eval.action list) option
+val replay_plan_in : code -> (C_term.bind * C_emit.lit) list ->
+  (C_emit.lit list * C_eff.atom list) option
+val replay_in : code -> (C_term.bind * C_emit.lit) list ->
+  C_emit.lit list option
 val effects : code -> C_eff.atom list
 val equal : C_emit.lit -> C_emit.lit -> bool
 val shape_of : C_type.t -> shape option
 val shape_width : shape -> Z.t
 val same_shape : shape -> shape -> bool
+val emission_text : emission -> string
 val text : error -> string

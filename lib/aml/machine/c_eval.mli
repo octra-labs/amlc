@@ -13,9 +13,20 @@ type value =
   | Inl of value
   | Inr of value
 
+type origin = private
+  | Direct
+  | Held of C_nat.t * C_nat.t
+
+type action = private {
+  atom : C_eff.atom;
+  payload : value;
+  origin : origin;
+}
+
 type out = {
   value : value;
   plan : C_eff.atom list;
+  actions : action list;
   steps : Z.t;
   work : Z.t;
   row : C_eff.t;
@@ -58,6 +69,8 @@ type rule_error =
 
 val max_cost : Z.t
 val equal : value -> value -> bool
+val atoms : action list -> C_eff.atom list
+val direct : C_eff.atom -> value -> action
 val int_text : Z.t -> string
 val value_text : value -> string
 val run : ?fuel:Z.t -> C_term.t -> (out, error) result

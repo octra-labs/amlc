@@ -92,6 +92,12 @@ let atom = function
     let* kind = nat kind in
     Ok (C_eff.Close kind)
 
+let rel = function
+  | C_syn.Lt -> C_term.Lt
+  | C_syn.Le -> C_term.Le
+  | C_syn.Gt -> C_term.Gt
+  | C_syn.Ge -> C_term.Ge
+
 let rec find name = function
   | [] -> None
   | (key, id) :: _ when C_syn.name_equal name key -> Some id
@@ -142,6 +148,7 @@ let shape term =
         | C_syn.Div (value, body)
         | C_syn.Mod (value, body)
         | C_syn.Eq (_, value, body)
+        | C_syn.Cmp (_, value, body)
         | C_syn.Cat (value, body)
         | C_syn.Vcat (value, body)
         | C_syn.Step (value, body) ->
@@ -267,6 +274,10 @@ and lower env next = function
     let* left, next = lower env next left in
     let* right, next = lower env next right in
     Ok (C_term.Eq (kind, left, right), next)
+  | C_syn.Cmp (order, left, right) ->
+    let* left, next = lower env next left in
+    let* right, next = lower env next right in
+    Ok (C_term.Cmp (rel order, left, right), next)
   | C_syn.Cat (left, right) ->
     let* left, next = lower env next left in
     let* right, next = lower env next right in

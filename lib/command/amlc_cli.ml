@@ -29,20 +29,37 @@ type run_req = {
   root : string option;
   at : Z.t option;
   feed : string option;
+  method_name : string option;
+  values : string list;
 }
 
-let run_req = { root = None; at = None; feed = None }
+let run_req = {
+  root = None;
+  at = None;
+  feed = None;
+  method_name = None;
+  values = [];
+}
 
-let rec run_args req = function
-  | [] -> req
+let rec runtime_args command req = function
+  | [] -> { req with values = List.rev req.values }
   | "--root" :: name :: rest ->
-    run_args { req with root = one "run" "root name" req.root name } rest
+    runtime_args command
+      { req with root = one command "root name" req.root name } rest
   | "--epoch" :: raw :: rest ->
-    let epoch = epoch "run" raw in
-    run_args { req with at = one "run" "epoch" req.at epoch } rest
+    let epoch = epoch command raw in
+    runtime_args command { req with at = one command "epoch" req.at epoch } rest
   | "--feed" :: path :: rest ->
-    run_args { req with feed = one "run" "feed path" req.feed path } rest
-  | _ -> fail "run" "option is invalid"
+    runtime_args command
+      { req with feed = one command "feed path" req.feed path } rest
+  | "--method" :: name :: rest ->
+    runtime_args command
+      { req with
+        method_name = one command "method name" req.method_name name }
+      rest
+  | "--arg" :: value :: rest ->
+    runtime_args command { req with values = value :: req.values } rest
+  | _ -> fail command "option is invalid"
 
 let stat command path =
   try Unix.stat path
@@ -68,17 +85,36 @@ let source_offset raw line col =
   in
   min (String.length raw) (walk 0 1)
 
-let source_form path =
-  let raw = source path in
-  if Contract_cli.legacy_source raw then Contract_source
-  else
-    match Octra_vm.C_parse.parse raw, Contract_cli.probe_source raw with
-    | Ok _, _ -> Program_source
-    | Error _, Contract_cli.Accept -> Contract_source
-    | Error current, Contract_cli.Refuse (line, col) ->
-      if source_offset raw line col > current.span.first.off then
-        Contract_source
-      else Program_source
+let source_form_raw raw =
+  match Octra_vm.C_parse.parse raw, Contract_cli.probe_source raw with
+  | Ok _, Contract_cli.Refuse _ -> Program_source
+  | Error _, Contract_cli.Accept -> Contract_source
+  | Ok _, Contract_cli.Accept -> fail "source" "source grammar is ambiguous"
+  | Error current, Contract_cli.Refuse (line, col) ->
+    if source_offset raw line col > current.span.first.off then
+      Contract_source
+    else Program_source
+
+let source_form path = source_form_raw (source path)
+
+type octb_form =
+  | Typed of Octra_vm.C_octb.image
+  | Claimed of Octra_vm.C_octb.decode_error
+  | Generic
+
+let octb_form raw =
+  match Octra_vm.C_octb.decode raw with
+  | Ok image -> Typed image
+  | Error error ->
+    if Octra_vm.C_octb.claims_aml raw || Octra_vm.C_octb.claims_open raw then
+      Claimed error
+    else Generic
+
+let typed_octb command raw =
+  match octb_form raw with
+  | Typed image -> Some image
+  | Claimed error -> fail command (Octra_vm.C_octb.decode_text error)
+  | Generic -> None
 
 let choose command wanted names =
   let present name = List.exists (String.equal name) names in
@@ -104,15 +140,28 @@ let origin command wanted folio =
   | Some value -> value
   | None -> fail command "root name is absent"
 
-let run_part command input (folio : Folio.t) wanted =
+let run_part command input (folio : Folio.t) wanted method_name values =
   let origin = origin command wanted folio in
-  let result = run_octb command origin.part.octb in
-  let expected = project_result command origin in
-  if not (Octra_vm.C_mach.equal result expected) then
-    fail command "VM result differs from the checked root";
-  Printf.printf
-    "status = pass command = %s input = %s root = %s result = %s vm = AML storage = memory\n"
-    command input origin.root.name (lit_text result)
+  let artifact = project_artifact command origin in
+  match artifact.result with
+  | Some expected ->
+    if Option.is_some method_name || values <> [] then
+      fail command "runtime arguments do not apply to a closed program";
+    let result = run_octb command origin.part.octb in
+    if not (Octra_vm.C_mach.equal result expected) then
+      fail command "VM result differs from the checked root";
+    Printf.printf
+      "status = pass command = %s input = %s root = %s emission = %s result = %s vm = AML storage = memory veil = %s\n"
+      command input origin.root.name (emission artifact) (lit_text result)
+      (veil artifact)
+  | None ->
+    let method_name, result, outcome =
+      Aml_cli.open_source command origin.src.body artifact method_name values
+    in
+    Printf.printf
+      "status = pass command = %s input = %s root = %s emission = %s method = %s result = %s effort = %d steps = %d vm = AML storage = memory veil = %s\n"
+      command input origin.root.name (emission artifact) method_name
+      (lit_text result) outcome.effort outcome.steps (veil artifact)
 
 let compile path args =
   let info = stat "compile" path in
@@ -183,22 +232,32 @@ let check path args =
       if Option.is_some req.epoch || Option.is_some req.feed then
         fail "check" "options do not apply to CF1";
       let raw, folio = folio "check" path in
+      let lowered, specialized = emission_counts "check" folio in
       Printf.printf
-        "status = pass command = check input = folio roots = %d bytes = %d sha256 = %s\n"
-        (List.length folio.parts) (String.length raw) (sha raw)
+        "status = pass command = check input = folio roots = %d lowered = %d specialized = %d bytes = %d sha256 = %s\n"
+        (List.length folio.parts) lowered specialized (String.length raw)
+        (sha raw)
     end
   else if info.st_kind = Unix.S_REG then
     begin
       let raw = source path in
-      match Octra_vm.C_octb.decode raw with
-      | Ok image ->
+      match typed_octb "check" raw with
+      | Some image ->
         let req = input_args "check" input_req args in
         if Option.is_some req.epoch || Option.is_some req.feed then
           fail "check" "options do not apply to OCTB";
+        let emission = Octra_vm.C_octb.image_emission image in
+        let output =
+          Option.fold ~none:"none" ~some:Octra_vm.C_type.text image.output
+        in
         Printf.printf
-          "status = pass command = check input = octb instructions = %d bytes = %d sha256 = %s\n"
+          "status = pass command = check input = octb emission = %s inputs = %d output = %s instructions = %d bytes = %d sha256 = %s veil = %s veils = %s veil_depth = %s\n"
+          emission (Array.length image.inputs) output
           (Array.length image.code) (String.length raw) (sha raw)
-      | Error _ -> Contract_cli.check_octb_as "check" path args
+          (Octra_vm.C_octb.image_veil image)
+          (Octra_vm.C_octb.image_veils image)
+          (Octra_vm.C_octb.image_veil_depth image)
+      | None -> Contract_cli.check_octb_as "check" path args
     end
   else fail "check" "input path is invalid"
 
@@ -206,45 +265,51 @@ let run path args =
   let info = stat "run" path in
   if info.st_kind = Unix.S_DIR || String.equal (Filename.extension path) ".amlp"
   then
-    let req = run_args run_req args in
+    let req = runtime_args "run" run_req args in
     let () =
       if Option.is_some req.feed then fail "run" "feed does not apply to project"
     in
     let _, folio =
       project_make "run" (manifest "run" path) (Option.value ~default:Z.zero req.at)
     in
-    run_part "run" "project" folio req.root
+    run_part "run" "project" folio req.root req.method_name req.values
   else if info.st_kind = Unix.S_REG && aml path then
     match source_form path with
     | Contract_source -> Contract_cli.run_as "run" path args
     | Program_source ->
-        let req = run_args run_req args in
+        let req = runtime_args "run" run_req args in
         if Option.is_some req.root || Option.is_some req.at then
           fail "run" "project options do not apply to source";
-        Aml_cli.run path req.feed
+        Aml_cli.run path req.feed req.method_name req.values
   else if info.st_kind = Unix.S_REG
       && String.equal (Filename.extension path) ".cf1" then
     begin
-      let req = run_args run_req args in
+      let req = runtime_args "run" run_req args in
       if Option.is_some req.at || Option.is_some req.feed then
         fail "run" "options do not apply to CF1";
       let _, folio = folio "run" path in
-      run_part "run" "folio" folio req.root
+      run_part "run" "folio" folio req.root req.method_name req.values
     end
   else if info.st_kind = Unix.S_REG then
     begin
       let raw = source path in
-      match Octra_vm.C_octb.decode raw with
-      | Ok _ ->
-        let req = run_args run_req args in
+      match typed_octb "run" raw with
+      | Some image ->
+        let req = runtime_args "run" run_req args in
         if Option.is_some req.root || Option.is_some req.at
             || Option.is_some req.feed then
           fail "run" "project options do not apply to OCTB";
-        let result = run_octb "run" raw in
-        Printf.printf
-          "status = pass command = run input = octb result = %s vm = AML storage = memory\n"
-          (lit_text result)
-      | Error _ -> Contract_cli.run_octb_as "run" path args
+        if Array.length image.inputs = 0 then begin
+          if Option.is_some req.method_name || req.values <> [] then
+            fail "run" "runtime arguments do not apply to a closed program";
+          let result = run_octb "run" raw in
+          Printf.printf
+            "status = pass command = run input = octb emission = %s result = %s vm = AML storage = memory veil = %s\n"
+            (Octra_vm.C_octb.image_emission image) (lit_text result)
+            (Octra_vm.C_octb.image_veil image)
+        end else
+          run_open_octb "run" raw req.method_name req.values
+      | None -> Contract_cli.run_octb_as "run" path args
     end
   else fail "run" "input path is invalid"
 
@@ -257,52 +322,106 @@ let test_folio command (folio : Folio.t) =
         fail command "VM result differs from the checked root")
     (project_origins command folio)
 
+let test_part command input (folio : Folio.t) wanted method_name values =
+  let origin = origin command wanted folio in
+  let artifact = project_artifact command origin in
+  match artifact.result with
+  | Some expected ->
+    if Option.is_some method_name || values <> [] then
+      fail command "runtime arguments do not apply to a closed program";
+    let left = run_octb command origin.part.octb in
+    let right = run_octb command origin.part.octb in
+    if not (Octra_vm.C_mach.equal left right)
+        || not (Octra_vm.C_mach.equal left expected) then
+      fail command "repeated execution differs";
+    Printf.printf
+      "status = pass command = %s input = %s root = %s emission = %s repeats = 2 result = %s sha256 = %s veil = %s\n"
+      command input origin.root.name (emission artifact) (lit_text left)
+      (sha origin.part.octb) (veil artifact)
+  | None ->
+    let left_method, left_result, left =
+      Aml_cli.open_source command origin.src.body artifact method_name values
+    in
+    let right_method, right_result, right =
+      Aml_cli.open_source command origin.src.body artifact method_name values
+    in
+    if not (String.equal left_method right_method)
+        || not (Octra_vm.C_mach.equal left_result right_result)
+        || left.effort <> right.effort || left.steps <> right.steps
+        || left.storage <> right.storage || left.events <> right.events then
+      fail command "repeated execution differs";
+    Printf.printf
+      "status = pass command = %s input = %s root = %s emission = %s repeats = 2 method = %s result = %s effort = %d steps = %d sha256 = %s veil = %s\n"
+      command input origin.root.name (emission artifact) left_method
+      (lit_text left_result) left.effort left.steps (sha origin.part.octb)
+      (veil artifact)
+
 let test path args =
   let info = stat "test" path in
   if info.st_kind = Unix.S_DIR || String.equal (Filename.extension path) ".amlp"
   then
-    let req = input_args "test" input_req args in
-    let () =
-      if Option.is_some req.feed then fail "test" "feed does not apply to project"
-    in
-    let epoch = Option.value ~default:Z.zero req.epoch in
-    project_test_as "test" (manifest "test" path) (Z.to_string epoch)
+    let req = runtime_args "test" run_req args in
+    if Option.is_some req.feed then fail "test" "feed does not apply to project";
+    let epoch = Option.value ~default:Z.zero req.at in
+    let manifest = manifest "test" path in
+    if Option.is_some req.root || Option.is_some req.method_name
+        || req.values <> [] then
+      let checked, _ =
+        project_repeated "test" manifest (Z.to_string epoch)
+      in
+      test_part "test" "project" checked req.root req.method_name req.values
+    else
+      project_test_as "test" manifest (Z.to_string epoch)
   else if info.st_kind = Unix.S_REG && aml path then
     match source_form path with
     | Contract_source -> Contract_cli.test_as "test" path args
     | Program_source ->
-        let req = input_args "test" input_req args in
-        if Option.is_some req.epoch then
-          fail "test" "epoch does not apply to source";
-        Aml_cli.test path req.feed
+        let req = runtime_args "test" run_req args in
+        if Option.is_some req.root || Option.is_some req.at then
+          fail "test" "project options do not apply to source";
+        Aml_cli.test path req.feed req.method_name req.values
   else if info.st_kind = Unix.S_REG
       && String.equal (Filename.extension path) ".cf1" then
     begin
-      let req = input_args "test" input_req args in
-      if Option.is_some req.epoch || Option.is_some req.feed then
+      let req = runtime_args "test" run_req args in
+      if Option.is_some req.at || Option.is_some req.feed then
         fail "test" "options do not apply to CF1";
       let raw, checked = folio "test" path in
-      test_folio "test" checked;
-      Printf.printf
-        "status = pass command = test input = folio roots = %d bytes = %d sha256 = %s\n"
-        (List.length checked.parts) (String.length raw) (sha raw)
+      if Option.is_some req.root || Option.is_some req.method_name
+          || req.values <> [] then
+        test_part "test" "folio" checked req.root req.method_name req.values
+      else begin
+        test_folio "test" checked;
+        let lowered, specialized = emission_counts "test" checked in
+        Printf.printf
+          "status = pass command = test input = folio roots = %d lowered = %d specialized = %d bytes = %d sha256 = %s\n"
+          (List.length checked.parts) lowered specialized (String.length raw)
+          (sha raw)
+      end
     end
   else if info.st_kind = Unix.S_REG then
     begin
       let raw = source path in
-      match Octra_vm.C_octb.decode raw with
-      | Ok _ ->
-        let req = input_args "test" input_req args in
-        if Option.is_some req.epoch || Option.is_some req.feed then
-          fail "test" "options do not apply to OCTB";
-        let left = run_octb "test" raw in
-        let right = run_octb "test" raw in
-        if not (Octra_vm.C_mach.equal left right) then
-          fail "test" "repeated execution differs";
-        Printf.printf
-          "status = pass command = test input = octb repeats = 2 result = %s sha256 = %s\n"
-          (lit_text left) (sha raw)
-      | Error _ -> Contract_cli.test_octb_as "test" path args
+      match typed_octb "test" raw with
+      | Some image ->
+        let req = runtime_args "test" run_req args in
+        if Option.is_some req.root || Option.is_some req.at
+            || Option.is_some req.feed then
+          fail "test" "project options do not apply to OCTB";
+        if Array.length image.inputs = 0 then begin
+          if Option.is_some req.method_name || req.values <> [] then
+            fail "test" "runtime arguments do not apply to a closed program";
+          let left = run_octb "test" raw in
+          let right = run_octb "test" raw in
+          if not (Octra_vm.C_mach.equal left right) then
+            fail "test" "repeated execution differs";
+          Printf.printf
+            "status = pass command = test input = octb emission = %s repeats = 2 result = %s sha256 = %s veil = %s\n"
+            (Octra_vm.C_octb.image_emission image) (lit_text left) (sha raw)
+            (Octra_vm.C_octb.image_veil image)
+        end else
+          Aml_cli.test_open_octb "test" raw req.method_name req.values
+      | None -> Contract_cli.test_octb_as "test" path args
     end
   else fail "test" "input path is invalid"
 
@@ -360,9 +479,9 @@ let debug path args =
       if Option.is_some req.name then fail "debug" "root does not apply to OCTB";
       let raw = source path in
       begin
-        match Octra_vm.C_octb.decode raw with
-        | Ok _ -> Aml_cli.debug_octb path req.args
-        | Error _ -> Contract_cli.debug_octb_as "debug" path req.args
+        match typed_octb "debug" raw with
+        | Some _ -> Aml_cli.debug_octb path req.args
+        | None -> Contract_cli.debug_octb_as "debug" path req.args
       end
   else fail "debug" "input path is invalid"
 
@@ -373,9 +492,9 @@ let dump path args =
     | Error reason -> fail "dump" reason
   in
   let raw = source path in
-  match Octra_vm.C_octb.decode raw with
-  | Ok _ -> Aml_cli.dump format path
-  | Error _ -> Contract_cli.dump_as "dump" format path
+  match typed_octb "dump" raw with
+  | Some _ -> Aml_cli.dump format path
+  | None -> Contract_cli.dump_as "dump" format path
 
 let feed path args =
   if not (aml path) then fail "feed" "source path is invalid";
@@ -391,7 +510,7 @@ let feed path args =
 
 let usage () =
   Printf.eprintf
-    "usage = amlc version | feed SOURCE VALUES [--out AF1] | check SOURCE [OPTIONS] | compile SOURCE [OPTIONS] | test SOURCE [OPTIONS] | run SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | debug SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | check PROJECT [--epoch N] | compile PROJECT [--epoch N] [--out PATH] | test PROJECT [--epoch N] | run PROJECT [--root NAME] [--epoch N] | debug PROJECT [--root NAME] [OPTIONS] | dump OCTB [--format text|events|dot]\n";
+    "usage = amlc version | feed SOURCE VALUES [--out AF1] | check SOURCE [OPTIONS] | compile SOURCE [OPTIONS] | test SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | run SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | debug SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | check PROJECT [--epoch N] | compile PROJECT [--epoch N] [--out PATH] | test PROJECT [--root NAME] [--method NAME] [--arg VALUE] [--epoch N] | run PROJECT [--root NAME] [--method NAME] [--arg VALUE] [--epoch N] | debug PROJECT [--root NAME] [OPTIONS] | dump OCTB [--format text|events|dot]\n";
   exit 2
 
 let main argv =

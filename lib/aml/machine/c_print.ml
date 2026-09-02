@@ -91,6 +91,16 @@ let term value =
     | Term (C_term.Eq (_, left, right)) :: rest ->
       C_text.add out "(";
       walk (Term left :: Text " == " :: Term right :: Text ")" :: rest)
+    | Term (C_term.Cmp (rel, left, right)) :: rest ->
+      let text =
+        match rel with
+        | C_term.Lt -> " < "
+        | C_term.Le -> " <= "
+        | C_term.Gt -> " > "
+        | C_term.Ge -> " >= "
+      in
+      C_text.add out "(";
+      walk (Term left :: Text text :: Term right :: Text ")" :: rest)
     | Term (C_term.Cat (left, right)) :: rest ->
       C_text.add out "(cat ";
       walk (Term left :: Text " " :: Term right :: Text ")" :: rest)

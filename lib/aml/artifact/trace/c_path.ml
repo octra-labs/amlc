@@ -11,6 +11,8 @@ type kind =
   | Negate
   | Absolute
   | Same
+  | Less
+  | Greater
   | Join
   | Minus
   | Size
@@ -63,6 +65,8 @@ let kind = function
   | C_octb.Negate _ -> Negate
   | C_octb.Absolute _ -> Absolute
   | C_octb.Same _ -> Same
+  | C_octb.Less _ -> Less
+  | C_octb.Greater _ -> Greater
   | C_octb.Join _ -> Join
   | C_octb.Minus _ -> Minus
   | C_octb.Size _ -> Size
@@ -87,6 +91,11 @@ let source source =
   Ok (lowered, info)
 
 let finish (info : C_check.info) (artifact : C_octb.t) (out : C_eval.out) =
+  let* result =
+    match artifact.result with
+    | Some value -> Ok value
+    | None -> Error Run
+  in
   let size = Array.length artifact.code in
   if C_smap.length artifact.map <> size then Error Map
   else if C_live.length artifact.live <> size then Error Slots
@@ -106,7 +115,7 @@ let finish (info : C_check.info) (artifact : C_octb.t) (out : C_eval.out) =
       used = C_limit.used ~steps:out.steps ~work:out.work;
       res = info.res;
       depth = info.res.depth;
-      result = artifact.result;
+      result;
     }
 
 let make source_text =

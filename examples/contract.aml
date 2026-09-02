@@ -1,6 +1,5 @@
-// Established declarations and typed programs belong to the same AML language.
 program ArithmeticContract {
   pure fn arithmetic(left: int, right: int): int {
-    return (left + right) /* nested /* comment */ grammar */ * 3
+    return (left + right) * 3
   }
 }

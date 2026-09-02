@@ -5,6 +5,7 @@ module Input = Octra_vm.Aml_input
 module Source = Octra_vm.Aml_source
 module VM = Octra_vm.Contract_vm
 module Local = Octra_vm.Local_vm
+module Octb = Octra_vm.C_octb
 
 let fail name detail = failwith (name ^ " " ^ detail)
 
@@ -29,13 +30,14 @@ let refuse name part source =
   | Error reason -> fail name ("unexpected reason = " ^ reason)
   | Ok _ -> fail name "source accepted"
 
-let attempt ?(args = []) ?(storage = []) name method_name source =
+let attempt ?(args = []) ?(storage = []) ?(value = Z.zero) name method_name source =
   let compiled = compile name source in
   let config =
     Local.config
       ~method_name
       ~args
       ~storage
+      ~value
       ~storage_kinds:(Input.storage_kinds compiled.ast)
       ()
   in
@@ -43,7 +45,7 @@ let attempt ?(args = []) ?(storage = []) name method_name source =
   | Error error -> fail name ("runner reason = " ^ Local.error_text error)
   | Ok outcome -> outcome
 
-let attempt_octb ?(args = []) ?(storage = []) name method_name source =
+let attempt_octb ?(args = []) ?(storage = []) ?(value = Z.zero) name method_name source =
   let compiled = compile name source in
   let image =
     match Octra_vm.Bytecode.decode_image compiled.octb with
@@ -51,18 +53,18 @@ let attempt_octb ?(args = []) ?(storage = []) name method_name source =
     | Error reason -> fail name ("decode reason = " ^ reason)
   in
   let storage_kinds = Option.value ~default:[] image.state in
-  let config = Local.config ~method_name ~args ~storage ~storage_kinds () in
+  let config = Local.config ~method_name ~args ~storage ~value ~storage_kinds () in
   match Local.run ~trace:false config image.code with
   | Error error -> fail name ("runner reason = " ^ Local.error_text error)
   | Ok outcome -> outcome
 
-let execute ?args ?storage name method_name source =
-  let outcome = attempt ?args ?storage name method_name source in
+let execute ?args ?storage ?value name method_name source =
+  let outcome = attempt ?args ?storage ?value name method_name source in
   if outcome.stop = Local.Returned then outcome
   else fail name ("stop = " ^ Local.stop_text outcome.stop)
 
-let execute_octb ?args ?storage name method_name source =
-  let outcome = attempt_octb ?args ?storage name method_name source in
+let execute_octb ?args ?storage ?value name method_name source =
+  let outcome = attempt_octb ?args ?storage ?value name method_name source in
   if outcome.stop = Local.Returned then outcome
   else fail name ("stop = " ^ Local.stop_text outcome.stop)
 
@@ -81,6 +83,22 @@ let storage_count name expected outcome =
   if expected <> actual then
     fail name
       (Printf.sprintf "storage expected = %d actual = %d" expected actual)
+
+let storage_value name key expected outcome =
+  match List.assoc_opt key outcome.Local.storage with
+  | Some actual when String.equal expected actual -> ()
+  | Some actual ->
+    fail name ("storage value expected = " ^ expected ^ " actual = " ^ actual)
+  | None -> fail name ("storage key is absent key = " ^ key)
+
+let same_runtime name left right =
+  if left.Local.result <> right.Local.result
+      || left.stop <> right.stop
+      || left.effort <> right.effort
+      || left.steps <> right.steps
+      || left.storage <> right.storage
+      || left.events <> right.events
+  then fail name "detached execution differs"
 
 let core_error name source =
   match Octra_vm.C_parse.parse source with
@@ -101,8 +119,11 @@ let core_result name expected source =
   match Octra_vm.C_octb.compile source with
   | Error error -> fail name ("compile reason = " ^ Octra_vm.C_octb.text error)
   | Ok artifact ->
-    if not (Octra_vm.C_mach.equal expected artifact.result) then
-      fail name "result differs"
+    begin
+      match artifact.result with
+      | Some actual when Octra_vm.C_mach.equal expected actual -> ()
+      | Some _ | None -> fail name "result differs"
+    end
 
 let core_input name expected input source =
   match Octra_vm.C_parse.parse source with
@@ -141,7 +162,24 @@ let core_veil name source plain =
   if bare.veils <> 0
       || not (Octra_vm.C_nat.equal bare.veil_depth Octra_vm.C_nat.zero)
   then fail name "plain veil metadata differs";
-  if not (String.equal veiled.octb bare.octb) then fail name "veil erasure differs"
+  if String.equal veiled.octb bare.octb then fail name "veil metadata is absent";
+  let decode label (artifact : Octb.t) =
+    match Octb.decode artifact.Octb.octb with
+    | Ok value -> value
+    | Error error ->
+      fail name (label ^ " reason = " ^ Octb.decode_text error)
+  in
+  let marked = decode "veil decode" veiled in
+  let plain = decode "plain decode" bare in
+  if marked.code <> plain.code then fail name "veil instruction stream differs";
+  if not (String.equal (Octb.image_veil marked) "static")
+      || not (String.equal (Octb.image_veils marked) "1")
+      || not (String.equal (Octb.image_veil_depth marked) "2") then
+    fail name "veil artifact metadata differs";
+  if not (String.equal (Octb.image_veil plain) "none")
+      || not (String.equal (Octb.image_veils plain) "0")
+      || not (String.equal (Octb.image_veil_depth plain) "0") then
+    fail name "plain artifact metadata differs"
 
 let core_equal name left right =
   let compile source =

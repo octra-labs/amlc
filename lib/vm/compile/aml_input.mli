@@ -8,7 +8,16 @@ type error =
   | Value of int * string
   | Type of int * string
 
+type core_value = private {
+  vm : Contract_vm.v;
+  lit : C_emit.lit;
+  value : C_eval.value;
+}
+
 val integer : string -> Z.t option
+val tagged : string -> Contract_vm.v option
+val core : C_term.bind list -> string list -> (core_value list, error) result
+val core_octb : C_type.t array -> string list -> (core_value list, error) result
 
 val method_def :
   Oct_lang.contract ->

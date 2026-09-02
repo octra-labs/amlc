@@ -37,6 +37,14 @@ let rec expr env = function
     EIndexField (name, List.map (expr env) keys, field)
   | ETernary (cond, yes, no) ->
     ETernary (expr env cond, expr env yes, expr env no)
+  | EUse value ->
+    let next = add value.ux_bind env in
+    EUse {
+      value with
+      ux_caps = List.map (expr env) value.ux_caps;
+      ux_arg = expr env value.ux_arg;
+      ux_body = expr next value.ux_body;
+    }
   | value -> value
 
 let rec block env body = fst (statements env body)
@@ -94,12 +102,13 @@ and statements env = function
 
 let callable_names program =
   let funcs = List.map (fun value -> value.fn_name) program.funcs in
+  let forms = List.map (fun value -> value.fm_name) program.forms in
   let methods =
     program.interfaces
     |> List.concat_map (fun value -> value.if_methods)
     |> List.map (fun value -> value.im_name)
   in
-  Names.of_list (funcs @ methods)
+  Names.of_list (funcs @ forms @ methods)
 
 let value_names program =
   program.consts
@@ -109,6 +118,11 @@ let value_names program =
 let resolve_func root value =
   let names = List.map (fun param -> param.p_name) value.fn_params in
   { value with fn_body = block (add_many names root) value.fn_body }
+
+let resolve_form root value =
+  let params = value.fm_caps @ [value.fm_arg] in
+  let names = List.map (fun param -> param.fp_name) params in
+  { value with fm_body = expr (add_many names root) value.fm_body }
 
 let resolve program =
   let root = {
@@ -123,4 +137,5 @@ let resolve program =
     invariants_decl = List.map invariant program.invariants_decl;
     ctor = Option.map (resolve_func root) program.ctor;
     funcs = List.map (resolve_func root) program.funcs;
+    forms = List.map (resolve_form root) program.forms;
   }

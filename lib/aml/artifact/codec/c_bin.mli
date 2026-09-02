@@ -45,4 +45,6 @@ val enc_snap : snap -> bits option
 val dec_snap : bits -> snap option
 val enc_code : code -> bits option
 val dec_code : bits -> code option
+val pack : bits -> string option
+val unpack : int -> string -> bits option
 val transcript : bits list -> string option

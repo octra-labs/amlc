@@ -38,6 +38,29 @@ Proof.
   intros value. destruct value; reflexivity.
 Qed.
 
+Definition rel_code (value : rel) : code :=
+  match value with
+  | RLt => CTag 0 CNil
+  | RLe => CTag 1 CNil
+  | RGt => CTag 2 CNil
+  | RGe => CTag 3 CNil
+  end.
+
+Definition rel_get (input : code) : option rel :=
+  match input with
+  | CTag 0 CNil => Some RLt
+  | CTag 1 CNil => Some RLe
+  | CTag 2 CNil => Some RGt
+  | CTag 3 CNil => Some RGe
+  | _ => None
+  end.
+
+Lemma rel_get_code : forall value,
+  rel_get (rel_code value) = Some value.
+Proof.
+  intros value. destruct value; reflexivity.
+Qed.
+
 Definition bind_code (value : bind) : code :=
   CTag 0 (CCons (CNum (bid value))
     (CCons (mul_code (bmul value)) (CCons (ty_code (bty value)) CNil))).
@@ -128,6 +151,9 @@ Fixpoint tm_code (term : tm) : code :=
       CTag 29 (CCons (tm_code first) (CCons (tm_code second) CNil))
   | Neg value => CTag 30 (tm_code value)
   | Abs value => CTag 31 (tm_code value)
+  | Cmp kind first second =>
+      CTag 32 (CCons (rel_code kind)
+        (CCons (tm_code first) (CCons (tm_code second) CNil)))
   end.
 
 Fixpoint tm_get (input : code) : option tm :=
@@ -271,6 +297,11 @@ Fixpoint tm_get (input : code) : option tm :=
       match tm_get value with Some value' => Some (Neg value') | None => None end
   | CTag 31 value =>
       match tm_get value with Some value' => Some (Abs value') | None => None end
+  | CTag 32 (CCons kind (CCons first (CCons second CNil))) =>
+      match rel_get kind, tm_get first, tm_get second with
+      | Some kind', Some first', Some second' => Some (Cmp kind' first' second')
+      | _, _, _ => None
+      end
   | _ => None
   end.
 
@@ -288,7 +319,7 @@ Lemma tm_get_code : forall term,
 Proof.
   induction term; simpl;
     rewrite ?value_get_code, ?ty_get_code, ?nums_get_code,
-      ?bind_get_code, ?atom_get_code,
+      ?bind_get_code, ?atom_get_code, ?rel_get_code,
       ?IHterm, ?IHterm1, ?IHterm2, ?IHterm3;
     try reflexivity.
   all: repeat match goal with
@@ -369,6 +400,7 @@ Fixpoint tm_image (term : tm) : bool :=
   | Act _ body => tm_image body
   | Eq typ first second =>
       ty_shape_b typ && tm_image first && tm_image second
+  | Cmp _ first second => tm_image first && tm_image second
   | Take _ value | Drop _ value | At _ value => tm_image value
   | Fold _ vector seed item state body =>
       tm_image vector && tm_image seed && bind_shape_b item
@@ -398,7 +430,8 @@ Fixpoint tm_depth (term : tm) : nat :=
       S (tm_depth value)
   | Case value _ yes _ no =>
       S (Nat.max (tm_depth value) (Nat.max (tm_depth yes) (tm_depth no)))
-  | Eq _ first second => S (Nat.max (tm_depth first) (tm_depth second))
+  | Eq _ first second | Cmp _ first second =>
+      S (Nat.max (tm_depth first) (tm_depth second))
   | Vcons first rest => S (Nat.max (tm_depth first) (vec_depth rest))
   | Fold _ vector seed _ _ body =>
       S (Nat.max (tm_depth vector)
@@ -426,7 +459,8 @@ Fixpoint tm_nodes (term : tm) : nat :=
       S (tm_nodes value)
   | Case value _ yes _ no =>
       S (tm_nodes value + tm_nodes yes + tm_nodes no)
-  | Eq _ first second => S (tm_nodes first + tm_nodes second)
+  | Eq _ first second | Cmp _ first second =>
+      S (tm_nodes first + tm_nodes second)
   | Vcons first rest => S (tm_nodes first + vec_nodes rest)
   | Fold _ vector seed _ _ body =>
       S (tm_nodes vector + tm_nodes seed + tm_nodes body)

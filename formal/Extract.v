@@ -50,6 +50,7 @@ Require Import Lex.
 Require Import Sha.
 Require Import Root.
 Require Import Host.
+Require Import Effect.
 Require Import Turn.
 Require Import Proj.
 Require Import Pimg.
@@ -216,6 +217,8 @@ Extraction "pack_model.ml"
 Extraction "emit_model.ml"
   Emit.octet_b Emit.lty Emit.lit_of Emit.emit Emit.source_emit.
 
+Extraction "effect_model.ml" Effect.traceb Effect.sealed_plan.
+
 Extraction "feed_model.ml"
   Feed.feed_b Feed.feed_fit Feed.enc_feed Feed.dec_feed
   Feed.load Feed.term_of Feed.sub_of Feed.close.
@@ -230,7 +233,9 @@ Extraction "trace_model.ml"
 
 Extraction "mach_model.ml"
   Mach.into Mach.lower Mach.take Mach.openm Mach.closem Mach.size Mach.exec
-  Mach.replay_plan Mach.replay Mach.image_code Mach.image_feed_code
+  Mach.open_inputs Mach.terminal Mach.replay_plan Mach.replay
+  Mach.replay_plan_in Mach.replay_in Mach.image_code Mach.image_feed_code
+  Mach.source_open_code
   Mach.image_plan_code Mach.source_code Mach.source_feed_code
   Mach.source_plan_code Live.scan Live.analyze.
 

@@ -398,6 +398,8 @@ let rec subst values = function
   | C_term.Neg value -> C_term.Neg (subst values value)
   | C_term.Abs value -> C_term.Abs (subst values value)
   | C_term.Eq (typ, lhs, rhs) -> C_term.Eq (typ, subst values lhs, subst values rhs)
+  | C_term.Cmp (rel, lhs, rhs) ->
+    C_term.Cmp (rel, subst values lhs, subst values rhs)
   | C_term.Cat (lhs, rhs) -> C_term.Cat (subst values lhs, subst values rhs)
   | C_term.Take (len, value) -> C_term.Take (len, subst values value)
   | C_term.Drop (len, value) -> C_term.Drop (len, subst values value)

@@ -143,4 +143,4 @@ let text = function
   | Size size -> Printf.sprintf "source map size = %d maximum = %d" size max
   | Point at -> Printf.sprintf "source map point is invalid index = %d" at
   | Span at -> Printf.sprintf "source map span is invalid index = %d" at
-  | Bits -> "source map bit image exceeds the local profile"
+  | Bits -> "source map bit image exceeds the local limit"

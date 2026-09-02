@@ -59,6 +59,7 @@ type t =
   | Neg of t
   | Abs of t
   | Eq of typ * t * t
+  | Cmp of rel * t * t
   | Cat of t * t
   | Take of Z.t * t
   | Drop of Z.t * t
@@ -77,5 +78,5 @@ and fold = {
 
 val bind : name -> C_type.mul -> typ -> bind
 val fold : bind -> bind -> t -> fold
-val cmp : rel -> name -> name -> name -> t -> t -> t
+val cmp : rel -> t -> t -> t
 val has : name -> t -> bool

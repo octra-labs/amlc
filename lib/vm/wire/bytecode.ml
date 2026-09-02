@@ -30,11 +30,23 @@ type code_cell = {
   size : int;
 }
 
+type emission =
+  | Lowered
+  | Specialized
+
+type veil = {
+  count : Z.t;
+  depth : Z.t;
+}
+
 type image = {
   consts : const_cell array;
   cells : code_cell array;
   text_at : int;
   state : (string * Contract_vm.storage_kind) list option;
+  proof : string option;
+  emission : emission option;
+  veil : veil option;
   code : Contract_vm.instr array;
 }
 
@@ -68,10 +80,11 @@ let const_data = function
 module Pool = struct
   type t = {
     mutable entries : const list;
+    mutable count : int;
     index : (string, int) Hashtbl.t;
   }
 
-  let create () = { entries = []; index = Hashtbl.create 64 }
+  let create () = { entries = []; count = 0; index = Hashtbl.create 64 }
 
   let key_of_const c =
     Printf.sprintf "%d:%s" (const_tag c) (const_data c)
@@ -81,12 +94,13 @@ module Pool = struct
     match Hashtbl.find_opt pool.index k with
     | Some idx -> idx
     | None ->
-      let idx = List.length pool.entries in
-      pool.entries <- pool.entries @ [c];
+      let idx = pool.count in
+      pool.entries <- c :: pool.entries;
+      pool.count <- idx + 1;
       Hashtbl.replace pool.index k idx;
       idx
 
-  let to_list pool = pool.entries
+  let to_list pool = List.rev pool.entries
 end
 
 let put_u8 buf v = Buffer.add_char buf (Char.chr (v land 0xff))
@@ -229,6 +243,116 @@ let image_state consts =
   | [] -> None
   | [value] -> Some (state_decode value)
   | _ -> failwith "OCTB state schema is repeated"
+
+let proof_prefix = "\000OCTRA_AML_PROOF\000"
+
+let proof_value value =
+  String.starts_with ~prefix:proof_prefix value
+
+let proof_encode raw =
+  let value = proof_prefix ^ Base64.encode_exn raw in
+  if String.length value > max_const_len then
+    invalid_arg "AML proof exceeds byte capacity";
+  value
+
+let proof_decode value =
+  let fail () = failwith "OCTB AML proof is invalid" in
+  if not (proof_value value) then fail ();
+  let at = String.length proof_prefix in
+  let body = String.sub value at (String.length value - at) in
+  let raw = match Base64.decode body with Ok raw -> raw | Error _ -> fail () in
+  if String.equal (Base64.encode_exn raw) body then raw else fail ()
+
+let image_proof consts =
+  let found =
+    Array.fold_left
+      (fun out cell ->
+        match cell.value with
+        | CStr value when proof_value value -> value :: out
+        | _ -> out)
+      []
+      consts
+  in
+  match found with
+  | [] -> None
+  | [value] -> Some (proof_decode value)
+  | _ -> failwith "OCTB AML proof is repeated"
+
+let emission_prefix = "\000OCTRA_AML_EMISSION\000"
+
+let emission_value value =
+  String.starts_with ~prefix:emission_prefix value
+
+let emission_encode = function
+  | Lowered -> emission_prefix ^ "lowered"
+  | Specialized -> emission_prefix ^ "specialized"
+
+let emission_decode value =
+  if String.equal value (emission_encode Lowered) then Lowered
+  else if String.equal value (emission_encode Specialized) then Specialized
+  else failwith "OCTB AML emission is invalid"
+
+let image_emission consts =
+  let found =
+    Array.fold_left
+      (fun out cell ->
+        match cell.value with
+        | CStr value when emission_value value -> value :: out
+        | _ -> out)
+      []
+      consts
+  in
+  match found with
+  | [] -> None
+  | [value] -> Some (emission_decode value)
+  | _ -> failwith "OCTB AML emission is repeated"
+
+let veil_prefix = "\000OCTRA_AML_VEIL\000"
+
+let veil_value value =
+  String.starts_with ~prefix:veil_prefix value
+
+let veil_encode value =
+  if Z.sign value.count < 0 || Z.sign value.depth < 0
+      || (Z.equal value.count Z.zero && not (Z.equal value.depth Z.zero)) then
+    invalid_arg "AML veil is invalid";
+  let body = Z.to_string value.count ^ ":" ^ Z.to_string value.depth in
+  if String.length body > 64 then invalid_arg "AML veil is invalid";
+  veil_prefix ^ body
+
+let veil_decode value =
+  let fail () = failwith "OCTB AML veil is invalid" in
+  if not (veil_value value) then fail ();
+  let at = String.length veil_prefix in
+  let body = String.sub value at (String.length value - at) in
+  if String.length body > 64 then fail ();
+  match String.split_on_char ':' body with
+  | [raw_count; raw_depth] ->
+    begin
+      try
+        let count = Z.of_string raw_count in
+        let depth = Z.of_string raw_depth in
+        let decoded = { count; depth } in
+        if not (String.equal (veil_encode decoded) value) then fail ();
+        decoded
+      with Invalid_argument _ -> fail ()
+    end
+  | _ -> fail ()
+
+let image_veil consts =
+  let found =
+    Array.fold_left
+      (fun out cell ->
+        match cell.value with
+        | CStr value when veil_value value -> value :: out
+        | _ -> out)
+      []
+      consts
+  in
+  match found with
+  | [] -> None
+  | [value] -> Some (veil_decode value)
+  | _ -> failwith "OCTB AML veil is repeated"
 
 let op_tag = function
   | Contract_vm.ADD _ -> 0x00  | Contract_vm.SUB _ -> 0x01
@@ -527,11 +651,20 @@ let encode_instr buf pool instr =
   | Contract_vm.CHECKPOINT | Contract_vm.ROLLBACK
   | Contract_vm.COMMIT | Contract_vm.NOP -> ()
 
-let encode ?state instrs =
+let encode ?state ?proof ?emission ?veil instrs =
   let pool = Pool.create () in
   Option.iter
     (fun rows -> ignore (Pool.intern pool (CStr (state_encode rows))))
     state;
+  Option.iter
+    (fun raw -> ignore (Pool.intern pool (CStr (proof_encode raw))))
+    proof;
+  Option.iter
+    (fun value -> ignore (Pool.intern pool (CStr (emission_encode value))))
+    emission;
+  Option.iter
+    (fun value -> ignore (Pool.intern pool (CStr (veil_encode value))))
+    veil;
   let instr_buf = Buffer.create 1024 in
   Array.iter (encode_instr instr_buf pool) instrs;
   let consts = Pool.to_list pool in
@@ -777,6 +910,9 @@ let decode_image raw =
       { id; at; size = next - at; tag; data; value }
     ) in
     let state = image_state const_cells in
+    let proof = image_proof const_cells in
+    let emission = image_emission const_cells in
+    let veil = image_veil const_cells in
     let consts = Array.map (fun cell -> cell.value) const_cells in
     let text_at = !pos in
     let cells = Array.make n_instrs { pc = 0; at = 0; size = 0 } in
@@ -799,7 +935,7 @@ let decode_image raw =
       code;
     if !pos <> len then
       failwith (Printf.sprintf "OCTB trailing bytes: %d" (len - !pos));
-    Ok { consts = const_cells; cells; text_at; state; code }
+    Ok { consts = const_cells; cells; text_at; state; proof; emission; veil; code }
   with Failure msg -> Error (trim_error msg)
     | exn -> Error (trim_error (Printexc.to_string exn))
 

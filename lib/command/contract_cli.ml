@@ -43,60 +43,32 @@ let accepts_source source =
   | Accept -> true
   | Refuse _ -> false
 
-let legacy_member = function
-  | Octra_vm.Oct_lang.TkState
-  | Octra_vm.Oct_lang.TkEvent
-  | Octra_vm.Oct_lang.TkConstructor
-  | Octra_vm.Oct_lang.TkFn
-  | Octra_vm.Oct_lang.TkView
-  | Octra_vm.Oct_lang.TkPure
-  | Octra_vm.Oct_lang.TkPublic
-  | Octra_vm.Oct_lang.TkPrivate
-  | Octra_vm.Oct_lang.TkInternal
-  | Octra_vm.Oct_lang.TkPayable
-  | Octra_vm.Oct_lang.TkError
-  | Octra_vm.Oct_lang.TkStruct
-  | Octra_vm.Oct_lang.TkEnum
-  | Octra_vm.Oct_lang.TkConst
-  | Octra_vm.Oct_lang.TkInterface
-  | Octra_vm.Oct_lang.TkImport
-  | Octra_vm.Oct_lang.TkIdent "nonreentrant"
-  | Octra_vm.Oct_lang.TkIdent "invariant" -> true
-  | _ -> false
-
-let legacy_source source =
-  try
-    let stream = Octra_vm.Oct_lex.make_stream source in
-    let rec seek () =
-      match Octra_vm.Oct_lex.peek_token stream with
-      | Octra_vm.Oct_lang.TkContract
-      | Octra_vm.Oct_lang.TkIdent "Contract" -> true
-      | Octra_vm.Oct_lang.TkProgram
-      | Octra_vm.Oct_lang.TkIdent "Program" ->
-        Octra_vm.Oct_lex.eat stream;
-        let rec body () =
-          match Octra_vm.Oct_lex.peek_token stream with
-          | Octra_vm.Oct_lang.TkLBrace ->
-            Octra_vm.Oct_lex.eat stream;
-            legacy_member (Octra_vm.Oct_lex.peek_token stream)
-          | Octra_vm.Oct_lang.TkEOF -> false
-          | _ -> Octra_vm.Oct_lex.eat stream; body ()
-        in
-        body ()
-      | Octra_vm.Oct_lang.TkEOF -> false
-      | _ -> Octra_vm.Oct_lex.eat stream; seek ()
-    in
-    seek ()
-  with
-  | Octra_vm.Oct_lex.LexError _ -> false
-
 let image_result raw =
   match Octra_vm.Bytecode.decode_image raw with
   | Error reason -> Error reason
   | Ok image ->
     begin
       match Octra_vm.Contract_vm.Verifier.verify image.code with
-      | Ok () -> Ok image
+      | Ok () ->
+        begin
+          match image.proof with
+          | None -> Ok image
+          | Some proof ->
+            begin
+              let state = image.Octra_vm.Bytecode.state in
+              let base = Octra_vm.Bytecode.encode ?state image.code in
+              let exact =
+                Octra_vm.Bytecode.encode ?state ~proof image.code
+              in
+              match
+                String.equal exact raw,
+                Octra_vm.Aml_call.verify ~image:base image.code proof
+              with
+              | true, Ok () -> Ok image
+              | false, _ -> Error "OCTB AML proof image is not exact"
+              | true, Error error -> Error (Octra_vm.Aml_call.text error)
+            end
+        end
       | Error _ -> Error "OCTB verification refused"
     end
 
@@ -105,20 +77,26 @@ let image command raw =
   | Ok value -> value
   | Error reason -> Aml_cli.fail command reason
 
+let proof_text image =
+  if Option.is_some image.Octra_vm.Bytecode.proof then " proof = verified"
+  else ""
+
 let declaration value =
   Octra_vm.Oct_lang.declaration_to_string value
 
 let check_as command path args =
   if args <> [] then Aml_cli.fail command "option is invalid";
   let value = artifact command path in
+  let proof = image command value.octb |> proof_text in
   Printf.printf
-    "status = pass command = %s program = %s declaration = %s instructions = %d bytes = %d sha256 = %s\n"
+    "status = pass command = %s program = %s declaration = %s instructions = %d bytes = %d sha256 = %s%s\n"
     command
     value.name
     (declaration value.declaration)
     (Array.length value.code)
     (String.length value.octb)
     (Aml_cli.sha value.octb)
+    proof
 
 let rec compile_args command output = function
   | [] -> output
@@ -138,18 +116,20 @@ let compile_as command path args =
   if String.equal path output || String.equal path (output ^ ".next") then
     Aml_cli.fail command "source and output paths overlap";
   let value = artifact command path in
+  let proof = image command value.octb |> proof_text in
   begin
     try Aml_cli.write output value.octb
     with Sys_error reason -> Aml_cli.fail command reason
   end;
   Printf.printf
-    "status = pass command = %s program = %s instructions = %d bytes = %d sha256 = %s output = %s\n"
+    "status = pass command = %s program = %s instructions = %d bytes = %d sha256 = %s output = %s%s\n"
     command
     value.name
     (Array.length value.code)
     (String.length value.octb)
     (Aml_cli.sha value.octb)
     output
+    proof
 
 let test_as command path args =
   if args <> [] then Aml_cli.fail command "option is invalid";
@@ -274,91 +254,12 @@ let local_args command artifact method_name values =
   | Error error ->
     Aml_cli.fail command (Octra_vm.Aml_input.error_text error)
 
-let nibble = function
-  | '0' .. '9' as value -> Some (Char.code value - Char.code '0')
-  | 'a' .. 'f' as value -> Some (Char.code value - Char.code 'a' + 10)
-  | 'A' .. 'F' as value -> Some (Char.code value - Char.code 'A' + 10)
-  | _ -> None
-
-let raw_bytes value =
-  let size = String.length value in
-  if size mod 2 <> 0 then None
-  else
-    let out = Bytes.create (size / 2) in
-    let rec loop index =
-      if index = Bytes.length out then Some (Bytes.to_string out)
-      else
-        match nibble value.[index * 2], nibble value.[index * 2 + 1] with
-        | Some high, Some low ->
-          Bytes.set out index (Char.chr ((high lsl 4) lor low));
-          loop (index + 1)
-        | None, _ | _, None -> None
-    in
-    loop 0
-
-let raw_natural maximum make value =
-  match Octra_vm.Aml_input.integer value with
-  | Some value when Z.sign value >= 0 && Z.leq value maximum -> Some (make value)
-  | Some _ | None -> None
-
 let raw_value command index value =
-  let bad () =
+  match Octra_vm.Aml_input.tagged value with
+  | Some parsed -> parsed
+  | None ->
     Aml_cli.fail command
       (Printf.sprintf "OCTB argument is invalid index = %d" index)
-  in
-  match String.index_opt value ':' with
-  | None -> bad ()
-  | Some at ->
-    let tag = String.sub value 0 at in
-    let body = String.sub value (at + 1) (String.length value - at - 1) in
-    begin
-      match tag with
-      | "int" ->
-        begin
-          match Octra_vm.Aml_input.integer body with
-          | Some value -> Octra_vm.Contract_vm.VInt value
-          | None -> bad ()
-        end
-      | "bool" when String.equal body "true" -> Octra_vm.Contract_vm.VBool true
-      | "bool" when String.equal body "false" -> Octra_vm.Contract_vm.VBool false
-      | "text" -> Octra_vm.Contract_vm.VString body
-      | "bytes" ->
-        begin
-          match raw_bytes body with
-          | Some value -> Octra_vm.Contract_vm.VBytes value
-          | None -> bad ()
-        end
-      | "bytes32" ->
-        begin
-          match raw_bytes body with
-          | Some value when String.length value = 32 ->
-            Octra_vm.Contract_vm.VBytes32 value
-          | Some _ | None -> bad ()
-        end
-      | "u64" ->
-        begin
-          match raw_natural Octra_vm.Contract_vm.max_u64
-              (fun value -> Octra_vm.Contract_vm.VU64 value) body with
-          | Some value -> value
-          | None -> bad ()
-        end
-      | "u128" ->
-        begin
-          match raw_natural Octra_vm.Contract_vm.max_u128
-              (fun value -> Octra_vm.Contract_vm.VU128 value) body with
-          | Some value -> value
-          | None -> bad ()
-        end
-      | "u256" ->
-        begin
-          match raw_natural Octra_vm.Contract_vm.max_u256
-              (fun value -> Octra_vm.Contract_vm.VU256 value) body with
-          | Some value -> value
-          | None -> bad ()
-        end
-      | "addr" -> Octra_vm.Contract_vm.VAddr body
-      | _ -> bad ()
-    end
 
 let frame_text frame =
   Printf.printf
@@ -396,7 +297,7 @@ let storage_text (action, key, value) =
   Printf.printf "event = storage action = %s key = %S value = %S\n"
     action key value
 
-let execute command trace program options method_name args storage_kinds code =
+let execute command trace program options method_name args storage_kinds code proof =
   let config =
     Octra_vm.Local_vm.config
       ~storage:options.storage
@@ -424,7 +325,7 @@ let execute command trace program options method_name args storage_kinds code =
   match outcome.stop with
   | Octra_vm.Local_vm.Returned ->
     Printf.printf
-      "status = pass command = %s program = %s method = %s result = %s effort = %d steps = %d storage = %d writes = %d events = %d\n"
+      "status = pass command = %s program = %s method = %s result = %s effort = %d steps = %d storage = %d writes = %d events = %d%s\n"
       command
       program
       method_name
@@ -434,6 +335,7 @@ let execute command trace program options method_name args storage_kinds code =
       (List.length outcome.storage)
       (List.length writes)
       (List.length outcome.events)
+      proof
   | Octra_vm.Local_vm.Reverted
   | Octra_vm.Local_vm.Step_cap
   | Octra_vm.Local_vm.Host_operation _ ->
@@ -448,8 +350,9 @@ let local command trace path args =
   let options = exec_args command exec_defaults args in
   let method_name = selected_method command artifact options.method_name in
   let args = local_args command artifact method_name options.values in
+  let proof = image command artifact.octb |> proof_text in
   execute command trace artifact.name options method_name args
-    (Octra_vm.Aml_input.storage_kinds artifact.ast) artifact.code
+    (Octra_vm.Aml_input.storage_kinds artifact.ast) artifact.code proof
 
 let local_octb_as command trace path args =
   let options = exec_args command exec_defaults args in
@@ -462,7 +365,7 @@ let local_octb_as command trace path args =
   let image = image command (Aml_cli.source path) in
   let storage_kinds = Option.value ~default:[] image.state in
   execute command trace (Filename.basename path) options method_name values
-    storage_kinds image.code
+    storage_kinds image.code (proof_text image)
 
 let run_octb_as command path args = local_octb_as command false path args
 let debug_octb_as command path args = local_octb_as command true path args
@@ -472,8 +375,9 @@ let check_octb_as command path args =
   let raw = Aml_cli.source path in
   let image = image command raw in
   Printf.printf
-    "status = pass command = %s input = octb instructions = %d bytes = %d sha256 = %s\n"
+    "status = pass command = %s input = octb instructions = %d bytes = %d sha256 = %s%s\n"
     command (Array.length image.code) (String.length raw) (Aml_cli.sha raw)
+    (proof_text image)
 
 let test_octb_as command path args =
   if args <> [] then Aml_cli.fail command "option is invalid";
@@ -483,8 +387,8 @@ let test_octb_as command path args =
   if left.code <> right.code then
     Aml_cli.fail command "repeated OCTB verification differs";
   Printf.printf
-    "status = pass command = %s input = octb repeats = 2 instructions = %d sha256 = %s\n"
-    command (Array.length left.code) (Aml_cli.sha raw)
+    "status = pass command = %s input = octb repeats = 2 instructions = %d sha256 = %s%s\n"
+    command (Array.length left.code) (Aml_cli.sha raw) (proof_text left)
 
 let run_as command path args = local command false path args
 let debug_as command path args = local command true path args
@@ -505,6 +409,8 @@ let const_text = function
   | Octra_vm.Bytecode.CBool value -> "bool:" ^ string_of_bool value
   | Octra_vm.Bytecode.CStr value when Octra_vm.Bytecode.state_value value ->
     "state:schema"
+  | Octra_vm.Bytecode.CStr value when Octra_vm.Bytecode.proof_value value ->
+    "proof:aml"
   | Octra_vm.Bytecode.CStr value ->
     if String.length value <= 48 then "text:\"" ^ String.escaped value ^ "\""
     else
@@ -536,9 +442,10 @@ let dump_edges code =
 
 let dump_text raw (image : Octra_vm.Bytecode.image) code edges =
   let digest = Aml_cli.sha raw in
+  let proof = proof_text image in
   dump_emit
-    "image = octb version = 1 vm = AML bytes = %d instructions = %d sha256 = %s"
-    (String.length raw) (Array.length code) digest;
+    "image = octb version = 1 vm = AML emission = opaque bytes = %d instructions = %d sha256 = %s%s"
+    (String.length raw) (Array.length code) digest proof;
   dump_emit "section = .head file = 0x%08x size = 12 entries = 1" 0;
   dump_emit "section = .const file = 0x%08x size = %d entries = %d" 12
     (image.Octra_vm.Bytecode.text_at - 12) (Array.length image.consts);
@@ -563,14 +470,15 @@ let dump_text raw (image : Octra_vm.Bytecode.image) code edges =
         source target kind)
     edges;
   dump_emit
-    "status = pass command = dump instructions = %d edges = %d bytes = %d sha256 = %s"
-    (Array.length code) (List.length edges) (String.length raw) digest
+    "status = pass command = dump emission = opaque instructions = %d edges = %d bytes = %d sha256 = %s%s"
+    (Array.length code) (List.length edges) (String.length raw) digest proof
 
 let dump_events raw (image : Octra_vm.Bytecode.image) code edges =
   let digest = Aml_cli.sha raw in
+  let proof = proof_text image in
   dump_emit
-    "event = image format = OCTB version = 1 vm = AML bytes = %d instructions = %d sha256 = %s"
-    (String.length raw) (Array.length code) digest;
+    "event = image format = OCTB version = 1 vm = AML emission = opaque bytes = %d instructions = %d sha256 = %s%s"
+    (String.length raw) (Array.length code) digest proof;
   Array.iter
     (fun (row : Octra_vm.Bytecode.const_cell) ->
       dump_emit
@@ -589,8 +497,8 @@ let dump_events raw (image : Octra_vm.Bytecode.image) code edges =
         source target kind)
     edges;
   dump_emit
-    "status = pass command = dump instructions = %d edges = %d bytes = %d sha256 = %s"
-    (Array.length code) (List.length edges) (String.length raw) digest
+    "status = pass command = dump emission = opaque instructions = %d edges = %d bytes = %d sha256 = %s%s"
+    (Array.length code) (List.length edges) (String.length raw) digest proof
 
 let dot_escape value =
   let out = Buffer.create (String.length value) in

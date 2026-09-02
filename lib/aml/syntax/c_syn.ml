@@ -77,6 +77,7 @@ type t =
   | Neg of t
   | Abs of t
   | Eq of typ * t * t
+  | Cmp of rel * t * t
   | Cat of t * t
   | Take of Z.t * t
   | Drop of Z.t * t
@@ -96,25 +97,7 @@ and fold = {
 let bind name mul typ = { name; mul; typ }
 let fold item state body = { item; state; body }
 
-let cmp rel left_name right_name delta_name left right =
-  let int name = bind name C_type.Many TInt in
-  let left_var = Var left_name in
-  let right_var = Var right_name in
-  let delta_var = Var delta_name in
-  let delta =
-    match rel with
-    | Lt | Le -> Sub (right_var, left_var)
-    | Gt | Ge -> Sub (left_var, right_var)
-  in
-  let nonnegative = Eq (TInt, Abs delta_var, delta_var) in
-  let result =
-    match rel with
-    | Le | Ge -> nonnegative
-    | Lt | Gt -> If (Eq (TInt, left_var, right_var), KBool false, nonnegative)
-  in
-  Let (int left_name, left,
-    Let (int right_name, right,
-      Let (int delta_name, delta, result)))
+let cmp rel left right = Cmp (rel, left, right)
 
 let push values rest = List.fold_left (fun out value -> value :: out) rest values
 
@@ -142,6 +125,7 @@ let has name term =
         | Div (value, body)
         | Mod (value, body)
         | Eq (_, value, body)
+        | Cmp (_, value, body)
         | Cat (value, body)
         | Vcat (value, body)
         | Step (value, body) -> value :: body :: rest

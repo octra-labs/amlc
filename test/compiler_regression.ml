@@ -5,4 +5,8 @@ let () =
   Regression_storage.run ();
   Regression_types.run ();
   Regression_source.run ();
-  Printf.printf "aml_compiler_regression = pass cases = 82\n"
+  Regression_host.run ();
+  Regression_action.run ();
+  Regression_effect.run ();
+  Regression_emission.run ();
+  Printf.printf "aml_compiler_regression = pass suites = 7 generated = 256\n"

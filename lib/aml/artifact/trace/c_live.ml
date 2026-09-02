@@ -159,4 +159,4 @@ let text = function
   | Dup (at, id) ->
     "liveness map id is repeated pc = " ^ string_of_int at
     ^ " id = " ^ C_nat.text id
-  | Bits -> "liveness map bit image exceeds the local profile"
+  | Bits -> "liveness map bit image exceeds the local limit"

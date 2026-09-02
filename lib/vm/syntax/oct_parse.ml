@@ -24,6 +24,34 @@ let expect_ident ts =
   | TkBalance -> eat ts; "balance"
   | _ -> perr ts "expected identifier"
 
+let ident = function
+  | TkIdent _
+  | TkValue
+  | TkEpoch
+  | TkEpochTime
+  | TkBalance -> true
+  | _ -> false
+
+let parse_ast_int ts expected =
+  match peek_token ts with
+  | TkIntLit value
+      when Z.leq value (Z.of_int Program_limits.max_ast_int) ->
+    eat ts;
+    Z.to_int value
+  | TkIntLit _ -> perr ts "integer exceeds portable range"
+  | _ -> perr ts expected
+
+let parse_nat ts expected =
+  match peek_token ts with
+  | TkIntLit value ->
+    eat ts;
+    begin
+      match C_nat.make value with
+      | Some found -> found
+      | None -> perr ts "natural exceeds fixed range"
+    end
+  | _ -> perr ts expected
+
 let parse_type ts =
   let rec base () =
     match peek_token ts with
@@ -73,11 +101,17 @@ let parse_type ts =
 
 let parse_refinement ts name =
   match peek_token ts with
-  | TkGt -> eat ts; (match peek_token ts with TkIntLit n -> eat ts; Some (RGt (name, Z.to_int n)) | _ -> perr ts "expected integer after >")
-  | TkGtEq -> eat ts; (match peek_token ts with TkIntLit n -> eat ts; Some (RGe (name, Z.to_int n)) | _ -> perr ts "expected integer after >=")
-  | TkLt -> eat ts; (match peek_token ts with TkIntLit n -> eat ts; Some (RLt (name, Z.to_int n)) | _ -> perr ts "expected integer after <")
-  | TkLtEq -> eat ts; (match peek_token ts with TkIntLit n -> eat ts; Some (RLe (name, Z.to_int n)) | _ -> perr ts "expected integer after <=")
-  | TkBangEq -> eat ts; (match peek_token ts with TkIntLit n -> eat ts; Some (RNeq (name, Z.to_int n)) | _ -> perr ts "expected integer after !=")
+  | TkGt -> eat ts; Some (RGt (name, parse_ast_int ts "expected integer after >"))
+  | TkGtEq ->
+    eat ts;
+    Some (RGe (name, parse_ast_int ts "expected integer after >="))
+  | TkLt -> eat ts; Some (RLt (name, parse_ast_int ts "expected integer after <"))
+  | TkLtEq ->
+    eat ts;
+    Some (RLe (name, parse_ast_int ts "expected integer after <="))
+  | TkBangEq ->
+    eat ts;
+    Some (RNeq (name, parse_ast_int ts "expected integer after !="))
   | _ -> perr ts "expected comparison operator in where clause"
 
 let parse_params ts =
@@ -94,7 +128,9 @@ let parse_params ts =
       let typ = parse_type ts in
       let refine = match peek_token ts with
         | TkWhere -> eat ts;
-          let _ref_name = expect_ident ts in
+          let refine_name = expect_ident ts in
+          if not (String.equal name refine_name) then
+            perr ts "refinement parameter differs";
           parse_refinement ts name
         | _ -> None
       in
@@ -226,11 +262,52 @@ and parse_primary ts =
      | _ ->
        expect ts TkRParen;
        e)
+  | TkIdent "use" ->
+    eat ts;
+    if ident (peek_token ts) then parse_use ts else parse_named_tail ts "use"
+  | TkIdent "write" ->
+    eat ts;
+    begin
+      match peek_token ts with
+      | TkLBrack -> parse_action_tail ts (fun kind -> C_eff.Write kind)
+      | _ -> parse_named_tail ts "write"
+    end
+  | TkIdent "read" ->
+    eat ts;
+    begin
+      match peek_token ts with
+      | TkLBrack -> parse_action_tail ts (fun kind -> C_eff.Read kind)
+      | _ -> parse_named_tail ts "read"
+    end
+  | TkIdent "fail" ->
+    eat ts;
+    begin
+      match peek_token ts with
+      | TkLBrack -> parse_action_tail ts (fun kind -> C_eff.Fail kind)
+      | _ -> parse_named_tail ts "fail"
+    end
+  | TkEmit -> parse_action ts
   | TkIdent name -> parse_named ts name
   | _ -> perr ts "expected expression"
 
+and parse_action ts =
+  eat ts;
+  parse_action_tail ts (fun kind -> C_eff.Emit kind)
+
+and parse_action_tail ts make =
+  expect ts TkLBrack;
+  let kind = parse_nat ts "expected effect atom" in
+  expect ts TkRBrack;
+  expect ts TkLParen;
+  let value = parse_expr ts in
+  expect ts TkRParen;
+  EAction (make kind, value)
+
 and parse_named ts name =
   eat ts;
+  parse_named_tail ts name
+
+and parse_named_tail ts name =
   match peek_token ts with
   | TkLParen -> parse_call_expr ts name
   | TkDot ->
@@ -238,6 +315,45 @@ and parse_named ts name =
     let variant = expect_ident ts in
     EEnumVariant (name, variant)
   | _ -> EVar name
+
+and parse_use ts =
+  let name = expect_ident ts in
+  expect ts TkLBrack;
+  let rec caps out =
+    match peek_token ts with
+    | TkRBrack -> eat ts; List.rev out
+    | _ ->
+      if out <> [] then expect ts TkComma;
+      caps (parse_expr ts :: out)
+  in
+  let captures = caps [] in
+  expect ts TkLParen;
+  let arg = parse_expr ts in
+  expect ts TkRParen;
+  begin
+    match peek_token ts with
+    | TkIdent "as" -> eat ts
+    | _ -> perr ts "expected as"
+  end;
+  let mult =
+    match peek_token ts with
+    | TkIdent "once" -> eat ts; Once
+    | TkIdent "many" -> eat ts; Many
+    | _ -> perr ts "expected many or once"
+  in
+  let bind = expect_ident ts in
+  expect ts TkColon;
+  let typ = parse_type ts in
+  expect ts TkIn;
+  EUse {
+    ux_name = name;
+    ux_caps = captures;
+    ux_arg = arg;
+    ux_mult = mult;
+    ux_bind = bind;
+    ux_typ = typ;
+    ux_body = parse_expr ts;
+  }
 
 and parse_self_access ts field =
   let keys =
@@ -632,6 +748,128 @@ let parse_function ts is_view is_pure is_payable ?(nonreentrant=false) vis =
     fn_view = is_view; fn_pure = is_pure; fn_payable = is_payable;
     fn_nonreentrant = nonreentrant; fn_vis = vis; fn_body = body }
 
+let parse_mult ts =
+  match peek_token ts with
+  | TkIdent "many" -> eat ts; Many
+  | TkIdent "once" -> eat ts; Once
+  | _ -> perr ts "expected many or once"
+
+let parse_form_param ts =
+  let mult = parse_mult ts in
+  let name = expect_ident ts in
+  expect ts TkColon;
+  { fp_name = name; fp_typ = parse_type ts; fp_mult = mult }
+
+let parse_form_axis ts name =
+  begin
+    match peek_token ts with
+    | TkIdent value when String.equal value name -> eat ts
+    | _ -> perr ts ("expected " ^ name)
+  end;
+  expect ts TkLBrack;
+  let value =
+    match peek_token ts with
+    | TkIntLit value ->
+      eat ts;
+      begin
+        match C_nat.make value with
+        | Some value -> C_nat.to_z value
+        | None -> perr ts "direct form limit is invalid"
+      end
+    | _ -> perr ts "expected direct form limit"
+  in
+  expect ts TkRBrack;
+  value
+
+let parse_form_limit ts =
+  match peek_token ts with
+  | TkIdent "under" ->
+    eat ts;
+    expect ts TkLBrace;
+    let steps = parse_form_axis ts "steps" in
+    expect ts TkComma;
+    let depth = parse_form_axis ts "depth" in
+    expect ts TkComma;
+    let work = parse_form_axis ts "work" in
+    expect ts TkRBrace;
+    Some (C_limit.make3 ~steps ~depth ~work)
+  | _ -> None
+
+let parse_form_mark ts make =
+  eat ts;
+  expect ts TkLBrack;
+  let kind = parse_nat ts "expected effect atom" in
+  expect ts TkRBrack;
+  expect ts TkColon;
+  let target = expect_ident ts in
+  { mk_atom = make kind; mk_target = target }
+
+let parse_form_marks ts =
+  expect ts TkLBrace;
+  let rec walk out =
+    match peek_token ts with
+    | TkRBrace -> eat ts; List.rev out
+    | _ ->
+      if out <> [] then expect ts TkComma;
+      begin
+        match peek_token ts with
+        | TkEmit ->
+          walk (parse_form_mark ts (fun kind -> C_eff.Emit kind) :: out)
+        | TkIdent "write" ->
+          walk (parse_form_mark ts (fun kind -> C_eff.Write kind) :: out)
+        | TkIdent "read" ->
+          walk (parse_form_mark ts (fun kind -> C_eff.Read kind) :: out)
+        | TkIdent "fail" ->
+          walk (parse_form_mark ts (fun kind -> C_eff.Fail kind) :: out)
+        | _ -> perr ts "direct form mark is unsupported"
+      end
+  in
+  walk []
+
+let parse_form ts =
+  let line = current_line ts in
+  let column = current_column ts in
+  eat ts;
+  let name = expect_ident ts in
+  expect ts TkLBrack;
+  let rec captures out =
+    match peek_token ts with
+    | TkRBrack -> eat ts; List.rev out
+    | _ ->
+      if out <> [] then expect ts TkComma;
+      captures (parse_form_param ts :: out)
+  in
+  let caps = captures [] in
+  expect ts TkLParen;
+  let arg = parse_form_param ts in
+  expect ts TkRParen;
+  expect ts TkMinus;
+  expect ts TkGt;
+  expect ts TkLBrack;
+  let mult = parse_mult ts in
+  expect ts TkRBrack;
+  let ret = parse_type ts in
+  begin
+    match peek_token ts with
+    | TkIdent "marks" -> eat ts
+    | _ -> perr ts "expected marks"
+  end;
+  let marks = parse_form_marks ts in
+  let lim = parse_form_limit ts in
+  expect ts TkEq;
+  {
+    fm_name = name;
+    fm_caps = caps;
+    fm_arg = arg;
+    fm_ret = ret;
+    fm_mult = mult;
+    fm_marks = marks;
+    fm_lim = lim;
+    fm_body = parse_expr ts;
+    fm_line = line;
+    fm_column = column;
+  }
+
 let parse_constructor ts =
   let params = parse_params ts in
   let body = parse_block ts in
@@ -677,9 +915,7 @@ let parse_struct_def ts =
 let parse_error_def ts =
   let name = expect_ident ts in
   expect ts TkLParen;
-  let code = match peek_token ts with
-    | TkIntLit z -> eat ts; Z.to_int z
-    | _ -> perr ts "expected error code (integer)" in
+  let code = parse_ast_int ts "expected error code (integer)" in
   expect ts TkComma;
   let msg = match peek_token ts with
     | TkStrLit s -> eat ts; s
@@ -723,7 +959,11 @@ let parse_interface ts =
     skip_stmt_end ts;
     match peek_token ts with
     | TkRBrace -> eat ts; List.rev acc
-    | TkFn -> go (parse_iface_method ts :: acc)
+    | TkFn ->
+      let item = parse_iface_method ts in
+      if List.exists (fun prior -> String.equal prior.im_name item.im_name) acc then
+        perr ts ("duplicate interface method name = " ^ item.im_name);
+      go (item :: acc)
     | _ -> perr ts "expected fn or } in interface"
   in
   { if_name = name; if_methods = go [] }
@@ -783,7 +1023,12 @@ let parse_contract ts =
   let rec parse_ifaces () =
     skip_stmt_end ts;
     match peek_token ts with
-    | TkInterface -> ifaces := parse_interface ts :: !ifaces; parse_ifaces ()
+    | TkInterface ->
+      let item = parse_interface ts in
+      if List.exists (fun prior -> String.equal prior.if_name item.if_name) !ifaces then
+        perr ts ("duplicate interface name = " ^ item.if_name);
+      ifaces := item :: !ifaces;
+      parse_ifaces ()
     | _ -> ()
   in
   parse_ifaces ();
@@ -792,7 +1037,7 @@ let parse_contract ts =
     { declaration = InterfaceDecl; name = ""; imports = List.rev !imports;
       structs = []; enums = []; consts = []; invariants_decl = []; state = [];
       events = []; errors = []; interfaces = List.rev !ifaces;
-      implements = []; ctor = None; funcs = [] }
+      implements = []; ctor = None; funcs = []; forms = [] }
   | _ ->
   let declaration =
     match peek_token ts with
@@ -818,22 +1063,65 @@ let parse_contract ts =
   let errors = ref [] in
   let ctor = ref None in
   let funcs = ref [] in
+  let forms = ref [] in
   let rec go () =
     skip_stmt_end ts;
     match peek_token ts with
     | TkRBrace -> eat ts
-    | TkStruct -> eat ts; structs := parse_struct_def ts :: !structs; go ()
-    | TkEnum -> eat ts; enums := parse_enum_def ts :: !enums; go ()
-    | TkConst -> eat ts; consts := parse_const ts :: !consts; go ()
-    | TkIdent "invariant" -> invariants_decl := parse_invariant ts :: !invariants_decl; go ()
+    | TkStruct ->
+      eat ts;
+      let item = parse_struct_def ts in
+      if
+        List.exists (fun prior -> String.equal prior.sd_name item.sd_name) !structs
+        || List.exists (fun prior -> String.equal prior.en_name item.sd_name) !enums
+      then perr ts ("duplicate type name = " ^ item.sd_name);
+      structs := item :: !structs;
+      go ()
+    | TkEnum ->
+      eat ts;
+      let item = parse_enum_def ts in
+      if
+        List.exists (fun prior -> String.equal prior.en_name item.en_name) !enums
+        || List.exists (fun prior -> String.equal prior.sd_name item.en_name) !structs
+      then perr ts ("duplicate type name = " ^ item.en_name);
+      enums := item :: !enums;
+      go ()
+    | TkConst ->
+      eat ts;
+      let item = parse_const ts in
+      if List.exists (fun prior -> String.equal prior.c_name item.c_name) !consts then
+        perr ts ("duplicate constant name = " ^ item.c_name);
+      consts := item :: !consts;
+      go ()
+    | TkIdent "invariant" ->
+      let item = parse_invariant ts in
+      if
+        List.exists
+          (fun prior -> String.equal prior.inv_name item.inv_name)
+          !invariants_decl
+      then perr ts ("duplicate invariant name = " ^ item.inv_name);
+      invariants_decl := item :: !invariants_decl;
+      go ()
     | TkState ->
       eat ts;
       if !state_seen then perr ts "duplicate state declaration";
       state_seen := true;
       state := parse_state ts;
       go ()
-    | TkError -> eat ts; errors := parse_error_def ts :: !errors; go ()
-    | TkEvent -> eat ts; events := parse_event ts :: !events; go ()
+    | TkError ->
+      eat ts;
+      let item = parse_error_def ts in
+      if List.exists (fun prior -> String.equal prior.err_name item.err_name) !errors then
+        perr ts ("duplicate error name = " ^ item.err_name);
+      errors := item :: !errors;
+      go ()
+    | TkEvent ->
+      eat ts;
+      let item = parse_event ts in
+      if List.exists (fun prior -> String.equal prior.ev_name item.ev_name) !events then
+        perr ts ("duplicate event name = " ^ item.ev_name);
+      events := item :: !events;
+      go ()
     | TkConstructor ->
       eat ts;
       if Option.is_some !ctor then perr ts "duplicate constructor";
@@ -869,6 +1157,14 @@ let parse_contract ts =
         perr ts ("duplicate function name = " ^ fn.fn_name);
       funcs := fn :: !funcs;
       go ()
+    | TkIdent "form" ->
+      if declaration <> ProgramDecl then
+        perr ts "form declarations require Program";
+      let form = parse_form ts in
+      if List.exists (fun prior -> String.equal prior.fm_name form.fm_name) !forms
+      then perr ts ("duplicate form name = " ^ form.fm_name);
+      forms := form :: !forms;
+      go ()
     | _ -> perr ts "expected struct, enum, const, state, event, constructor, fn, or }"
   in
   go ();
@@ -885,7 +1181,8 @@ let parse_contract ts =
     interfaces = List.rev !ifaces;
     implements = impls;
     ctor = !ctor;
-    funcs = List.rev !funcs }
+    funcs = List.rev !funcs;
+    forms = List.rev !forms }
 
 let syntax source =
   let ts = make_stream source in
@@ -908,7 +1205,8 @@ let parse ?(resolve_import = fun _names _path -> None) source =
         events = imported.events @ acc.events;
         errors = imported.errors @ acc.errors;
         interfaces = imported.interfaces @ acc.interfaces;
-        funcs = imported.funcs @ acc.funcs }
+        funcs = imported.funcs @ acc.funcs;
+        forms = imported.forms @ acc.forms }
     | None -> acc
   ) ct ct.imports in
   Oct_scope.resolve merged

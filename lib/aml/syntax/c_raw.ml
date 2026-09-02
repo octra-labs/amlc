@@ -135,6 +135,7 @@ let rec of_syn = function
   | C_syn.Abs value -> Abs (of_syn value)
   | C_syn.Eq (typ, left, right) ->
       Eq (C_decl.Exact typ, of_syn left, of_syn right)
+  | C_syn.Cmp (rel, left, right) -> Cmp (rel, of_syn left, of_syn right)
   | C_syn.Cat (left, right) -> Cat (of_syn left, of_syn right)
   | C_syn.Take (at, value) -> Take (at, of_syn value)
   | C_syn.Drop (at, value) -> Drop (at, of_syn value)
@@ -156,26 +157,14 @@ let ( let* ) value next =
 let push depth values rest =
   List.fold_left (fun out value -> (depth, value) :: out) rest values
 
-let cost = function
-  | Cmp ((C_syn.Lt | C_syn.Gt), _, _) -> 15
-  | Cmp ((C_syn.Le | C_syn.Ge), _, _) -> 10
-  | _ -> 1
-
-let reach = function
-  | Cmp ((C_syn.Lt | C_syn.Gt), _, _) -> 6
-  | Cmp ((C_syn.Le | C_syn.Ge), _, _) -> 5
-  | _ -> 0
-
 let stat term =
   let rec walk nodes high = function
     | [] -> Ok ()
     | (depth, term) :: rest ->
-        let cost = cost term in
-        let reach = reach term in
-        if depth > C_rule.local.tm_depth - reach then
-          Error (Depth (C_rule.local.tm_depth, depth + reach))
-        else if nodes > C_rule.local.tm_nodes - cost then
-          Error (Nodes (C_rule.local.tm_nodes, nodes + cost))
+        if depth > C_rule.local.tm_depth then
+          Error (Depth (C_rule.local.tm_depth, depth))
+        else if nodes = C_rule.local.tm_nodes then
+          Error (Nodes (C_rule.local.tm_nodes, nodes + 1))
         else
           let next = depth + 1 in
           let rest =
@@ -190,11 +179,10 @@ let stat term =
             | Div (value, body)
             | Mod (value, body)
             | Eq (_, value, body)
+            | Cmp (_, value, body)
             | Cat (value, body)
             | Vcat (value, body)
             | Step (value, body) -> (next, value) :: (next, body) :: rest
-            | Cmp (_, left, right) ->
-                (next, left) :: (next + 1, right) :: rest
             | If (guard, yes, no) ->
                 (next, guard) :: (next, yes) :: (next, no) :: rest
             | Unpair (value, _, _, body) ->
@@ -227,7 +215,7 @@ let stat term =
                 (next, left) :: (next, right) :: (next, body) :: rest
             | Loom (_, _, _, body) -> (next, body) :: rest
           in
-          walk (nodes + cost) (max high (depth + reach)) rest
+          walk (nodes + 1) (max high depth) rest
   in
   walk 0 0 [0, term]
 
@@ -356,12 +344,7 @@ and term env trace = function
   | Cmp (rel, left, right) ->
       let* left, trace = term env trace left in
       let* right, trace = term env trace right in
-      begin
-        match C_fin.pickn 3 [] [] [left; right] with
-        | Some [left_name; right_name; delta_name] ->
-            node (C_syn.cmp rel left_name right_name delta_name left right) trace
-        | _ -> Error Fresh
-      end
+      node (C_syn.cmp rel left right) trace
   | Cat (left, right) ->
       let* left, trace = term env trace left in
       let* right, trace = term env trace right in

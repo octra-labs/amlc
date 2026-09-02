@@ -15,5 +15,9 @@
   regression_support
   regression_storage
   regression_types
-  regression_source)
+  regression_source
+  regression_host
+  regression_action
+  regression_effect
+  regression_emission)
  (libraries octra_vm amlc_command zarith))

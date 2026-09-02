@@ -172,6 +172,8 @@ let rec rename env = function
   | C_syn.Abs value -> C_syn.Abs (rename env value)
   | C_syn.Eq (typ, left, right) ->
     C_syn.Eq (typ, rename env left, rename env right)
+  | C_syn.Cmp (rel, left, right) ->
+    C_syn.Cmp (rel, rename env left, rename env right)
   | C_syn.Cat (left, right) -> C_syn.Cat (rename env left, rename env right)
   | C_syn.Take (len, value) -> C_syn.Take (len, rename env value)
   | C_syn.Drop (len, value) -> C_syn.Drop (len, rename env value)
@@ -271,6 +273,7 @@ let shape fns body =
         | C_syn.Div (value, body)
         | C_syn.Mod (value, body)
         | C_syn.Eq (_, value, body)
+        | C_syn.Cmp (_, value, body)
         | C_syn.Cat (value, body)
         | C_syn.Vcat (value, body)
         | C_syn.Step (value, body) ->

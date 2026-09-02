@@ -24,6 +24,19 @@ let mul_get = function
       Some C_type.Many
   | _ -> None
 
+let rel_code = function
+  | C_term.Lt -> C_bin.Tag (Z.zero, C_bin.Nil)
+  | C_term.Le -> C_bin.Tag (Z.one, C_bin.Nil)
+  | C_term.Gt -> C_bin.Tag (tag 2, C_bin.Nil)
+  | C_term.Ge -> C_bin.Tag (tag 3, C_bin.Nil)
+
+let rel_get = function
+  | C_bin.Tag (value, C_bin.Nil) when Z.equal value Z.zero -> Some C_term.Lt
+  | C_bin.Tag (value, C_bin.Nil) when Z.equal value Z.one -> Some C_term.Le
+  | C_bin.Tag (value, C_bin.Nil) when Z.equal value (tag 2) -> Some C_term.Gt
+  | C_bin.Tag (value, C_bin.Nil) when Z.equal value (tag 3) -> Some C_term.Ge
+  | _ -> None
+
 let bind_code value =
   let* id = C_bin.num value.C_term.id in
   let* typ = C_bin.ty_code value.C_term.typ in
@@ -185,6 +198,12 @@ let rec term_code env = function
   | C_term.Mod (first, second) -> pair_code env 29 first second
   | C_term.Neg value -> unary_code env 30 value
   | C_term.Abs value -> unary_code env 31 value
+  | C_term.Cmp (rel, first, second) ->
+      let* first = term_code env first in
+      let* second = term_code env second in
+      Some (C_bin.Tag (tag 32,
+        C_bin.Cons (rel_code rel,
+          C_bin.Cons (first, C_bin.Cons (second, C_bin.Nil)))))
 
 and pair_code env mark first second =
   let* first = term_code env first in
@@ -398,6 +417,13 @@ let rec term_get_f fuel input =
     | C_bin.Tag (mark, value) when Z.equal mark (tag 31) ->
         let* value = term_get_f next value in
         Some (C_term.Abs value)
+    | C_bin.Tag (mark,
+        C_bin.Cons (rel, C_bin.Cons (first, C_bin.Cons (second, C_bin.Nil))))
+        when Z.equal mark (tag 32) ->
+        let* rel = rel_get rel in
+        let* first = term_get_f next first in
+        let* second = term_get_f next second in
+        Some (C_term.Cmp (rel, first, second))
     | _ -> None
 
 and vec_get fuel input =

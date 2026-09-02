@@ -11,6 +11,8 @@ type kind =
   | Negate
   | Absolute
   | Same
+  | Less
+  | Greater
   | Join
   | Minus
   | Size

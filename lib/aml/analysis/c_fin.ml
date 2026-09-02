@@ -35,6 +35,7 @@ let stat term =
         | C_syn.Div (value, body)
         | C_syn.Mod (value, body)
         | C_syn.Eq (_, value, body)
+        | C_syn.Cmp (_, value, body)
         | C_syn.Cat (value, body)
         | C_syn.Vcat (value, body)
         | C_syn.Step (value, body) -> (next, value) :: (next, body) :: rest
@@ -102,7 +103,8 @@ let add_terms names terms =
         | C_syn.Uncons value | C_syn.Close value -> names, value :: rest
         | C_syn.Case (value, left, yes, right, no) ->
           add_bind (add_bind names left) right, value :: yes :: no :: rest
-        | C_syn.Eq (_, left, right) -> names, left :: right :: rest
+        | C_syn.Eq (_, left, right)
+        | C_syn.Cmp (_, left, right) -> names, left :: right :: rest
         | C_syn.Vfold (vector, seed, fold) ->
           add_bind (add_bind names fold.item) fold.state,
           vector :: seed :: fold.body :: rest

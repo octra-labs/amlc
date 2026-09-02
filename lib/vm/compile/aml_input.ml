@@ -8,6 +8,12 @@ type error =
   | Value of int * string
   | Type of int * string
 
+type core_value = {
+  vm : Contract_vm.v;
+  lit : C_emit.lit;
+  value : C_eval.value;
+}
+
 let method_def (ast : Oct_lang.contract) name =
   match
     List.find_opt
@@ -45,6 +51,8 @@ let hex value =
     in
     read 0
 
+let hex_body value = hex ("0x" ^ value)
+
 let integer value =
   try
     let parsed = Z.of_string value in
@@ -57,6 +65,102 @@ let natural maximum make value =
   | Some parsed when Z.sign parsed >= 0 && Z.leq parsed maximum ->
     Some (make parsed)
   | Some _ | None -> None
+
+let tagged value =
+  match String.index_opt value ':' with
+  | None -> None
+  | Some at ->
+    let tag = String.sub value 0 at in
+    let body = String.sub value (at + 1) (String.length value - at - 1) in
+    match tag with
+    | "int" -> Option.map (fun value -> Contract_vm.VInt value) (integer body)
+    | "bool" when String.equal body "true" -> Some (Contract_vm.VBool true)
+    | "bool" when String.equal body "false" -> Some (Contract_vm.VBool false)
+    | "text" -> Some (Contract_vm.VString body)
+    | "bytes" -> Option.map (fun value -> Contract_vm.VBytes value) (hex_body body)
+    | "bytes32" ->
+      begin
+        match hex_body body with
+        | Some value when String.length value = 32 ->
+          Some (Contract_vm.VBytes32 value)
+        | Some _ | None -> None
+      end
+    | "u64" -> natural Contract_vm.max_u64 (fun value -> Contract_vm.VU64 value) body
+    | "u128" ->
+      natural Contract_vm.max_u128 (fun value -> Contract_vm.VU128 value) body
+    | "u256" ->
+      natural Contract_vm.max_u256 (fun value -> Contract_vm.VU256 value) body
+    | "addr" -> Some (Contract_vm.VAddr body)
+    | _ -> None
+
+let core_value index typ vm =
+  let bad () = Error (Value (index, C_type.text typ)) in
+  match typ, vm with
+  | C_type.Int, Contract_vm.VInt value ->
+    Ok { vm; lit = C_emit.Int value; value = C_eval.Int value }
+  | C_type.Bool, Contract_vm.VBool value ->
+    Ok { vm; lit = C_emit.Bool value; value = C_eval.Bool value }
+  | C_type.Bytes len, Contract_vm.VBytes value
+      when C_nat.to_int len = String.length value ->
+    Ok { vm; lit = C_emit.Bytes value; value = C_eval.Bytes value }
+  | (C_type.Int | C_type.Bool | C_type.Bytes _), _ -> bad ()
+  | (C_type.Unit | C_type.Vec _ | C_type.Cap _ | C_type.Enc _
+    | C_type.Pair _ | C_type.Sum _), _ ->
+    Error (Type (index, C_type.text typ))
+
+let core_source index typ raw =
+  let vm =
+    match typ with
+    | C_type.Int -> Option.map (fun value -> Contract_vm.VInt value) (integer raw)
+    | C_type.Bool when String.equal raw "true" -> Some (Contract_vm.VBool true)
+    | C_type.Bool when String.equal raw "false" -> Some (Contract_vm.VBool false)
+    | C_type.Bytes _ -> Option.map (fun value -> Contract_vm.VBytes value) (hex raw)
+    | C_type.Unit | C_type.Bool | C_type.Vec _ | C_type.Cap _ | C_type.Enc _
+    | C_type.Pair _ | C_type.Sum _ -> None
+  in
+  match vm with
+  | Some value -> core_value index typ value
+  | None -> Error (Value (index, C_type.text typ))
+
+let core inputs values =
+  let expected = List.length inputs in
+  let actual = List.length values in
+  if expected <> actual then Error (Arity (expected, actual))
+  else
+    let rec loop index binds raws out =
+      match binds, raws with
+      | [], [] -> Ok (List.rev out)
+      | bind :: bind_rest, raw :: raw_rest ->
+        begin
+          match core_source index bind.C_term.typ raw with
+          | Ok value -> loop (index + 1) bind_rest raw_rest (value :: out)
+          | Error error -> Error error
+        end
+      | _ -> Error (Arity (expected, actual))
+    in
+    loop 0 inputs values []
+
+let core_octb types values =
+  let expected = Array.length types in
+  let actual = List.length values in
+  if expected <> actual then Error (Arity (expected, actual))
+  else
+    let rec loop index raws out =
+      match raws with
+      | [] -> Ok (List.rev out)
+      | raw :: rest ->
+        begin
+          match tagged raw with
+          | Some vm ->
+            begin
+              match core_value index types.(index) vm with
+              | Ok value -> loop (index + 1) rest (value :: out)
+              | Error error -> Error error
+            end
+          | None -> Error (Value (index, C_type.text types.(index)))
+        end
+    in
+    loop 0 values []
 
 let scalar index typ raw =
   let bad () = Error (Value (index, Oct_lang.typ_to_string typ)) in

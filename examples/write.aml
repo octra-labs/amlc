@@ -1,0 +1,17 @@
+program StateProof {
+  state { total: int }
+
+  form add [many left: int] (many right: int) ->[many] int marks {} =
+    left + right
+
+  form save [] (many value: int) ->[many] int marks {write[7]:total} =
+    write[7](value)
+
+  public fn increase(delta: int): int {
+    let prior = self.total
+    let next = add(prior, delta)
+    return use save[](next) as many out: int in out
+  }
+
+  public view fn read(): int { return self.total }
+}

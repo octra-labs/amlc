@@ -86,10 +86,10 @@ let upto count turns seed item body =
   if not (C_nat.valid count) then Error (Low (C_low.Nat (C_nat.to_z count)))
   else
     let* _ = body_check item body in
-    match C_fin.pickn 4 [] [item] [turns; seed; body] with
-    | Some [turn_name; left_name; right_name; delta_name] ->
+    match C_fin.pickn 1 [] [item] [turns; seed; body] with
+    | Some [turn_name] ->
         let turn_bind = C_syn.bind turn_name C_type.Many C_syn.TInt in
-        let guard index = C_syn.cmp C_syn.Lt left_name right_name delta_name
+        let guard index = C_syn.cmp C_syn.Lt
           (C_syn.KInt (Z.of_int index)) (C_syn.Var turn_name) in
         let* () = fit_upto count turns seed body (guard 0) in
         let rec walk index left out =

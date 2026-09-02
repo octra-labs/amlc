@@ -26,6 +26,8 @@ Inductive kind : Type :=
 | KNegate
 | KAbsolute
 | KSame
+| KLess
+| KGreater
 | KJoin
 | KMinus
 | KSize
@@ -51,14 +53,25 @@ Fixpoint kinds (value : Mach.code) : list kind :=
   | Mach.Negate rest => KNegate :: kinds rest
   | Mach.Absolute rest => KAbsolute :: kinds rest
   | Mach.Same rest => KSame :: kinds rest
+  | Mach.Order RLt rest => KLess :: kinds rest
+  | Mach.Order RLe rest => KGreater :: KLoad :: KSame :: kinds rest
+  | Mach.Order RGt rest => KGreater :: kinds rest
+  | Mach.Order RGe rest => KLess :: KLoad :: KSame :: kinds rest
   | Mach.Join rest => KJoin :: kinds rest
   | Mach.Clip _ rest => KLoad :: KLoad :: KSlice :: kinds rest
   | Mach.Skip _ rest => KLoad :: KSize :: KMinus :: KSlice :: kinds rest
   | Mach.Duo rest | Mach.First rest | Mach.Second rest | Mach.Cons rest
   | Mach.Append rest | Mach.Pick _ rest | Mach.Unhead rest => kinds rest
-  | Mach.Effect _ rest => KNoop :: kinds rest
+  | Mach.Left rest | Mach.Right rest => KLoad :: kinds rest
+  | Mach.Effect _ body rest => KNoop :: kinds body ++ kinds rest
   | Mach.Scope _ body rest => kinds body ++ kinds rest
   | Mach.Scope2 _ _ body rest => kinds body ++ kinds rest
+  | Mach.Iter len _ _ body rest =>
+      List.concat (repeat (kinds body) len) ++ kinds rest
+  | Mach.Choice _ yes _ no form rest =>
+      KJumpIf :: kinds no ++ repeat KMove (Mach.shape_width form)
+      ++ [KJump; KMark] ++ kinds yes
+      ++ repeat KMove (Mach.shape_width form) ++ [KMark] ++ kinds rest
   | Mach.Fork form yes no rest =>
       KJumpIf :: kinds no ++ repeat KMove (Mach.shape_width form)
       ++ [KJump; KMark] ++ kinds yes

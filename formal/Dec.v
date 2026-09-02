@@ -392,6 +392,21 @@ Fixpoint checkb (gamma : ctx) (term : tm) : option chk :=
           else None
       | None => None
       end
+  | Cmp kind ltm rtm =>
+      match checkb gamma ltm with
+      | Some (ltyp, lrow, lcost, mid) =>
+          if ty_eqb ltyp TInt then
+            match checkb mid rtm with
+            | Some (rtyp, rrow, rcost, next) =>
+                if ty_eqb rtyp TInt then
+                  Some (TBool, lrow ++ rrow,
+                    rsucc (radd lcost rcost), next)
+                else None
+            | None => None
+            end
+          else None
+      | None => None
+      end
   | Cat ltm rtm =>
       match checkb gamma ltm with
       | Some (TBytes llen, lrow, lcost, mid) =>

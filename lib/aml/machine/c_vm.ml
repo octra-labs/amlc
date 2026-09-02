@@ -13,6 +13,7 @@ type t = {
 
 type error =
   | Work_cap of int
+  | Input_count of int
   | Program_counter of int
   | Value_type of int
   | Integer_range of int
@@ -31,6 +32,14 @@ let make ?(cap = 1_000_000) ?(activate = None) ?(epoch = Z.zero) () =
     halted = false;
   }
 
+let make_in ?cap ?activate ?epoch values =
+  let count = List.length values in
+  if count > Contract_vm.input_limit then Error (Input_count count)
+  else
+    let state = make ?cap ?activate ?epoch () in
+    List.iteri (fun index value -> state.regs.(index + 1) <- value) values;
+    Ok state
+
 let pc state = state.pc
 let steps state = state.steps
 let work state = state.work
@@ -41,7 +50,7 @@ let result state = value state 0
 let fixed = function
   | C_octb.Load _ | C_octb.Move _ | C_octb.Jump _ | C_octb.Mark _
   | C_octb.Noop | C_octb.Stop -> 1
-  | C_octb.Same _ -> 2
+  | C_octb.Same _ | C_octb.Less _ | C_octb.Greater _ -> 2
   | C_octb.Plus _ | C_octb.Times _ | C_octb.Join _ | C_octb.Minus _
   | C_octb.Size _ -> 3
   | C_octb.Quotient _ | C_octb.Remainder _ | C_octb.Negate _
@@ -124,6 +133,16 @@ let exec state at = function
     Ok true
   | C_octb.Same (dst, left, right) ->
     set state dst (C_emit.Bool (C_mach.equal (value state left) (value state right)));
+    Ok true
+  | C_octb.Less (dst, left, right) ->
+    let* lhs = int state at left in
+    let* rhs = int state at right in
+    set state dst (C_emit.Bool (Z.lt lhs rhs));
+    Ok true
+  | C_octb.Greater (dst, left, right) ->
+    let* lhs = int state at left in
+    let* rhs = int state at right in
+    set state dst (C_emit.Bool (Z.gt lhs rhs));
     Ok true
   | C_octb.Join (dst, left, right) ->
     let* lhs = bytes state at left in
@@ -214,6 +233,9 @@ let run state code =
 
 let text = function
   | Work_cap value -> Printf.sprintf "VM work cap reached cap = %d" value
+  | Input_count value ->
+    Printf.sprintf "VM input count maximum = %d actual = %d"
+      Contract_vm.input_limit value
   | Program_counter value ->
     Printf.sprintf "VM program counter is invalid pc = %d" value
   | Value_type value -> Printf.sprintf "VM value type is invalid pc = %d" value

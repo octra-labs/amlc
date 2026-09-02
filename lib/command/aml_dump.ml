@@ -356,6 +356,18 @@ let hex raw at size =
 
 let digest value = Digestif.SHA256.(to_hex (digest_string value))
 
+let emission image =
+  VM.image_emission image
+
+let veil image = VM.image_veil image
+
+let veils image = VM.image_veils image
+
+let veil_depth image = VM.image_veil_depth image
+
+let output image =
+  Option.fold ~none:"none" ~some:Typ.text image.VM.output
+
 let finite_text field value =
   if String.length value <= 72 then value, ""
   else
@@ -435,6 +447,7 @@ let constant_value value =
   | VM.CData value ->
     let body, facts = value_text (Rval.value value) in
     "data", "\"" ^ String.escaped body ^ "\"", facts
+  | VM.CText value -> "text", "\"" ^ String.escaped value ^ "\"", ""
   | VM.CBytes value -> "bytes", bytes_text value, ""
 
 let write_data_text out id value =
@@ -526,9 +539,11 @@ let analyze ~digest raw image =
 
 let status out value =
   emit out
-    "status = pass command = dump instructions = %d blocks = %d edges = %d bytes = %d sha256 = %s"
-    (Array.length value.code) (List.length value.parts)
+    "status = pass command = dump emission = %s output = %s instructions = %d blocks = %d edges = %d bytes = %d sha256 = %s veil = %s veils = %s veil_depth = %s"
+    (emission value.image) (output value.image) (Array.length value.code)
+    (List.length value.parts)
     (List.length value.graph) (String.length value.raw) value.digest
+    (veil value.image) (veils value.image) (veil_depth value.image)
 
 let write_function out value owner =
   let blocks = function_blocks value owner in
@@ -549,8 +564,10 @@ let write_function out value owner =
 
 let write_text out value =
   emit out
-    "image = octb version = 1 vm = AML bytes = %d instructions = %d sha256 = %s"
-    (String.length value.raw) (Array.length value.code) value.digest;
+    "image = octb version = 1 vm = AML emission = %s output = %s bytes = %d instructions = %d sha256 = %s veil = %s veils = %s veil_depth = %s"
+    (emission value.image) (output value.image) (String.length value.raw)
+    (Array.length value.code) value.digest (veil value.image) (veils value.image)
+    (veil_depth value.image);
   emit out "section = .head file = %s size = 12 entries = 1" (offset_text 0);
   emit out "section = .const file = %s size = %d entries = %d" (offset_text 12)
     (value.image.text_at - 12) (Array.length value.image.consts);
@@ -622,8 +639,10 @@ let write_text out value =
 
 let write_events out value =
   emit out
-    "event = image format = OCTB version = 1 vm = AML bytes = %d instructions = %d sha256 = %s"
-    (String.length value.raw) (Array.length value.code) value.digest;
+    "event = image format = OCTB version = 1 vm = AML emission = %s output = %s bytes = %d instructions = %d sha256 = %s veil = %s veils = %s veil_depth = %s"
+    (emission value.image) (output value.image) (String.length value.raw)
+    (Array.length value.code) value.digest (veil value.image) (veils value.image)
+    (veil_depth value.image);
   emit out "event = section name = .head file = 0 size = 12 entries = 1";
   emit out "event = section name = .const file = 12 size = %d entries = %d"
     (value.image.text_at - 12) (Array.length value.image.consts);

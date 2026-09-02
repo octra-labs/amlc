@@ -1,4 +1,3 @@
-// Local typed storage uses the same AML compiler and VM.
 program LocalStore {
   state {
     item: string

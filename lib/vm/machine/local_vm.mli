@@ -33,6 +33,7 @@ type error =
   | Dispatcher_absent
   | Duplicate_storage of string
   | Invalid_step_cap
+  | Program_counter of int
 
 val config :
   ?storage:(string * string) list ->
@@ -49,6 +50,7 @@ val config :
   ?node_id:string ->
   ?tx_hash:string ->
   ?view:bool ->
+  ?byte_result:Contract_vm.byte_result ->
   method_name:string ->
   args:Contract_vm.v list ->
   unit ->
@@ -57,6 +59,13 @@ val config :
 val run :
   trace:bool ->
   config ->
+  Contract_vm.instr array ->
+  (outcome, error) result
+
+val run_at :
+  trace:bool ->
+  config ->
+  entry:int ->
   Contract_vm.instr array ->
   (outcome, error) result
 

@@ -65,6 +65,7 @@ Fixpoint tm_b (term : tm) : bool :=
       tm_b value && bind_b first && tm_b yes && bind_b second && tm_b no
   | Act action body => atom_b action && tm_b body
   | Eq typ first second => ty_b typ && tm_b first && tm_b second
+  | Cmp _ first second => tm_b first && tm_b second
   | Take len value | Drop len value | At len value => fit len && tm_b value
   | Fold len vector seed item state body =>
       fit len && tm_b vector && tm_b seed && bind_b item && bind_b state

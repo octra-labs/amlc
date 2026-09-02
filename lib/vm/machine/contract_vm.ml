@@ -96,6 +96,10 @@ type progress =
   | Finished
   | Refused
 
+type byte_result =
+  | Text_result
+  | Bytes_result
+
 type s = {
   regs : v array;
   mutable memory : mem;
@@ -118,9 +122,15 @@ type s = {
   blobs : (string, string) Hashtbl.t;
   mutable is_view : bool;
   strict_values : bool;
+  byte_result : byte_result;
   storage_kinds : (string, storage_kind) Hashtbl.t;
   decoded_chunk_cache : (int, string) Hashtbl.t;
 }
+
+let call_depth_max = 8
+
+let register_count = 64
+let input_limit = register_count - 4
 
 let max_storage_value_len = 4_194_304
 
@@ -217,10 +227,11 @@ let is_valid_addr s =
     in check 3
 
 let create_state ?(limit=1_000_000) ?(ctx=default_ctx) ?(depth=0) ?(is_view=false)
-    ?(strict_values=false) ?(storage_kinds=[]) ?(int_work_epoch=None)
+    ?(strict_values=false) ?(byte_result=Text_result) ?(storage_kinds=[])
+    ?(int_work_epoch=None)
     ~caller ~origin ~address ~value ~storage () =
   {
-    regs = Array.make 64 (VInt Z.zero);
+    regs = Array.make register_count (VInt Z.zero);
     memory = { data = Hashtbl.create 1024; size = 0 };
     storage;
     effort_used = 0;
@@ -240,6 +251,7 @@ let create_state ?(limit=1_000_000) ?(ctx=default_ctx) ?(depth=0) ?(is_view=fals
     blobs = Hashtbl.create 16;
     is_view;
     strict_values;
+    byte_result;
     storage_kinds = Hashtbl.of_seq (List.to_seq storage_kinds);
     decoded_chunk_cache = Hashtbl.create 512;
   }
@@ -271,6 +283,8 @@ let to_string = function
   | VAddr a -> a
   | VCipher _ -> "<cipher>"
   | VPubKey _ -> "<pubkey>"
+
+let storage_work value = String.length (to_string value) / 32
 
 let to_cipher = function VCipher c -> Some c | _ -> None
 let to_pubkey = function VPubKey pk -> Some pk | _ -> None
@@ -850,7 +864,7 @@ let exec_one st op =
        let len = String.length s in
        if len > max_storage_value_len then revert st
        else begin
-         if not (add_dyn_effort st (len / 32)) then revert st
+         if not (add_dyn_effort st (storage_work v)) then revert st
          else begin
            let old_val = Hashtbl.find_opt st.storage key in
            st.undo_stack <- UndoWrite (key, old_val) :: st.undo_stack;
@@ -893,7 +907,7 @@ let exec_one st op =
        let len = String.length s in
        if len > max_storage_value_len then revert st
        else begin
-         if not (add_dyn_effort st (len / 32)) then revert st
+         if not (add_dyn_effort st (storage_work v)) then revert st
          else begin
            let old_val = Hashtbl.find_opt st.storage key in
            st.undo_stack <- UndoWrite (key, old_val) :: st.undo_stack;
@@ -1084,10 +1098,15 @@ let exec_one st op =
     else
     let start = Z.to_int (to_z (getr st rstart)) in
     let len = Z.to_int (to_z (getr st rlen)) in
-    if start < 0 || start > slen || len < 0 then setr st rd (VString "")
+    let bytes value =
+      match st.byte_result with
+      | Text_result -> VString value
+      | Bytes_result -> VBytes value
+    in
+    if start < 0 || start > slen || len < 0 then setr st rd (bytes "")
     else begin
       let actual_len = min len (slen - start) in
-      setr st rd (VString (String.sub s start actual_len))
+      setr st rd (bytes (String.sub s start actual_len))
     end; true
   | INDEXOF (rd, rs, rsearch) ->
     let s = to_string (getr st rs) in
@@ -2222,7 +2241,7 @@ let exec_one st op =
   | TXHASH rd -> setr st rd (VString st.ctx.tx_hash); true
   | XCALL (rd, rt, rm, ra, nargs) ->
     if not (valid_reg_span ra nargs) then revert st
-    else if st.call_depth >= 8 then revert st
+    else if st.call_depth >= call_depth_max then revert st
     else
       let target = to_string (getr st rt) in
       let method_name = to_string (getr st rm) in
@@ -2238,7 +2257,7 @@ let exec_one st op =
        | Error _ -> revert st)
   | SPAWN (rd, rs) ->
     if not (view_guard st) then false
-    else if st.call_depth >= 8 then revert st
+    else if st.call_depth >= call_depth_max then revert st
     else
       let input = to_string (getr st rs) in
       let bytecode_raw =
@@ -2269,7 +2288,7 @@ let exec_one st op =
   | SPAWN2 (rd, rs, base, nargs) ->
     if not (valid_reg_span base nargs) then revert st
     else if not (view_guard st) then false
-    else if st.call_depth >= 8 then revert st
+    else if st.call_depth >= call_depth_max then revert st
     else
       let input = to_string (getr st rs) in
       let bytecode_raw =
@@ -2348,7 +2367,13 @@ let exec_one st op =
                :: !(st.logs);
     true
   | CONCAT (rd, rs1, rs2) ->
-    setr st rd (VString (to_string (getr st rs1) ^ to_string (getr st rs2))); true
+    let value = to_string (getr st rs1) ^ to_string (getr st rs2) in
+    let result =
+      match st.byte_result with
+      | Text_result -> VString value
+      | Bytes_result -> VBytes value
+    in
+    setr st rd result; true
   | STRLEN (rd, rs) ->
     setr st rd (VInt (Z.of_int (String.length (to_string (getr st rs))))); true
   | ASSERT rs ->
@@ -2660,7 +2685,7 @@ let exec_one st op =
        | Some _ -> revert st
        | None -> revert st)
   | CALL_INT (rd, label) ->
-    if List.length st.return_stack >= 8 then revert st
+    if List.length st.return_stack >= call_depth_max then revert st
     else begin
       let saved = Array.copy st.regs in
       st.return_stack <- (st.pc, rd, saved) :: st.return_stack;

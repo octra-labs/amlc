@@ -23,10 +23,34 @@ type error =
   | Nodes of int * int
   | Inputs of int * int
 
+type origin =
+  | Direct
+  | Held of C_nat.t
+
+type site = private {
+  atom : C_eff.atom;
+  payload : C_type.t;
+  origin : origin;
+}
+
+type flow = private
+  | Pure
+  | Action of site
+  | Seq of flow * flow
+  | Fork of flow * flow
+  | Loop of C_nat.t * flow
+
+type location = private {
+  index : int;
+  site : site;
+  count : Z.t;
+}
+
 type info = {
   typ : C_type.t;
   eff : C_eff.t;
   res : C_limit.t;
+  flow : flow;
 }
 
 type selected = private {
@@ -54,5 +78,7 @@ val check_at : C_rule.schedule -> epoch:Z.t -> C_term.t -> (selected, rule_error
 val check_in_at :
   C_rule.schedule -> epoch:Z.t -> C_term.bind list -> C_term.t ->
   (selected, rule_error) result
+val locations : info -> location list
+val sites : info -> site list
 val text : error -> string
 val rule_text : rule_error -> string

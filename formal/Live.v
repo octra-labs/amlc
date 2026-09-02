@@ -296,7 +296,7 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Plus rest | Mach.Minus rest | Mach.Times rest
   | Mach.Quot rest | Mach.Rem rest
-  | Mach.Same rest | Mach.Join rest =>
+  | Mach.Same rest | Mach.Order _ rest | Mach.Join rest =>
       match depth with
       | S (S tail) =>
           match scan rest (S tail) env with
@@ -350,10 +350,25 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       | S tail => scan rest (S tail) env
       | 0 => None
       end
-  | Mach.Effect _ rest =>
-      match scan rest depth env with
-      | Some (next_depth, next_env, rows) =>
-          Some (next_depth, next_env, cell_row env :: rows)
+  | Mach.Left rest | Mach.Right rest =>
+      match depth with
+      | S tail =>
+          match scan rest (S tail) env with
+          | Some (next_depth, next_env, rows) =>
+              Some (next_depth, next_env, cell_row env :: rows)
+          | None => None
+          end
+      | 0 => None
+      end
+  | Mach.Effect _ body rest =>
+      match scan body depth env with
+      | Some (body_depth, body_env, body_rows) =>
+          match scan rest body_depth body_env with
+          | Some (next_depth, next_env, rest_rows) =>
+              Some (next_depth, next_env,
+                cell_row env :: body_rows ++ rest_rows)
+          | None => None
+          end
       | None => None
       end
   | Mach.Scope binder body rest =>
@@ -411,6 +426,83 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
               | None => None
               end
           | None => None
+          end
+      | 0 => None
+      end
+  | Mach.Iter len item state body rest =>
+      match depth with
+      | S (S tail) =>
+          let fix loop count current rows :=
+            match count with
+            | 0 =>
+                match scan rest (S tail) current with
+                | Some (next_depth, next_env, rest_rows) =>
+                    Some (next_depth, next_env, rows ++ rest_rows)
+                | None => None
+                end
+            | S remaining =>
+                match cell_open item current with
+                | Some first =>
+                    match cell_open state first with
+                    | Some opened =>
+                        match scan body tail opened with
+                        | Some (body_depth, body_env, body_rows) =>
+                            if Nat.eqb body_depth (S tail) then
+                              match cell_close state body_env with
+                              | Some last =>
+                                  match cell_close item last with
+                                  | Some closed =>
+                                      loop remaining closed (rows ++ body_rows)
+                                  | None => None
+                                  end
+                              | None => None
+                              end
+                            else None
+                        | None => None
+                        end
+                    | None => None
+                    end
+                | None => None
+                end
+            end
+          in loop len env []
+      | _ => None
+      end
+  | Mach.Choice left_bind yes right_bind no form rest =>
+      match depth with
+      | S tail =>
+          match cell_open right_bind env, cell_open left_bind env with
+          | Some no_open, Some yes_open =>
+              match scan no tail no_open, scan yes tail yes_open with
+              | Some (no_depth, no_env, no_rows),
+                  Some (yes_depth, yes_env, yes_rows) =>
+                  if Nat.eqb no_depth (S tail)
+                      && Nat.eqb yes_depth (S tail) then
+                    match cell_close right_bind no_env,
+                        cell_close left_bind yes_env with
+                    | Some no_closed, Some yes_closed =>
+                        if cells_b no_closed yes_closed then
+                          match scan rest (S tail) no_closed with
+                          | Some (next_depth, next_env, rest_rows) =>
+                              Some (next_depth, next_env,
+                                [cell_row env] ++ no_rows
+                                ++ repeat (cell_row no_closed)
+                                  (Mach.shape_width form)
+                                ++ [cell_row no_closed; cell_row env]
+                                ++ yes_rows
+                                ++ repeat (cell_row yes_closed)
+                                  (Mach.shape_width form)
+                                ++ [cell_row no_closed]
+                                ++ rest_rows)
+                          | None => None
+                          end
+                        else None
+                    | _, _ => None
+                    end
+                  else None
+              | _, _ => None
+              end
+          | _, _ => None
           end
       | 0 => None
       end
@@ -592,19 +684,36 @@ Fixpoint event_path (value : Mach.code) : list live_event :=
       LUse id :: repeat LEmit (Mach.shape_width form) ++ event_path rest
   | Mach.Plus rest | Mach.Minus rest | Mach.Times rest
   | Mach.Quot rest | Mach.Rem rest | Mach.Negate rest | Mach.Absolute rest
-  | Mach.Same rest | Mach.Join rest =>
+  | Mach.Same rest | Mach.Order _ rest | Mach.Join rest =>
       LEmit :: event_path rest
   | Mach.Clip _ rest => LEmit :: LEmit :: LEmit :: event_path rest
   | Mach.Skip _ rest =>
       LEmit :: LEmit :: LEmit :: LEmit :: event_path rest
   | Mach.Duo rest | Mach.First rest | Mach.Second rest | Mach.Cons rest
   | Mach.Append rest | Mach.Pick _ rest | Mach.Unhead rest => event_path rest
-  | Mach.Effect _ rest => LEmit :: event_path rest
+  | Mach.Left rest | Mach.Right rest => LEmit :: event_path rest
+  | Mach.Effect _ body rest =>
+      LEmit :: event_path body ++ event_path rest
   | Mach.Scope binder body rest =>
       LOpen binder :: event_path body ++ LClose binder :: event_path rest
   | Mach.Scope2 lhs rhs body rest =>
       LOpen lhs :: LOpen rhs :: event_path body
       ++ LClose rhs :: LClose lhs :: event_path rest
+  | Mach.Iter len item state body rest =>
+      List.concat
+        (repeat
+          (LOpen item :: LOpen state :: event_path body
+            ++ [LClose state; LClose item])
+          len)
+      ++ event_path rest
+  | Mach.Choice left_bind yes right_bind no form rest =>
+      LEmit :: LSplit :: LOpen right_bind :: event_path no
+      ++ LClose right_bind :: repeat LEmit (Mach.shape_width form)
+      ++ [LEmit; LElse; LEmit; LOpen left_bind]
+      ++ event_path yes
+      ++ LClose left_bind :: repeat LEmit (Mach.shape_width form)
+      ++ [LJoin; LEmit]
+      ++ event_path rest
   | Mach.Fork form yes no rest =>
       LEmit :: LSplit :: event_path no
       ++ repeat LEmit (Mach.shape_width form)

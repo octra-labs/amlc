@@ -243,8 +243,12 @@ let run () =
   |> result "tuple" "int:6";
   List.iter
     (fun (method_name, expected) ->
-      execute_octb "state schema" method_name schema_source
-      |> result ("state schema " ^ method_name) expected)
+      let source = execute "state schema source" method_name schema_source in
+      let octb = execute_octb "state schema OCTB" method_name schema_source in
+      result ("state schema source " ^ method_name) expected source;
+      result ("state schema OCTB " ^ method_name) expected octb;
+      if source.result <> octb.result then
+        fail ("state schema parity " ^ method_name) "result differs")
     schema_cases;
   execute_octb
     ~storage:["amount", "41"]

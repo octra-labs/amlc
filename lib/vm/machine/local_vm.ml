@@ -18,6 +18,7 @@ type config = {
   node_id : string;
   tx_hash : string;
   view : bool;
+  byte_result : Contract_vm.byte_result;
 }
 
 type stop =
@@ -50,6 +51,7 @@ type error =
   | Dispatcher_absent
   | Duplicate_storage of string
   | Invalid_step_cap
+  | Program_counter of int
 
 let local_address =
   "oct11111111111111111111111111111111111111111111"
@@ -69,6 +71,7 @@ let config
     ?(node_id = "local")
     ?(tx_hash = String.make 64 '0')
     ?(view = false)
+    ?(byte_result = Contract_vm.Text_result)
     ~method_name
     ~args
     () =
@@ -89,6 +92,7 @@ let config
     node_id;
     tx_hash;
     view;
+    byte_result;
   }
 
 let host_operation = function
@@ -156,6 +160,7 @@ let make_state config storage =
       ~ctx
       ~is_view:config.view
       ~strict_values:true
+      ~byte_result:config.byte_result
       ~storage_kinds:config.storage_kinds
       ~caller:config.caller
       ~origin:config.origin
@@ -184,55 +189,63 @@ let outcome state stop steps frames storage =
     frames = List.rev frames;
   }
 
-let run ~trace config raw =
+let execute ~trace config code entry =
   if config.step_cap < 1 then Error Invalid_step_cap
+  else if entry < 0 || entry >= Array.length code then
+    Error (Program_counter entry)
   else
     begin
       begin
         match storage config.storage with
         | Error error -> Error error
         | Ok storage ->
-          let code = Vm_program.fix raw in
-          begin
-            match Vm_program.entry code with
-            | None -> Error Dispatcher_absent
-            | Some entry ->
-              let state = make_state config storage in
-              state.Contract_vm.pc <- entry;
-              let rec execute index frames =
-                if index >= config.step_cap then
-                  Ok (outcome state Step_cap index frames storage)
-                else
-                  let pc = state.pc in
-                  let effort_before = state.effort_used in
-                  let op = code.(pc) in
-                  match host_operation op with
-                  | Some name ->
-                    Ok (outcome state (Host_operation (pc, name)) index frames storage)
-                  | None ->
-                    let progress = Contract_vm.step state code in
-                    let frame = {
-                      index;
-                      pc;
-                      next_pc = state.pc;
-                      effort_before;
-                      effort_after = state.effort_used;
-                      op;
-                      result = state.regs.(0);
-                    }
-                    in
-                    let frames = if trace then frame :: frames else frames in
-                    match progress with
-                    | Contract_vm.Running -> execute (index + 1) frames
-                    | Contract_vm.Finished ->
-                      Ok (outcome state Returned (index + 1) frames storage)
-                    | Contract_vm.Refused ->
-                      Ok (outcome state Reverted (index + 1) frames storage)
-              in
-              execute 0 []
-          end
+          let state = make_state config storage in
+          state.Contract_vm.pc <- entry;
+          let rec run index frames =
+            if index >= config.step_cap then
+              Ok (outcome state Step_cap index frames storage)
+            else
+              let pc = state.pc in
+              if pc < 0 || pc >= Array.length code then
+                Error (Program_counter pc)
+              else
+                let effort_before = state.effort_used in
+                let op = code.(pc) in
+                match host_operation op with
+                | Some name ->
+                  Ok (outcome state (Host_operation (pc, name)) index frames storage)
+                | None ->
+                  let progress = Contract_vm.step state code in
+                  let frame = {
+                    index;
+                    pc;
+                    next_pc = state.pc;
+                    effort_before;
+                    effort_after = state.effort_used;
+                    op;
+                    result = state.regs.(0);
+                  }
+                  in
+                  let frames = if trace then frame :: frames else frames in
+                  match progress with
+                  | Contract_vm.Running -> run (index + 1) frames
+                  | Contract_vm.Finished ->
+                    Ok (outcome state Returned (index + 1) frames storage)
+                  | Contract_vm.Refused ->
+                    Ok (outcome state Reverted (index + 1) frames storage)
+          in
+          run 0 []
       end
     end
+
+let run_at ~trace config ~entry raw =
+  execute ~trace config (Vm_program.fix raw) entry
+
+let run ~trace config raw =
+  let code = Vm_program.fix raw in
+  match Vm_program.entry code with
+  | None -> Error Dispatcher_absent
+  | Some entry -> execute ~trace config code entry
 
 let hex value =
   let out = Bytes.create (String.length value * 2) in
@@ -281,3 +294,5 @@ let error_text = function
   | Duplicate_storage key ->
     Printf.sprintf "storage key is repeated key = %s" key
   | Invalid_step_cap -> "step cap is invalid"
+  | Program_counter pc ->
+    Printf.sprintf "program counter is invalid pc = %d" pc

@@ -355,7 +355,7 @@ Proof.
     repeat split; try apply EK; reflexivity.
   - destruct (Host.typed (TBytes len) (VBytes bytes)); try discriminate.
     inversion accepted; subst.
-    exists (Run (VBytes bytes) [] (S (length bytes)) (S (length bytes))).
+    exists (Run (VBytes bytes) [] [] (S (length bytes)) (S (length bytes))).
     repeat split; try apply EBytes; reflexivity.
   - destruct (Host.typed (TVec len elem) (VVec vector_values));
       try discriminate.
@@ -436,6 +436,7 @@ Proof.
       as [left_out [left_run [left_value left_plan]]].
     exists
       (Run (VInl (rv left_out)) (rp left_out)
+        (ra left_out)
         (S (rs left_out)) (S (rw left_out))).
     split.
     + apply EInl.
@@ -455,6 +456,7 @@ Proof.
       as [right_out [right_run [right_value right_plan]]].
     exists
       (Run (VInr (rv right_out)) (rp right_out)
+        (ra right_out)
         (S (rs right_out)) (S (rw right_out))).
     split.
     + apply EInr.
@@ -517,6 +519,7 @@ Fixpoint subst (values : sub) (term : tm) : tm :=
   | Neg value => Neg (subst values value)
   | Abs value => Abs (subst values value)
   | Eq typ lhs rhs => Eq typ (subst values lhs) (subst values rhs)
+  | Cmp kind lhs rhs => Cmp kind (subst values lhs) (subst values rhs)
   | Cat lhs rhs => Cat (subst values lhs) (subst values rhs)
   | Take len value => Take len (subst values value)
   | Drop len value => Drop len (subst values value)

@@ -13,9 +13,20 @@ type value =
   | Inl of value
   | Inr of value
 
+type origin =
+  | Direct
+  | Held of C_nat.t * C_nat.t
+
+type action = {
+  atom : C_eff.atom;
+  payload : value;
+  origin : origin;
+}
+
 type out = {
   value : value;
   plan : C_eff.atom list;
+  actions : action list;
   steps : Z.t;
   work : Z.t;
   row : C_eff.t;
@@ -58,7 +69,7 @@ type rule_error =
 
 type trace =
   | Nil
-  | Atom of C_eff.atom
+  | Atom of action
   | Cat of trace * trace
 
 type done_ = {
@@ -204,6 +215,9 @@ let trace_list trace =
     | Cat (left, right) :: rest -> walk out (left :: right :: rest)
   in
   walk [] [trace]
+
+let atoms actions = List.map (fun action -> action.atom) actions
+let direct atom payload = { atom; payload; origin = Direct }
 
 let item value = { value; trace = Nil; steps = Z.one; work = Z.one }
 
@@ -411,7 +425,8 @@ let rec eval env term =
     end
   | C_term.Act (atom, body) ->
     let* body = eval env body in
-    Ok { body with trace = cat (Atom atom) body.trace;
+    let action = direct atom body.value in
+    Ok { body with trace = cat (Atom action) body.trace;
       steps = Z.succ body.steps; work = Z.succ body.work }
   | C_term.Add (left, right) ->
     let* left = eval env left in
@@ -489,6 +504,22 @@ let rec eval env term =
     let same, work = equal_run typ left.value right.value in
     let out = seq left right (Bool same) in
     Ok { out with work = Z.add out.work work }
+  | C_term.Cmp (rel, left, right) ->
+    let* left = eval env left in
+    let* right = eval env right in
+    begin
+      match left.value, right.value with
+      | Int lhs, Int rhs ->
+        let value =
+          match rel with
+          | C_term.Lt -> Z.lt lhs rhs
+          | C_term.Le -> Z.leq lhs rhs
+          | C_term.Gt -> Z.gt lhs rhs
+          | C_term.Ge -> Z.geq lhs rhs
+        in
+        Ok (seq left right (Bool value))
+      | _ -> Error Need_int
+    end
   | C_term.Cat (left, right) ->
     let* left = eval env left in
     let* right = eval env right in
@@ -586,19 +617,29 @@ let rec eval env term =
     let* value = eval env value in
     begin
       match cap.value with
-      | Cap (kind, _) ->
+      | Cap (kind, id) ->
         let out = seq cap value (Pair (cap.value, value.value)) in
-        Ok { out with trace = cat out.trace (Atom (C_eff.Write kind)) }
+        let action = {
+          atom = C_eff.Write kind;
+          payload = value.value;
+          origin = Held (kind, id);
+        } in
+        Ok { out with trace = cat out.trace (Atom action) }
       | _ -> Error Need_cap
     end
   | C_term.Close cap ->
     let* cap = eval env cap in
     begin
       match cap.value with
-      | Cap (kind, _) ->
+      | Cap (kind, id) ->
+        let action = {
+          atom = C_eff.Close kind;
+          payload = Unit;
+          origin = Held (kind, id);
+        } in
         Ok {
           value = Unit;
-          trace = cat cap.trace (Atom (C_eff.Close kind));
+          trace = cat cap.trace (Atom action);
           steps = Z.succ cap.steps;
           work = Z.succ cap.work;
         }
@@ -664,7 +705,8 @@ let run_in ?(fuel = max_cost) inputs term =
     else
     let* env = input_env [] Caps.empty Ids.empty inputs in
     let* done_ = eval env term in
-    let plan = trace_list done_.trace in
+    let actions = trace_list done_.trace in
+    let plan = atoms actions in
     let used = C_eff.of_list plan in
     let actual = C_limit.used ~steps:done_.steps ~work:done_.work in
     if Z.gt done_.steps info.res.steps then
@@ -677,6 +719,7 @@ let run_in ?(fuel = max_cost) inputs term =
     else Ok {
       value = done_.value;
       plan;
+      actions;
       steps = done_.steps;
       work = done_.work;
       row = info.eff;

@@ -6,6 +6,11 @@ type shape =
   | SAtom
   | SPair of shape * shape
   | SVec of C_nat.t * shape
+  | SSum of shape
+
+type emission =
+  | Lowered
+  | Specialized
 
 type code =
   | Done
@@ -20,6 +25,7 @@ type code =
   | Negate of code
   | Absolute of code
   | Same of code
+  | Order of C_term.rel * code
   | Join of code
   | Clip of C_nat.t * code
   | Skip of C_nat.t * code
@@ -31,9 +37,13 @@ type code =
   | Append of code
   | Pick of C_nat.t * code
   | Unhead of code
-  | Effect of C_eff.atom * code
+  | Left of code
+  | Right of code
+  | Effect of int * C_eff.atom * code * code
   | Scope of C_term.bind * code * code
   | Scope2 of C_term.bind * C_term.bind * code * code
+  | Iter of C_nat.t * C_term.bind * C_term.bind * code * code
+  | Choice of C_term.bind * code * C_term.bind * code * shape * code
   | Fork of shape * code * code * code
 
 type loc =
@@ -49,6 +59,7 @@ type loc =
   | LNegate of C_lex.span * loc
   | LAbsolute of C_lex.span * loc
   | LSame of C_lex.span * loc
+  | LOrder of C_term.rel * C_lex.span * loc
   | LJoin of C_lex.span * loc
   | LClip of C_nat.t * C_lex.span * loc
   | LSkip of C_nat.t * C_lex.span * loc
@@ -60,15 +71,22 @@ type loc =
   | LAppend of C_lex.span * loc
   | LPick of C_nat.t * C_lex.span * loc
   | LUnhead of C_lex.span * loc
-  | LEffect of C_lex.span * loc
+  | LLeft of C_lex.span * loc
+  | LRight of C_lex.span * loc
+  | LEffect of C_lex.span * loc * loc
   | LScope of C_lex.span * loc * loc
   | LScope2 of C_lex.span * loc * loc
+  | LIter of C_lex.span * loc * loc
+  | LChoice of C_lex.span * C_lex.span * C_lex.span * loc * loc * loc
   | LFork of C_lex.span * C_lex.span * C_lex.span * loc * loc * loc
 
 type t = {
+  inputs : C_term.bind list;
   code : code;
   loc : loc;
-  result : C_emit.lit;
+  typ : C_type.t;
+  result : C_emit.lit option;
+  emission : emission;
   veils : int;
   veil_depth : C_nat.t;
   span : C_lex.span;
@@ -77,6 +95,7 @@ type t = {
 type error =
   | Source of C_parse.error
   | Feed of C_feed.error
+  | Input of C_term.id * C_type.t
   | Inputs of int
   | Effects of C_eff.atom list
   | Term
@@ -141,6 +160,7 @@ let rec same_shape left right =
     same_shape ll rl && same_shape lr rr
   | SVec (ln, le), SVec (rn, re) ->
     C_nat.equal ln rn && same_shape le re
+  | SSum lhs, SSum rhs -> same_shape lhs rhs
   | _ -> false
 
 let rec shape_of = function
@@ -151,13 +171,18 @@ let rec shape_of = function
   | C_type.Pair (lhs, rhs) ->
     Option.bind (shape_of lhs) (fun lshape ->
       Option.map (fun rshape -> SPair (lshape, rshape)) (shape_of rhs))
-  | C_type.Cap _ | C_type.Enc _ | C_type.Sum _ -> None
+  | C_type.Sum (lhs, rhs) ->
+    Option.bind (shape_of lhs) (fun lshape ->
+      Option.bind (shape_of rhs) (fun rshape ->
+        if same_shape lshape rshape then Some (SSum lshape) else None))
+  | C_type.Cap _ | C_type.Enc _ -> None
 
 let rec shape_width = function
   | SUnit -> Z.zero
   | SAtom -> Z.one
   | SPair (lhs, rhs) -> Z.add (shape_width lhs) (shape_width rhs)
   | SVec (len, elem) -> Z.mul (C_nat.to_z len) (shape_width elem)
+  | SSum payload -> Z.succ (shape_width payload)
 
 let rec same_shapes left right =
   match left, right with
@@ -177,7 +202,7 @@ let rec flow code stack =
   | Void rest -> flow rest (SUnit :: stack)
   | Get (_, form, rest) -> flow rest (form :: stack)
   | Plus rest | Minus rest | Times rest | Quot rest | Rem rest
-  | Same rest | Join rest ->
+  | Same rest | Order (_, rest) | Join rest ->
     begin
       match stack with
       | SAtom :: SAtom :: tail -> flow rest (SAtom :: tail)
@@ -245,7 +270,14 @@ let rec flow code stack =
           flow rest (SPair (elem, SVec (next, elem)) :: tail))
       | _ -> None
     end
-  | Effect (_, rest) -> flow rest stack
+  | Left rest | Right rest ->
+    begin
+      match stack with
+      | payload :: tail -> flow rest (SSum payload :: tail)
+      | [] -> None
+    end
+  | Effect (_, _, body, rest) ->
+    Option.bind (flow body stack) (flow rest)
   | Scope (_, body, rest) ->
     begin
       match stack with
@@ -262,6 +294,38 @@ let rec flow code stack =
         Option.bind (flow body tail) (fun after ->
           Option.bind (keep_shape tail after) (fun out ->
             flow rest (out :: tail)))
+      | _ -> None
+    end
+  | Iter (len, item, state, body, rest) ->
+    begin
+      match item.C_term.mul, state.C_term.mul, stack,
+          shape_of item.C_term.typ, shape_of state.C_term.typ with
+      | C_type.Zero, _, _, _, _ | _, C_type.Zero, _, _, _ -> None
+      | _, _, seed :: SVec (found, elem) :: tail, Some item_shape,
+          Some state_shape
+          when C_nat.equal len found
+            && same_shape item_shape elem
+            && same_shape state_shape seed ->
+        Option.bind (flow body tail) (fun after ->
+          Option.bind (keep_shape tail after) (fun out ->
+            if same_shape seed out then flow rest (out :: tail) else None))
+      | _ -> None
+    end
+  | Choice (left, yes, right, no, form, rest) ->
+    begin
+      match left.C_term.mul, right.C_term.mul, stack,
+          shape_of left.C_term.typ, shape_of right.C_term.typ with
+      | C_type.Zero, _, _, _, _ | _, C_type.Zero, _, _, _ -> None
+      | _, _, SSum payload :: tail, Some left_shape, Some right_shape
+          when same_shape payload left_shape
+            && same_shape payload right_shape ->
+        Option.bind (flow yes tail) (fun yafter ->
+          Option.bind (flow no tail) (fun nafter ->
+            Option.bind (keep_shape tail yafter) (fun yout ->
+              Option.bind (keep_shape tail nafter) (fun nout ->
+                if same_shape form yout && same_shape form nout then
+                  flow rest (form :: tail)
+                else None))))
       | _ -> None
     end
   | Fork (form, yes, no, rest) ->
@@ -287,6 +351,47 @@ let rec find_bind id = function
   | [] -> None
   | item :: _ when C_nat.equal id item.C_term.id -> Some item
   | _ :: rest -> find_bind id rest
+
+let rec continue code tail =
+  match code with
+  | Done -> tail
+  | Push (value, rest) -> Push (value, continue rest tail)
+  | Void rest -> Void (continue rest tail)
+  | Get (id, shape, rest) -> Get (id, shape, continue rest tail)
+  | Plus rest -> Plus (continue rest tail)
+  | Minus rest -> Minus (continue rest tail)
+  | Times rest -> Times (continue rest tail)
+  | Quot rest -> Quot (continue rest tail)
+  | Rem rest -> Rem (continue rest tail)
+  | Negate rest -> Negate (continue rest tail)
+  | Absolute rest -> Absolute (continue rest tail)
+  | Same rest -> Same (continue rest tail)
+  | Order (rel, rest) -> Order (rel, continue rest tail)
+  | Join rest -> Join (continue rest tail)
+  | Clip (len, rest) -> Clip (len, continue rest tail)
+  | Skip (len, rest) -> Skip (len, continue rest tail)
+  | Duo rest -> Duo (continue rest tail)
+  | First rest -> First (continue rest tail)
+  | Second rest -> Second (continue rest tail)
+  | Empty (shape, rest) -> Empty (shape, continue rest tail)
+  | Cons rest -> Cons (continue rest tail)
+  | Append rest -> Append (continue rest tail)
+  | Pick (index, rest) -> Pick (index, continue rest tail)
+  | Unhead rest -> Unhead (continue rest tail)
+  | Left rest -> Left (continue rest tail)
+  | Right rest -> Right (continue rest tail)
+  | Effect (index, atom, body, rest) ->
+    Effect (index, atom, body, continue rest tail)
+  | Scope (bind, body, rest) ->
+    Scope (bind, body, continue rest tail)
+  | Scope2 (left, right, body, rest) ->
+    Scope2 (left, right, body, continue rest tail)
+  | Iter (len, item, state, body, rest) ->
+    Iter (len, item, state, body, continue rest tail)
+  | Choice (left, yes, right, no, shape, rest) ->
+    Choice (left, yes, right, no, shape, continue rest tail)
+  | Fork (shape, yes, no, rest) ->
+    Fork (shape, yes, no, continue rest tail)
 
 let rec build env term rest =
   match term with
@@ -349,6 +454,9 @@ let rec build env term rest =
           build env lhs rhs_code)
       | _ -> None
     end
+  | C_term.Cmp (rel, lhs, rhs) ->
+    Option.bind (build env rhs (Order (rel, rest))) (fun rhs_code ->
+      build env lhs rhs_code)
   | C_term.Cat (lhs, rhs) ->
     Option.bind (build env rhs (Join rest)) (fun rhs_code ->
       build env lhs rhs_code)
@@ -360,9 +468,57 @@ let rec build env term rest =
   | C_term.At (index, value) -> build env value (Pick (index, rest))
   | C_term.Uncons value -> build env value (Unhead rest)
   | C_term.Act (atom, body) ->
-    Option.map (fun code -> Effect (atom, code)) (build env body rest)
-  | C_term.Inl _ | C_term.Inr _ | C_term.Case _
-  | C_term.Vfold _ | C_term.Step _ | C_term.Close _ -> None
+    Option.map (fun body -> Effect (-1, atom, body, rest)) (build env body Done)
+  | C_term.Inl (value, right) ->
+    Option.bind (shape_of right) (fun right_shape ->
+      Option.bind (build env value Done) (fun value_code ->
+        match one_shape value_code with
+        | Some value_shape when same_shape value_shape right_shape ->
+          Some (continue value_code (Left rest))
+        | _ -> None))
+  | C_term.Inr (left, value) ->
+    Option.bind (shape_of left) (fun left_shape ->
+      Option.bind (build env value Done) (fun value_code ->
+        match one_shape value_code with
+        | Some value_shape when same_shape value_shape left_shape ->
+          Some (continue value_code (Right rest))
+        | _ -> None))
+  | C_term.Case (value, left, yes, right, no) ->
+    begin
+      match left.mul, right.mul with
+      | C_type.Zero, _ | _, C_type.Zero -> None
+      | C_type.One, _ | C_type.Many, _ ->
+        Option.bind (build (left :: env) yes Done) (fun yes_code ->
+          Option.bind (build (right :: env) no Done) (fun no_code ->
+            match one_shape yes_code, one_shape no_code with
+            | Some yes_shape, Some no_shape when same_shape yes_shape no_shape ->
+              build env value
+                (Choice (left, yes_code, right, no_code, yes_shape, rest))
+            | _ -> None))
+    end
+  | C_term.Vfold (vector, seed, fold) ->
+    begin
+      match fold.item.mul, fold.state.mul with
+      | C_type.Zero, _ | _, C_type.Zero -> None
+      | C_type.One, _ | C_type.Many, _ ->
+        Option.bind (build env vector Done) (fun vector_code ->
+          match one_shape vector_code, shape_of fold.item.typ,
+              shape_of fold.state.typ with
+          | Some (SVec (len, elem)), Some item_shape, Some state_shape
+              when same_shape elem item_shape ->
+            Option.bind
+              (build (fold.state :: fold.item :: env) fold.body Done)
+              (fun body_code ->
+                match one_shape body_code with
+                | Some body_shape when same_shape state_shape body_shape ->
+                  Option.bind
+                    (build env seed
+                      (Iter (len, fold.item, fold.state, body_code, rest)))
+                    (fun seed_code -> Some (continue vector_code seed_code))
+                | _ -> None)
+          | _ -> None)
+    end
+  | C_term.Step _ | C_term.Close _ -> None
 
 and build_vec env elem values rest =
   match values with
@@ -371,7 +527,186 @@ and build_vec env elem values rest =
     Option.bind (build_vec env elem tail (Cons rest)) (fun tail_code ->
       build env first tail_code)
 
-let lower term = build [] term Done
+let rec index_effects index = function
+  | Done -> Done, index
+  | Push (value, rest) ->
+    let rest, index = index_effects index rest in
+    Push (value, rest), index
+  | Void rest ->
+    let rest, index = index_effects index rest in
+    Void rest, index
+  | Get (id, shape, rest) ->
+    let rest, index = index_effects index rest in
+    Get (id, shape, rest), index
+  | Plus rest ->
+    let rest, index = index_effects index rest in
+    Plus rest, index
+  | Minus rest ->
+    let rest, index = index_effects index rest in
+    Minus rest, index
+  | Times rest ->
+    let rest, index = index_effects index rest in
+    Times rest, index
+  | Quot rest ->
+    let rest, index = index_effects index rest in
+    Quot rest, index
+  | Rem rest ->
+    let rest, index = index_effects index rest in
+    Rem rest, index
+  | Negate rest ->
+    let rest, index = index_effects index rest in
+    Negate rest, index
+  | Absolute rest ->
+    let rest, index = index_effects index rest in
+    Absolute rest, index
+  | Same rest ->
+    let rest, index = index_effects index rest in
+    Same rest, index
+  | Order (rel, rest) ->
+    let rest, index = index_effects index rest in
+    Order (rel, rest), index
+  | Join rest ->
+    let rest, index = index_effects index rest in
+    Join rest, index
+  | Clip (len, rest) ->
+    let rest, index = index_effects index rest in
+    Clip (len, rest), index
+  | Skip (len, rest) ->
+    let rest, index = index_effects index rest in
+    Skip (len, rest), index
+  | Duo rest ->
+    let rest, index = index_effects index rest in
+    Duo rest, index
+  | First rest ->
+    let rest, index = index_effects index rest in
+    First rest, index
+  | Second rest ->
+    let rest, index = index_effects index rest in
+    Second rest, index
+  | Empty (shape, rest) ->
+    let rest, index = index_effects index rest in
+    Empty (shape, rest), index
+  | Cons rest ->
+    let rest, index = index_effects index rest in
+    Cons rest, index
+  | Append rest ->
+    let rest, index = index_effects index rest in
+    Append rest, index
+  | Pick (at, rest) ->
+    let rest, index = index_effects index rest in
+    Pick (at, rest), index
+  | Unhead rest ->
+    let rest, index = index_effects index rest in
+    Unhead rest, index
+  | Left rest ->
+    let rest, index = index_effects index rest in
+    Left rest, index
+  | Right rest ->
+    let rest, index = index_effects index rest in
+    Right rest, index
+  | Effect (_, atom, body, rest) ->
+    let at = index in
+    let body, index = index_effects (index + 1) body in
+    let rest, index = index_effects index rest in
+    Effect (at, atom, body, rest), index
+  | Scope (bind, body, rest) ->
+    let body, index = index_effects index body in
+    let rest, index = index_effects index rest in
+    Scope (bind, body, rest), index
+  | Scope2 (left, right, body, rest) ->
+    let body, index = index_effects index body in
+    let rest, index = index_effects index rest in
+    Scope2 (left, right, body, rest), index
+  | Iter (len, item, state, body, rest) ->
+    let body, index = index_effects index body in
+    let rest, index = index_effects index rest in
+    Iter (len, item, state, body, rest), index
+  | Choice (left, yes, right, no, shape, rest) ->
+    let yes, index = index_effects index yes in
+    let no, index = index_effects index no in
+    let rest, index = index_effects index rest in
+    Choice (left, yes, right, no, shape, rest), index
+  | Fork (shape, yes, no, rest) ->
+    let yes, index = index_effects index yes in
+    let no, index = index_effects index no in
+    let rest, index = index_effects index rest in
+    Fork (shape, yes, no, rest), index
+
+let size_limit = C_eval.max_cost
+let size_stop = Z.succ size_limit
+
+let size_add left right =
+  Z.min size_stop (Z.add left right)
+
+let size_scale count value =
+  Z.min size_stop (Z.mul count value)
+
+let rec code_size = function
+  | Done -> Z.one
+  | Push (_, rest) | Void rest | Get (_, _, rest) | Plus rest | Minus rest
+  | Times rest | Quot rest | Rem rest | Negate rest | Absolute rest | Same rest
+  | Order (_, rest) | Join rest | Clip (_, rest) | Skip (_, rest) | Duo rest
+  | First rest | Second rest | Empty (_, rest) | Cons rest | Append rest
+  | Pick (_, rest) | Unhead rest | Left rest | Right rest ->
+    size_add Z.one (code_size rest)
+  | Effect (_, _, body, rest) | Scope (_, body, rest)
+  | Scope2 (_, _, body, rest) ->
+    size_add Z.one (size_add (code_size body) (code_size rest))
+  | Iter (len, _, _, body, rest) ->
+    size_add Z.one
+      (size_add
+        (size_scale (C_nat.to_z len) (code_size body))
+        (code_size rest))
+  | Choice (_, yes, _, no, _, rest) | Fork (_, yes, no, rest) ->
+    size_add Z.one
+      (size_add (code_size yes)
+        (size_add (code_size no) (code_size rest)))
+
+let lower_in inputs term =
+  match build inputs term Done with
+  | Some code when Z.leq (code_size code) size_limit ->
+    Some (fst (index_effects 0 code))
+  | Some _ | None -> None
+let lower term = lower_in [] term
+
+let rec locate at = function
+  | Done -> LDone
+  | Push (_, rest) -> LPush (at, locate at rest)
+  | Void rest -> LVoid (at, locate at rest)
+  | Get (_, _, rest) -> LGet (at, locate at rest)
+  | Plus rest -> LPlus (at, locate at rest)
+  | Minus rest -> LMinus (at, locate at rest)
+  | Times rest -> LTimes (at, locate at rest)
+  | Quot rest -> LQuot (at, locate at rest)
+  | Rem rest -> LRem (at, locate at rest)
+  | Negate rest -> LNegate (at, locate at rest)
+  | Absolute rest -> LAbsolute (at, locate at rest)
+  | Same rest -> LSame (at, locate at rest)
+  | Order (rel, rest) -> LOrder (rel, at, locate at rest)
+  | Join rest -> LJoin (at, locate at rest)
+  | Clip (len, rest) -> LClip (len, at, locate at rest)
+  | Skip (len, rest) -> LSkip (len, at, locate at rest)
+  | Duo rest -> LDuo (at, locate at rest)
+  | First rest -> LFirst (at, locate at rest)
+  | Second rest -> LSecond (at, locate at rest)
+  | Empty (_, rest) -> LEmpty (at, locate at rest)
+  | Cons rest -> LCons (at, locate at rest)
+  | Append rest -> LAppend (at, locate at rest)
+  | Pick (index, rest) -> LPick (index, at, locate at rest)
+  | Unhead rest -> LUnhead (at, locate at rest)
+  | Left rest -> LLeft (at, locate at rest)
+  | Right rest -> LRight (at, locate at rest)
+  | Effect (_, _, body, rest) ->
+    LEffect (at, locate at body, locate at rest)
+  | Scope (_, body, rest) -> LScope (at, locate at body, locate at rest)
+  | Scope2 (_, _, body, rest) ->
+    LScope2 (at, locate at body, locate at rest)
+  | Iter (_, _, _, body, rest) ->
+    LIter (at, locate at body, locate at rest)
+  | Choice (_, yes, _, no, _, rest) ->
+    LChoice (at, at, at, locate at yes, locate at no, locate at rest)
+  | Fork (_, yes, no, rest) ->
+    LFork (at, at, at, locate at yes, locate at no, locate at rest)
 
 let root sub = function
   | Some at :: rest -> Ok ({ at; sub }, rest)
@@ -397,6 +732,7 @@ let rec tree term marks =
   | C_term.Add (left, right) | C_term.Sub (left, right)
   | C_term.Mul (left, right) | C_term.Div (left, right)
   | C_term.Mod (left, right) | C_term.Eq (_, left, right)
+  | C_term.Cmp (_, left, right)
   | C_term.Cat (left, right) | C_term.Pair (left, right)
   | C_term.Vcat (left, right) ->
       let* left, marks = tree left marks in
@@ -408,14 +744,24 @@ let rec tree term marks =
     root [value; body] marks
   | C_term.Fst value | C_term.Snd value | C_term.Neg value
   | C_term.Abs value | C_term.Take (_, value)
-  | C_term.Drop (_, value) | C_term.At (_, value) | C_term.Uncons value ->
+  | C_term.Drop (_, value) | C_term.At (_, value) | C_term.Uncons value
+  | C_term.Inl (value, _) | C_term.Inr (_, value) ->
       let* value, marks = tree value marks in
       root [value] marks
+  | C_term.Case (value, _, yes, _, no) ->
+    let* value, marks = tree value marks in
+    let* yes, marks = tree yes marks in
+    let* no, marks = tree no marks in
+    root [value; yes; no] marks
   | C_term.Act (_, body) ->
       let* body, marks = tree body marks in
       root [body] marks
-  | C_term.Inl _ | C_term.Inr _ | C_term.Case _
-  | C_term.Vfold _ | C_term.Step _ | C_term.Close _ -> Error Map
+  | C_term.Vfold (vector, seed, fold) ->
+    let* vector, marks = tree vector marks in
+    let* seed, marks = tree seed marks in
+    let* body, marks = tree fold.body marks in
+    root [vector; seed; body] marks
+  | C_term.Step _ | C_term.Close _ -> Error Map
 
 and trees terms marks =
   match terms with
@@ -436,7 +782,8 @@ let rec spread at = function
   | C_term.Pair (left, right) | C_term.Add (left, right)
   | C_term.Sub (left, right) | C_term.Mul (left, right)
   | C_term.Div (left, right) | C_term.Mod (left, right)
-  | C_term.Eq (_, left, right) | C_term.Cat (left, right)
+  | C_term.Eq (_, left, right) | C_term.Cmp (_, left, right)
+  | C_term.Cat (left, right)
   | C_term.Vcat (left, right) ->
     { at; sub = [spread at left; spread at right] }
   | C_term.Unpair (value, _, _, body) ->
@@ -497,6 +844,12 @@ let rec retree source target mark =
     Option.bind (retree left_first right_first first_mark) (fun first ->
       Option.bind (retree left_second right_second second_mark) (fun second ->
         node [first; second]))
+  | C_term.Cmp (left_rel, left_first, left_second),
+      C_term.Cmp (right_rel, right_first, right_second),
+      [first_mark; second_mark] when left_rel = right_rel ->
+    Option.bind (retree left_first right_first first_mark) (fun first ->
+      Option.bind (retree left_second right_second second_mark) (fun second ->
+        node [first; second]))
   | C_term.Unpair (left_value, _, _, left_body),
       C_term.Unpair (right_value, _, _, right_body), [value_mark; body_mark] ->
     Option.bind (retree left_value right_value value_mark) (fun value ->
@@ -511,9 +864,27 @@ let rec retree source target mark =
   | C_term.At (_, left), C_term.At (_, right), [child]
   | C_term.Uncons left, C_term.Uncons right, [child] ->
     Option.bind (retree left right child) (fun value -> node [value])
+  | C_term.Inl (left, _), C_term.Inl (right, _), [child]
+  | C_term.Inr (_, left), C_term.Inr (_, right), [child] ->
+    Option.bind (retree left right child) (fun value -> node [value])
+  | C_term.Case (left_value, _, left_yes, _, left_no),
+      C_term.Case (right_value, _, right_yes, _, right_no),
+      [value_mark; yes_mark; no_mark] ->
+    Option.bind (retree left_value right_value value_mark) (fun value ->
+      Option.bind (retree left_yes right_yes yes_mark) (fun yes ->
+        Option.bind (retree left_no right_no no_mark) (fun no ->
+          node [value; yes; no])))
   | C_term.Act (left_atom, left), C_term.Act (right_atom, right), [child]
       when left_atom = right_atom ->
     Option.bind (retree left right child) (fun body -> node [body])
+  | C_term.Vfold (left_vector, left_seed, left_fold),
+      C_term.Vfold (right_vector, right_seed, right_fold),
+      [vector_mark; seed_mark; body_mark] ->
+    Option.bind (retree left_vector right_vector vector_mark) (fun vector ->
+      Option.bind (retree left_seed right_seed seed_mark) (fun seed ->
+        Option.bind
+          (retree left_fold.body right_fold.body body_mark)
+          (fun body -> node [vector; seed; body])))
   | _ -> None
 
 and retrees sources targets marks =
@@ -609,6 +980,12 @@ let rec into_loc term mark rest =
       | Some right_loc -> into_loc left left_mark right_loc
       | None -> None
     end
+  | C_term.Cmp (rel, left, right), [left_mark; right_mark] ->
+    begin
+      match into_loc right right_mark (LOrder (rel, mark.at, rest)) with
+      | Some right_loc -> into_loc left left_mark right_loc
+      | None -> None
+    end
   | C_term.Cat (left, right), [left_mark; right_mark] ->
     begin
       match into_loc right right_mark (LJoin (mark.at, rest)) with
@@ -629,10 +1006,36 @@ let rec into_loc term mark rest =
     into_loc value value_mark (LPick (index, mark.at, rest))
   | C_term.Uncons value, [value_mark] ->
     into_loc value value_mark (LUnhead (mark.at, rest))
+  | C_term.Inl (value, _), [value_mark] ->
+    into_loc value value_mark (LLeft (mark.at, rest))
+  | C_term.Inr (_, value), [value_mark] ->
+    into_loc value value_mark (LRight (mark.at, rest))
+  | C_term.Case (value, _, yes, _, no),
+      [value_mark; yes_mark; no_mark] ->
+    begin
+      match into_loc yes yes_mark LDone, into_loc no no_mark LDone with
+      | Some yes_loc, Some no_loc ->
+        into_loc value value_mark
+          (LChoice (mark.at, yes_mark.at, no_mark.at,
+            yes_loc, no_loc, rest))
+      | _ -> None
+    end
   | C_term.Act (_, body), [body_mark] ->
     Option.map
-      (fun body_loc -> LEffect (mark.at, body_loc))
-      (into_loc body body_mark rest)
+      (fun body_loc -> LEffect (mark.at, body_loc, rest))
+      (into_loc body body_mark LDone)
+  | C_term.Vfold (vector, seed, fold),
+      [vector_mark; seed_mark; body_mark] ->
+    begin
+      match into_loc fold.body body_mark LDone with
+      | Some body_loc ->
+        begin
+          match into_loc seed seed_mark (LIter (mark.at, body_loc, rest)) with
+          | Some seed_loc -> into_loc vector vector_mark seed_loc
+          | None -> None
+        end
+      | None -> None
+    end
   | _ -> None
 
 and loc_vec values marks at rest =
@@ -663,7 +1066,12 @@ let rec same_loc code loc =
   | Cons rest, LCons (_, lrest)
   | Append rest, LAppend (_, lrest)
   | Unhead rest, LUnhead (_, lrest)
-  | Effect (_, rest), LEffect (_, lrest) -> same_loc rest lrest
+  | Left rest, LLeft (_, lrest)
+  | Right rest, LRight (_, lrest) -> same_loc rest lrest
+  | Effect (_, _, body, rest), LEffect (_, lbody, lrest) ->
+    same_loc body lbody && same_loc rest lrest
+  | Order (rel, rest), LOrder (found, _, lrest) when rel = found ->
+    same_loc rest lrest
   | Get (_, _, rest), LGet (_, lrest)
   | Empty (_, rest), LEmpty (_, lrest) -> same_loc rest lrest
   | Clip (len, rest), LClip (found, _, lrest)
@@ -679,6 +1087,11 @@ let rec same_loc code loc =
       same_loc body lbody && same_loc rest lrest
   | Scope2 (_, _, body, rest), LScope2 (_, lbody, lrest) ->
     same_loc body lbody && same_loc rest lrest
+  | Iter (_, _, _, body, rest), LIter (_, lbody, lrest) ->
+    same_loc body lbody && same_loc rest lrest
+  | Choice (_, yes, _, no, _, rest),
+      LChoice (_, _, _, lyes, lno, lrest) ->
+    same_loc yes lyes && same_loc no lno && same_loc rest lrest
   | Fork (_, yes, no, rest), LFork (_, _, _, lyes, lno, lrest) ->
       same_loc yes lyes && same_loc no lno && same_loc rest lrest
   | _ -> false
@@ -688,6 +1101,26 @@ type mvalue =
   | VAtom of C_emit.lit
   | VPair of mvalue * mvalue
   | VVec of shape * mvalue list
+  | VSum of bool * mvalue
+
+let rec eval_value = function
+  | VUnit -> Some C_eval.Unit
+  | VAtom (C_emit.Bool value) -> Some (C_eval.Bool value)
+  | VAtom (C_emit.Int value) -> Some (C_eval.Int value)
+  | VAtom (C_emit.Bytes value) -> Some (C_eval.Bytes value)
+  | VAtom (C_emit.Data value) -> Some (C_rval.value value)
+  | VPair (left, right) ->
+    Option.bind (eval_value left) (fun left ->
+      Option.map (fun right -> C_eval.Pair (left, right)) (eval_value right))
+  | VVec (_, values) ->
+    let rec walk out = function
+      | [] -> Some (C_eval.Vec (Array.of_list (List.rev out)))
+      | value :: rest ->
+        Option.bind (eval_value value) (fun value -> walk (value :: out) rest)
+    in
+    walk [] values
+  | VSum (true, value) -> Option.map (fun value -> C_eval.Inl value) (eval_value value)
+  | VSum (false, value) -> Option.map (fun value -> C_eval.Inr value) (eval_value value)
 
 let rec value_shape = function
   | VUnit -> SUnit
@@ -699,6 +1132,15 @@ let rec value_shape = function
       | Some len -> SVec (len, elem)
       | None -> SVec (C_nat.zero, elem)
     end
+  | VSum (_, payload) -> SSum (value_shape payload)
+
+let rec same_value_shapes left right =
+  match left, right with
+  | [], [] -> true
+  | lhs :: lrest, rhs :: rrest ->
+    same_shape (value_shape lhs) (value_shape rhs)
+    && same_value_shapes lrest rrest
+  | _ -> false
 
 type slot = {
   bind : C_term.bind;
@@ -740,16 +1182,7 @@ let close_slot bind = function
     end
   | [] | _ :: _ -> None
 
-let rec size = function
-  | Done -> 1
-  | Push (_, rest) | Void rest | Get (_, _, rest) | Plus rest | Minus rest
-  | Times rest | Quot rest | Rem rest | Negate rest | Absolute rest | Same rest
-  | Join rest | Clip (_, rest) | Skip (_, rest) | Duo rest | First rest
-  | Second rest | Empty (_, rest) | Cons rest | Append rest
-  | Pick (_, rest) | Unhead rest | Effect (_, rest) -> 1 + size rest
-  | Scope (_, body, rest) -> 1 + size body + size rest
-  | Scope2 (_, _, body, rest) -> 1 + size body + size rest
-  | Fork (_, yes, no, rest) -> 1 + size yes + size no + size rest
+let size code = Z.to_int (code_size code)
 
 let rec collect_effects row = function
   | Done -> row
@@ -764,6 +1197,7 @@ let rec collect_effects row = function
   | Negate rest
   | Absolute rest
   | Same rest
+  | Order (_, rest)
   | Join rest
   | Clip (_, rest)
   | Skip (_, rest)
@@ -775,11 +1209,19 @@ let rec collect_effects row = function
   | Append rest
   | Pick (_, rest)
   | Unhead rest -> collect_effects row rest
-  | Effect (action, rest) -> collect_effects (C_eff.add action row) rest
+  | Left rest | Right rest -> collect_effects row rest
+  | Effect (_, action, body, rest) ->
+    collect_effects (collect_effects (C_eff.add action row) body) rest
   | Scope (_, body, rest) ->
     collect_effects (collect_effects row body) rest
   | Scope2 (_, _, body, rest) ->
     collect_effects (collect_effects row body) rest
+  | Iter (_, _, _, body, rest) ->
+    collect_effects (collect_effects row body) rest
+  | Choice (_, yes, _, no, _, rest) ->
+    collect_effects
+      (collect_effects (collect_effects row yes) no)
+      rest
   | Fork (_, yes, no, rest) ->
     collect_effects
       (collect_effects (collect_effects row yes) no)
@@ -856,6 +1298,20 @@ let rec exec fuel code env stack plan =
         match stack with
         | VAtom rhs :: VAtom lhs :: tail ->
           exec left rest env (VAtom (C_emit.Bool (equal lhs rhs)) :: tail) plan
+        | _ -> None
+      end
+    | Order (rel, rest) ->
+      begin
+        match stack with
+        | VAtom (C_emit.Int rhs) :: VAtom (C_emit.Int lhs) :: tail ->
+          let value =
+            match rel with
+            | C_term.Lt -> Z.lt lhs rhs
+            | C_term.Le -> Z.leq lhs rhs
+            | C_term.Gt -> Z.gt lhs rhs
+            | C_term.Ge -> Z.geq lhs rhs
+          in
+          exec left rest env (VAtom (C_emit.Bool value) :: tail) plan
         | _ -> None
       end
     | Join rest ->
@@ -940,6 +1396,18 @@ let rec exec fuel code env stack plan =
             (VPair (first, VVec (elem, values)) :: tail) plan
         | _ -> None
       end
+    | Left rest ->
+      begin
+        match stack with
+        | payload :: tail -> exec left rest env (VSum (true, payload) :: tail) plan
+        | [] -> None
+      end
+    | Right rest ->
+      begin
+        match stack with
+        | payload :: tail -> exec left rest env (VSum (false, payload) :: tail) plan
+        | [] -> None
+      end
     | Scope (bind, body, rest) ->
       begin
         match stack with
@@ -967,6 +1435,40 @@ let rec exec fuel code env stack plan =
                     exec left rest next stack next_plan)))))
         | _ -> None
       end
+    | Iter (len, item_bind, state_bind, body, rest) ->
+      begin
+        match item_bind.C_term.mul, state_bind.C_term.mul, stack,
+            shape_of item_bind.C_term.typ, shape_of state_bind.C_term.typ with
+        | C_type.Zero, _, _, _, _ | _, C_type.Zero, _, _, _ -> None
+        | _, _, state :: VVec (elem, values) :: tail, Some item_shape,
+            Some state_shape
+            when List.length values = C_nat.to_int len
+              && same_shape item_shape elem
+              && same_shape state_shape (value_shape state)
+              && List.for_all
+                (fun value -> same_shape elem (value_shape value))
+                values ->
+          exec_fold left body item_bind state_bind values env tail state plan rest
+        | _ -> None
+      end
+    | Choice (left_bind, yes, right_bind, no, form, rest) ->
+      begin
+        match left_bind.C_term.mul, right_bind.C_term.mul, stack with
+        | C_type.Zero, _, _ | _, C_type.Zero, _ -> None
+        | _, _, VSum (side, payload) :: tail ->
+          let bind, branch = if side then left_bind, yes else right_bind, no in
+          Option.bind (open_slot bind payload env) (fun opened ->
+            Option.bind (exec left branch opened tail plan)
+              (fun (after, prior, next_plan) ->
+              Option.bind (close_slot bind prior) (fun next ->
+                match after with
+                | item :: after_tail
+                    when same_shape form (value_shape item)
+                      && same_value_shapes after_tail tail ->
+                  exec left rest next after next_plan
+                | _ -> None)))
+        | _, _, _ -> None
+      end
     | Fork (form, yes, no, rest) ->
       begin
         match stack with
@@ -980,14 +1482,104 @@ let rec exec fuel code env stack plan =
             | _ -> None)
         | _ -> None
       end
-    | Effect (atom, rest) -> exec left rest env stack (atom :: plan)
+    | Effect (_, atom, body, rest) ->
+      Option.bind (exec left body env stack [])
+        (fun (after, next, actions) ->
+          match after with
+          | value :: _ ->
+            Option.bind (eval_value value) (fun payload ->
+              exec left rest next after
+                (actions @ (C_eval.direct atom payload :: plan)))
+          | [] -> None)
 
-let replay_plan code =
+and exec_fold fuel body item_bind state_bind values env tail state plan rest =
+  match values with
+  | [] -> exec fuel rest env (state :: tail) plan
+  | item :: values ->
+    Option.bind (open_slot item_bind item env) (fun first ->
+      Option.bind (open_slot state_bind state first) (fun opened ->
+        Option.bind (exec fuel body opened tail plan)
+          (fun (after, prior, next_plan) ->
+          match after with
+          | next_state :: after_tail when same_value_shapes after_tail tail ->
+            Option.bind (close_slot state_bind prior) (fun last ->
+              Option.bind (close_slot item_bind last) (fun next ->
+                exec_fold fuel body item_bind state_bind values next tail
+                  next_state next_plan rest))
+          | _ -> None)))
+
+let replay_actions code =
   match exec (1 + size code) code [] [] [] with
-  | Some ([VAtom value], [], plan) -> Some ([value], List.rev plan)
+  | Some ([VAtom value], [], actions) -> Some ([value], List.rev actions)
   | Some _ | None -> None
 
+let replay_plan code =
+  Option.map
+    (fun (value, actions) -> value, C_eval.atoms actions)
+    (replay_actions code)
+
 let replay code = Option.map fst (replay_plan code)
+
+let atom typ = function
+  | C_emit.Bool value when C_type.equal typ C_type.Bool ->
+    Some (VAtom (C_emit.Bool value))
+  | C_emit.Int value when C_type.equal typ C_type.Int ->
+    Some (VAtom (C_emit.Int value))
+  | C_emit.Bytes value ->
+    begin
+      match typ with
+      | C_type.Bytes len
+          when Z.equal (C_nat.to_z len) (Z.of_int (String.length value)) ->
+        Some (VAtom (C_emit.Bytes value))
+      | _ -> None
+    end
+  | C_emit.Data _ | C_emit.Bool _ | C_emit.Int _ -> None
+
+let rec open_inputs env = function
+  | [] -> Some env
+  | (bind, value) :: rest ->
+    begin
+      match atom bind.C_term.typ value, bind.mul with
+      | Some _, C_type.Zero -> open_inputs env rest
+      | Some value, (C_type.One | C_type.Many) ->
+        Option.bind (open_slot bind value env) (fun next ->
+          open_inputs next rest)
+      | None, _ -> None
+    end
+
+let terminal inputs env =
+  let state bind =
+    List.find_opt
+      (fun slot -> C_nat.equal bind.C_term.id slot.bind.C_term.id)
+      env
+  in
+  List.for_all
+    (fun bind ->
+      match bind.C_term.mul, state bind with
+      | C_type.Zero, None -> true
+      | C_type.One, Some slot -> not slot.live
+      | C_type.Many, Some slot -> slot.live
+      | _ -> false)
+    inputs
+
+let replay_actions_in code inputs =
+  match open_inputs [] inputs with
+  | None -> None
+  | Some env ->
+    begin
+      match exec (1 + size code) code env [] [] with
+      | Some ([VAtom value], final, actions)
+          when terminal (List.map fst inputs) final ->
+        Some ([value], List.rev actions)
+      | Some _ | None -> None
+    end
+
+let replay_plan_in code inputs =
+  Option.map
+    (fun (value, actions) -> value, C_eval.atoms actions)
+    (replay_actions_in code inputs)
+
+let replay_in code inputs = Option.map fst (replay_plan_in code inputs)
 
 let source source =
   let* parsed =
@@ -1007,19 +1599,25 @@ let source_tree parsed term =
   | Ok (value, []) -> Ok value
   | Ok (_, _ :: _) | Error _ -> Error Map
 
-let image parsed code loc result = {
+let image parsed inputs typ code loc result = {
+  inputs;
   code;
   loc;
+  typ;
   result;
+  emission = Lowered;
   veils = C_parse.veil_count parsed;
   veil_depth = C_parse.veil_depth parsed;
   span = C_parse.body_span parsed;
 }
 
-let closed parsed result = {
+let closed parsed typ result = {
+  inputs = [];
   code = Push (result, Done);
   loc = LPush (C_parse.body_span parsed, LDone);
-  result;
+  typ;
+  result = Some result;
+  emission = Specialized;
   veils = C_parse.veil_count parsed;
   veil_depth = C_parse.veil_depth parsed;
   span = C_parse.body_span parsed;
@@ -1033,7 +1631,7 @@ let finish ?marks parsed term (info : C_check.info) (out : C_eval.out) =
   in
   match lower term with
   | None ->
-    if out.C_eval.plan = [] then Ok (closed parsed result)
+    if out.C_eval.plan = [] then Ok (closed parsed info.typ result)
     else Error (Plan out.plan)
   | Some code ->
     begin
@@ -1053,26 +1651,62 @@ let finish ?marks parsed term (info : C_check.info) (out : C_eval.out) =
           match replay_plan code with
           | Some ([actual], plan)
               when equal actual result && plan_equal plan out.plan ->
-            Ok (image parsed code loc result)
+            Ok (image parsed [] info.typ code loc (Some result))
           | _ -> Error Replay
         end
       | Some _ ->
-        if out.plan = [] then Ok (closed parsed result)
+        if out.plan = [] then Ok (closed parsed info.typ result)
         else Error (Plan out.plan)
       | None -> Error Term
     end
 
+let runtime_input bind =
+  match shape_of bind.C_term.typ with
+  | Some SAtom -> Ok ()
+  | Some _ | None -> Error (Input (bind.id, bind.typ))
+
+let open_image parsed lowered (info : C_check.info) =
+  let rec inputs = function
+    | [] -> Ok ()
+    | bind :: rest ->
+      let* () = runtime_input bind in
+      inputs rest
+  in
+  let count = List.length lowered.C_low.inputs in
+  if count > Contract_vm.input_limit then Error (Inputs count)
+  else if Z.gt info.res.steps C_eval.max_cost then
+    Error (Run (C_eval.Fuel (C_eval.max_cost, info.res.steps)))
+  else
+  let* () = inputs lowered.C_low.inputs in
+  let effects = C_eff.to_list info.eff in
+  if effects <> [] then Error (Effects effects)
+  else
+    match lower_in lowered.inputs lowered.term with
+    | None -> Error Term
+    | Some code ->
+      begin
+        match one_shape code with
+        | Some SAtom ->
+          let* mark = source_tree parsed lowered.term in
+          let* loc =
+            match into_loc lowered.term mark LDone with
+            | Some value when same_loc code value -> Ok value
+            | Some _ | None -> Error Map
+          in
+          Ok (image parsed lowered.inputs info.typ code loc None)
+        | Some _ | None -> Error Term
+      end
+
 let compile source_text =
   let* parsed, lowered, info = source source_text in
-  let count = List.length lowered.C_low.inputs in
-  if count <> 0 then Error (Inputs count)
-  else
+  if lowered.C_low.inputs = [] then
     let* out =
       match C_eval.run lowered.term with
       | Ok value -> Ok value
       | Error error -> Error (Run error)
     in
     finish parsed lowered.term info out
+  else open_image parsed lowered info
 
 let compile_feed source_text feed =
   let* parsed, lowered, info = source source_text in
@@ -1099,10 +1733,18 @@ let compile_feed source_text feed =
   in
   finish ~marks parsed term info out
 
+let emission_text = function
+  | Lowered -> "lowered"
+  | Specialized -> "specialized"
+
 let text = function
   | Source error -> C_parse.text error
   | Feed error -> C_feed.text error
-  | Inputs count -> Printf.sprintf "machine input count = %d expected = 0" count
+  | Input (id, typ) ->
+    "machine input is not scalar id = " ^ C_nat.text id
+    ^ " type = " ^ C_type.text typ
+  | Inputs count ->
+    Printf.sprintf "machine input count = %d maximum = 60" count
   | Effects effects ->
       "machine effects are not representable effects = "
       ^ C_eff.text (C_eff.of_list effects)

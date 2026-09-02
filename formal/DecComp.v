@@ -118,6 +118,9 @@ Proof.
     rewrite IHchecked2, ty_eqb_refl.
     reflexivity.
   - cbn.
+    rewrite IHchecked1, ty_eqb_refl, IHchecked2, ty_eqb_refl.
+    reflexivity.
+  - cbn.
     rewrite IHchecked1, IHchecked2.
     reflexivity.
   - cbn.

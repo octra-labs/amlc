@@ -37,6 +37,8 @@ type binop =
 
 type unop = Neg | Not
 
+type mult = Once | Many
+
 type expr =
   | EInt of Z.t
   | EBool of bool
@@ -64,6 +66,18 @@ type expr =
   | EIndexField of string * expr list * string
   | EEnumVariant of string * string
   | ETernary of expr * expr * expr
+  | EAction of C_eff.atom * expr
+  | EUse of use_expr
+
+and use_expr = {
+  ux_name : string;
+  ux_caps : expr list;
+  ux_arg : expr;
+  ux_mult : mult;
+  ux_bind : string;
+  ux_typ : typ;
+  ux_body : expr;
+}
 
 type stmt =
   | SLocated of int * int * stmt
@@ -130,6 +144,30 @@ type func_def = {
   fn_body : stmt list;
 }
 
+type form_param = {
+  fp_name : string;
+  fp_typ : typ;
+  fp_mult : mult;
+}
+
+type form_mark = {
+  mk_atom : C_eff.atom;
+  mk_target : string;
+}
+
+type form_def = {
+  fm_name : string;
+  fm_caps : form_param list;
+  fm_arg : form_param;
+  fm_ret : typ;
+  fm_mult : mult;
+  fm_marks : form_mark list;
+  fm_lim : C_limit.t option;
+  fm_body : expr;
+  fm_line : int;
+  fm_column : int;
+}
+
 type state_field = {
   sf_name : string;
   sf_typ : typ;
@@ -187,7 +225,10 @@ type contract = {
   implements : string list;
   ctor : func_def option;
   funcs : func_def list;
+  forms : form_def list;
 }
+
+type program = contract
 
 let typ_to_string = function
   | TInt -> "int" | TBool -> "bool" | TString -> "string"

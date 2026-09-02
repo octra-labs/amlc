@@ -13,6 +13,9 @@ module Pfile = Octra_vm.C_pfile
 module Folio = Octra_vm.C_folio
 module Rval = Octra_vm.C_rval
 module VM = Octra_vm.C_vm
+module Eval = Octra_vm.C_eval
+module Input = Octra_vm.Aml_input
+module Local = Octra_vm.Local_vm
 
 let read path = In_channel.with_open_bin path In_channel.input_all
 
@@ -94,6 +97,16 @@ let compile command source feed =
   | Ok value -> value
   | Error error -> fail command (Octb.text error)
 
+let emission (artifact : Octb.t) =
+  Octra_vm.C_mach.emission_text artifact.Octb.emission
+
+let veil (artifact : Octb.t) = Octb.veil_text artifact.veils
+
+let checked_result command artifact =
+  match artifact.Octb.result with
+  | Some value -> value
+  | None -> fail command "runtime arguments are required"
+
 let feed_specs command source =
   let parsed =
     match Parse.parse source with
@@ -120,20 +133,162 @@ let feed_opt command = function
 
 let decode command raw =
   match Octb.decode raw with
-    | Ok value -> value
-    | Error error -> fail command (Octb.decode_text error)
+  | Ok value -> value
+  | Error error -> fail command (Octb.decode_text error)
+
+let native_image command raw =
+  match Octra_vm.Bytecode.decode_image raw with
+  | Error reason -> fail command reason
+  | Ok image ->
+    begin
+      match Octra_vm.Contract_vm.Verifier.verify image.code with
+      | Ok () -> image
+      | Error _ -> fail command "OCTB verification refused"
+    end
 
 let state () = VM.make ~activate:(Some Z.zero) ()
 
+let same_native expected actual =
+  match expected, actual with
+  | Emit.Bool left, Octra_vm.Contract_vm.VBool right -> Bool.equal left right
+  | Emit.Int left, Octra_vm.Contract_vm.VInt right -> Z.equal left right
+  | Emit.Bytes left, Octra_vm.Contract_vm.VBytes right ->
+    String.equal left right
+  | Emit.Data left, Octra_vm.Contract_vm.VString right ->
+    String.equal (Rval.encode left) right
+  | _ -> false
+
 let run_octb command raw =
   let image = decode command raw in
+  if Array.length image.inputs <> 0 then
+    fail command "runtime arguments are required";
+  let native = native_image command raw in
+  let config =
+    Local.config
+      ~view:true
+      ~byte_result:Octra_vm.Contract_vm.Bytes_result
+      ~limit:1_000_000
+      ~step_cap:1_000_000
+      ~method_name:"main"
+      ~args:[]
+      ()
+  in
+  let outcome =
+    match Local.run_at ~trace:false config ~entry:0 native.code with
+    | Ok value -> value
+    | Error error -> fail command (Local.error_text error)
+  in
+  begin
+    match outcome.stop with
+    | Local.Returned -> ()
+    | Local.Reverted | Local.Step_cap | Local.Host_operation _ ->
+      fail command
+        (Printf.sprintf "execution stopped stop = %s effort = %d steps = %d"
+          (Local.stop_text outcome.stop) outcome.effort outcome.steps)
+  end;
   let machine = state () in
   begin
     match VM.run machine image.code with
     | Ok () -> ()
     | Error error -> fail command (VM.text error)
   end;
-  VM.result machine
+  let result = VM.result machine in
+  if not (same_native result outcome.result)
+      || not (Z.equal (VM.work machine) (Z.of_int outcome.effort))
+      || VM.steps machine <> outcome.steps
+      || outcome.storage <> [] || outcome.events <> [] then
+    fail command "production VM differs from the checked machine";
+  result
+
+let core_values command inputs values =
+  match Input.core inputs values with
+  | Ok parsed -> parsed
+  | Error error -> fail command (Input.error_text error)
+
+let octb_values command inputs values =
+  match Input.core_octb inputs values with
+  | Ok parsed -> parsed
+  | Error error -> fail command (Input.error_text error)
+
+let local_run ?(trace = false) command raw method_name values =
+  let image = native_image command raw in
+  let config =
+    Local.config
+      ~view:true
+      ~byte_result:Octra_vm.Contract_vm.Bytes_result
+      ~method_name
+      ~args:(List.map (fun (value : Input.core_value) -> value.vm) values)
+      ()
+  in
+  match Local.run ~trace config image.code with
+  | Error error -> fail command (Local.error_text error)
+  | Ok outcome ->
+    begin
+      match outcome.stop with
+      | Local.Returned -> outcome
+      | Local.Reverted | Local.Step_cap | Local.Host_operation _ ->
+        fail command
+          (Printf.sprintf "execution stopped stop = %s effort = %d steps = %d"
+            (Local.stop_text outcome.stop) outcome.effort outcome.steps)
+    end
+
+let open_frame outcome =
+  List.find_opt
+    (fun (frame : Local.frame) ->
+      match frame.op with
+      | Octra_vm.Contract_vm.NOP -> true
+      | _ -> false)
+    outcome.Local.frames
+
+let open_match code values outcome =
+  match open_frame outcome with
+  | None -> Error "open VM separator is absent"
+  | Some frame ->
+    let inputs = List.map (fun (value : Input.core_value) -> value.lit) values in
+    begin
+      match VM.make_in ~activate:(Some Z.zero) inputs with
+      | Error error -> Error (VM.text error)
+      | Ok machine ->
+        begin
+          match VM.run machine code with
+          | Error error -> Error (VM.text error)
+          | Ok () ->
+            let steps = outcome.steps - frame.index - 1 in
+            let work = outcome.effort - frame.effort_after in
+            if steps >= 0 && work >= 0
+                && same_native (VM.result machine) outcome.result
+                && VM.steps machine = steps
+                && Z.equal (VM.work machine) (Z.of_int work)
+                && outcome.storage = [] && outcome.events = [] then Ok ()
+            else Error "production VM differs from the open checked machine"
+        end
+    end
+
+let open_machine command code values outcome =
+  match open_match code values outcome with
+  | Ok () -> ()
+  | Error reason -> fail command reason
+
+let core_result command typ = function
+  | Octra_vm.Contract_vm.VInt value when Octra_vm.C_type.equal typ Octra_vm.C_type.Int ->
+    Emit.Int value, Eval.Int value
+  | Octra_vm.Contract_vm.VBool value
+      when Octra_vm.C_type.equal typ Octra_vm.C_type.Bool ->
+    Emit.Bool value, Eval.Bool value
+  | Octra_vm.Contract_vm.VBytes value ->
+    begin
+      match typ with
+      | Octra_vm.C_type.Bytes len
+          when Octra_vm.C_nat.to_int len = String.length value ->
+        Emit.Bytes value, Eval.Bytes value
+      | _ -> fail command "VM result type differs from program type"
+    end
+  | _ -> fail command "VM result type differs from program type"
+
+let main_method command = function
+  | None -> "main"
+  | Some name when String.equal name "main" -> name
+  | Some _ -> fail command "method is absent"
 
 let check path feed_path =
   let raw = source path in
@@ -158,10 +313,11 @@ let check path feed_path =
       end
   end;
   Printf.printf
-    "status = pass command = check program = %s type = %s effects = %s veils = %d veil_depth = %s\n"
+    "status = pass command = check program = %s type = %s effects = %s veil = %s veils = %d veil_depth = %s\n"
     (Octra_vm.C_syn.name_text (Parse.name parsed))
     (Octra_vm.C_type.text info.Octra_vm.C_check.typ)
     (Octra_vm.C_eff.text info.eff)
+    (Octb.veil_text (Parse.veil_count parsed))
     (Parse.veil_count parsed)
     (Octra_vm.C_nat.text (Parse.veil_depth parsed))
 
@@ -174,18 +330,119 @@ let build_as command input output feed_path =
     with Sys_error reason -> fail command reason
   end;
   Printf.printf
-    "status = pass command = %s bytes = %d sha256 = %s veils = %d veil_depth = %s output = %s\n"
-    command (String.length artifact.octb) (sha artifact.octb) artifact.veils
+    "status = pass command = %s emission = %s bytes = %d sha256 = %s veil = %s veils = %d veil_depth = %s output = %s\n"
+    command (emission artifact) (String.length artifact.octb)
+    (sha artifact.octb) (veil artifact) artifact.veils
     (Octra_vm.C_nat.text artifact.veil_depth) output
 
 let build input output feed_path = build_as "build" input output feed_path
 
-let run path feed_path =
-  let artifact = compile "run" (source path) (feed_opt "run" feed_path) in
-  let result = run_octb "run" artifact.octb in
-  if not (Octra_vm.C_mach.equal result artifact.result) then
-    fail "run" "VM result differs from the checked machine";
-  Printf.printf "status = pass command = run result = %s\n" (lit_text result)
+let open_source command raw (artifact : Octb.t) method_name values =
+  let method_name = main_method command method_name in
+  let values = core_values command artifact.Octb.inputs values in
+  let outcome = local_run ~trace:true command artifact.octb method_name values in
+  let image = decode command artifact.octb in
+  open_machine command image.code values outcome;
+  let result, eval_result = core_result command artifact.typ outcome.result in
+  let machine_inputs =
+    List.map2
+      (fun bind (value : Input.core_value) -> bind, value.lit)
+      artifact.inputs values
+  in
+  begin
+    match Octra_vm.C_mach.replay_in artifact.plan machine_inputs with
+    | Some [expected] when Octra_vm.C_mach.equal expected result -> ()
+    | Some _ | None -> fail command "VM result differs from the checked machine"
+  end;
+  let parsed =
+    match Parse.parse raw with
+    | Ok value -> value
+    | Error error -> fail command (Parse.text error)
+  in
+  let lowered, _ =
+    match Parse.compile parsed with
+    | Ok value -> value
+    | Error error -> fail command (Parse.text error)
+  in
+  let eval_inputs =
+    List.map2
+      (fun bind (value : Input.core_value) -> bind, value.value)
+      lowered.Octra_vm.C_low.inputs values
+  in
+  begin
+    match Eval.run_in eval_inputs lowered.term with
+    | Ok out when Eval.equal out.value eval_result -> ()
+    | Ok _ | Error _ -> fail command "VM result differs from the evaluator"
+  end;
+  method_name, result, outcome
+
+let run path feed_path method_name values =
+  let raw = source path in
+  let artifact = compile "run" raw (feed_opt "run" feed_path) in
+  match artifact.result with
+  | Some expected ->
+    if Option.is_some method_name || values <> [] then
+      fail "run" "runtime arguments do not apply to a closed program";
+    let result = run_octb "run" artifact.octb in
+    if not (Octra_vm.C_mach.equal result expected) then
+      fail "run" "VM result differs from the checked machine";
+    Printf.printf
+      "status = pass command = run emission = %s result = %s veil = %s\n"
+      (emission artifact) (lit_text result) (veil artifact)
+  | None ->
+    if Option.is_some feed_path then
+      fail "run" "feed and runtime arguments are mutually exclusive";
+    let method_name, result, outcome =
+      open_source "run" raw artifact method_name values
+    in
+    Printf.printf
+      "status = pass command = run emission = %s method = %s result = %s effort = %d steps = %d veil = %s\n"
+      (emission artifact) method_name (lit_text result) outcome.effort
+      outcome.steps (veil artifact)
+
+let open_octb command raw method_name values =
+  let image = decode command raw in
+  if Array.length image.inputs = 0 then
+    fail command "runtime arguments do not apply to a closed program";
+  let output =
+    match image.output with
+    | Some value -> value
+    | None -> fail command "OCTB result type is absent"
+  in
+  let method_name = main_method command method_name in
+  let values = octb_values command image.inputs values in
+  let outcome = local_run ~trace:true command raw method_name values in
+  open_machine command image.code values outcome;
+  let result, _ = core_result command output outcome.result in
+  image, method_name, result, outcome
+
+let run_open_octb command raw method_name values =
+  let image, method_name, result, outcome =
+    open_octb command raw method_name values
+  in
+  Printf.printf
+    "status = pass command = %s input = octb emission = %s method = %s result = %s effort = %d steps = %d vm = AML storage = memory veil = %s\n"
+    command (Octb.image_emission image) method_name (lit_text result)
+    outcome.effort outcome.steps (Octb.image_veil image)
+
+let test_open_octb command raw method_name values =
+  let left_image, left_method, left_result, left =
+    open_octb command raw method_name values
+  in
+  let right_image, right_method, right_result, right =
+    open_octb command raw method_name values
+  in
+  if left_image.emission <> right_image.emission
+      || left_image.veil <> right_image.veil
+      || not (String.equal left_method right_method)
+      || not (Octra_vm.C_mach.equal left_result right_result)
+      || left.effort <> right.effort || left.steps <> right.steps
+      || left.storage <> right.storage || left.events <> right.events then
+    fail command "repeated execution differs";
+  Printf.printf
+    "status = pass command = %s input = octb emission = %s repeats = 2 method = %s result = %s effort = %d steps = %d sha256 = %s veil = %s\n"
+    command (Octb.image_emission left_image) left_method (lit_text left_result)
+    left.effort left.steps (sha raw) (Octb.image_veil left_image)
 
 let op_text = function
   | Octb.Load (dst, value) ->
@@ -203,6 +460,10 @@ let op_text = function
   | Octb.Absolute (dst, src) -> Printf.sprintf "abs(r%d,r%d)" dst src
   | Octb.Same (dst, left, right) ->
       Printf.sprintf "eq(r%d,r%d,r%d)" dst left right
+  | Octb.Less (dst, left, right) ->
+      Printf.sprintf "lt(r%d,r%d,r%d)" dst left right
+  | Octb.Greater (dst, left, right) ->
+      Printf.sprintf "gt(r%d,r%d,r%d)" dst left right
   | Octb.Join (dst, left, right) ->
       Printf.sprintf "concat(r%d,r%d,r%d)" dst left right
   | Octb.Minus (dst, left, right) ->
@@ -219,6 +480,7 @@ let op_text = function
 let op_reg = function
   | Octb.Load (dst, _) | Octb.Move (dst, _)
   | Octb.Plus (dst, _, _) | Octb.Same (dst, _, _)
+  | Octb.Less (dst, _, _) | Octb.Greater (dst, _, _)
   | Octb.Times (dst, _, _)
   | Octb.Quotient (dst, _, _) | Octb.Remainder (dst, _, _)
   | Octb.Negate (dst, _) | Octb.Absolute (dst, _)
@@ -344,6 +606,8 @@ let debug_with path fixed args =
     | None -> feed_opt "debug" req.feed
   in
   let artifact = compile "debug" raw feed in
+  if artifact.inputs <> [] then
+    fail "debug" "runtime input debugging is unavailable";
   let proved =
     match feed with
     | None ->
@@ -364,6 +628,7 @@ let debug_with path fixed args =
   if Array.length code <> Array.length artifact.code
       || Array.length code <> Array.length proved.frames then
     fail "debug" "instruction metadata lengths differ";
+  let production = run_octb "debug" artifact.octb in
   let source_hash =
     match feed with
     | None -> sha raw
@@ -439,7 +704,9 @@ let debug_with path fixed args =
                 with Sys_error reason -> fail "debug" reason
               end
           end;
-          Printf.printf "status = paused command = debug pc = %d steps = %d\n" pc count;
+          Printf.printf
+            "status = paused command = debug emission = %s pc = %d steps = %d veil = %s\n"
+            (emission artifact) pc count (veil artifact);
           `Pause
         | Dbg.Step ->
           let running =
@@ -470,7 +737,8 @@ let debug_with path fixed args =
     if Option.is_some prior_trace && not replayed then
       fail "debug" "session step is outside the execution path";
     let result = VM.result machine in
-    if not (Octra_vm.C_mach.equal result artifact.result) then
+    if not (Octra_vm.C_mach.equal result production)
+        || not (Octra_vm.C_mach.equal result (checked_result "debug" artifact)) then
       fail "debug" "VM result differs from the checked machine";
     if not (Dbg.check cfg result) then fail "debug" "result differs from expectation";
     let text = trace_text rows in
@@ -488,8 +756,9 @@ let debug_with path fixed args =
           try write path text with Sys_error reason -> fail "debug" reason
         end
     end;
-    Printf.printf "status = pass command = debug result = %s trace = %s\n"
-      (lit_text result) (sha text)
+    Printf.printf
+      "status = pass command = debug emission = %s result = %s trace = %s veil = %s\n"
+      (emission artifact) (lit_text result) (sha text) (veil artifact)
 
 let debug path args = debug_with path None args
 
@@ -505,6 +774,9 @@ let debug_octb path args =
   distinct path req;
   let raw = source path in
   let image = decode "debug" raw in
+  if Array.length image.inputs <> 0 then
+    fail "debug" "runtime input debugging is unavailable";
+  let production = run_octb "debug" raw in
   let code = image.code in
   let cap = Option.value ~default:(Array.length code) req.cap in
   let cfg =
@@ -528,8 +800,9 @@ let debug_octb path args =
       match Dbg.decide cfg ~skip:None ~seen:count ~pc ~line:0 with
       | Dbg.Limit -> fail "debug" "step cap reached"
       | Dbg.Pause ->
-        Printf.printf "status = paused command = debug pc = %d steps = %d\n"
-          pc count;
+        Printf.printf
+          "status = paused command = debug emission = %s pc = %d steps = %d veil = %s\n"
+          (Octb.image_emission image) pc count (Octb.image_veil image);
         `Pause
       | Dbg.Step ->
         let op = code.(pc) in
@@ -554,6 +827,8 @@ let debug_octb path args =
   | `Pause -> ()
   | `Done rows ->
     let result = VM.result machine in
+    if not (Octra_vm.C_mach.equal result production) then
+      fail "debug" "VM result differs from the production VM";
     if not (Dbg.check cfg result) then
       fail "debug" "result differs from expectation";
     let text = trace_text rows in
@@ -571,8 +846,10 @@ let debug_octb path args =
           try write path text with Sys_error reason -> fail "debug" reason
         end
     end;
-    Printf.printf "status = pass command = debug result = %s trace = %s\n"
-      (lit_text result) (sha text)
+    Printf.printf
+      "status = pass command = debug emission = %s result = %s trace = %s veil = %s\n"
+      (Octb.image_emission image) (lit_text result) (sha text)
+      (Octb.image_veil image)
 
 let feed input values output =
   if String.equal input output || String.equal values output
@@ -610,26 +887,52 @@ let dump format path =
   let image = decode "dump" raw in
   Aml_dump.write stdout ~format ~digest:(sha raw) raw image
 
-let test path feed_path =
+let test path feed_path method_name values =
   let raw = source path in
   let feed = feed_opt "test" feed_path in
   let left = compile "test" raw feed in
   let right = compile "test" raw feed in
   if not (String.equal left.octb right.octb)
       || left.code <> right.code
+      || left.emission <> right.emission
       || not (Octra_vm.C_smap.equal left.map right.map)
       || not (Live.equal left.live right.live)
       || left.veils <> right.veils
       || not (Octra_vm.C_nat.equal left.veil_depth right.veil_depth)
-      || not (Octra_vm.C_mach.equal left.result right.result) then
+      || not (Option.equal Octra_vm.C_mach.equal left.result right.result) then
     fail "test" "repeated compilation differs";
-  let result = run_octb "test" left.octb in
-  if not (Octra_vm.C_mach.equal result left.result) then
-    fail "test" "VM result differs from the checked machine";
-  Printf.printf
-    "status = pass command = test repeats = 2 result = %s sha256 = %s veils = %d veil_depth = %s\n"
-    (lit_text result) (sha left.octb) left.veils
-    (Octra_vm.C_nat.text left.veil_depth)
+  match left.result with
+  | Some expected ->
+    if Option.is_some method_name || values <> [] then
+      fail "test" "runtime arguments do not apply to a closed program";
+    let result = run_octb "test" left.octb in
+    if not (Octra_vm.C_mach.equal result expected) then
+      fail "test" "VM result differs from the checked machine";
+    Printf.printf
+      "status = pass command = test emission = %s repeats = 2 result = %s sha256 = %s veil = %s veils = %d veil_depth = %s\n"
+      (emission left) (lit_text result) (sha left.octb) (veil left) left.veils
+      (Octra_vm.C_nat.text left.veil_depth)
+  | None ->
+    if Option.is_some feed_path then
+      fail "test" "feed and runtime arguments are mutually exclusive";
+    let left_method, left_result, left_out =
+      open_source "test" raw left method_name values
+    in
+    let right_method, right_result, right_out =
+      open_source "test" raw right method_name values
+    in
+    if not (String.equal left_method right_method)
+        || not (Octra_vm.C_mach.equal left_result right_result)
+        || left_out.effort <> right_out.effort
+        || left_out.steps <> right_out.steps
+        || left_out.storage <> right_out.storage
+        || left_out.events <> right_out.events then
+      fail "test" "repeated execution differs";
+    Printf.printf
+      "status = pass command = test emission = %s repeats = 2 method = %s result = %s effort = %d steps = %d sha256 = %s veil = %s veils = %d veil_depth = %s\n"
+      (emission left) left_method (lit_text left_result) left_out.effort
+      left_out.steps (sha left.octb) (veil left) left.veils
+      (Octra_vm.C_nat.text left.veil_depth)
 
 type project_input = {
   image : Pfile.image;
@@ -688,12 +991,36 @@ let project_make command manifest epoch =
   in
   input, folio
 
+let project_origins command folio =
+  match Folio.origins folio with
+  | Some values -> values
+  | None -> fail command "project origin is invalid"
+
+let project_artifact command (origin : Folio.origin) =
+  let compiled =
+    match origin.input with
+    | None -> Octb.compile origin.src.body
+    | Some input -> Octb.compile_feed origin.src.body input
+  in
+  match compiled with
+  | Ok value -> value
+  | Error error -> fail command (Octb.text error)
+
+let emission_counts command folio =
+  List.fold_left
+    (fun (lowered, specialized) origin ->
+      match (project_artifact command origin).emission with
+      | Octra_vm.C_mach.Lowered -> lowered + 1, specialized
+      | Octra_vm.C_mach.Specialized -> lowered, specialized + 1)
+    (0, 0) (project_origins command folio)
+
 let project_check_as command manifest raw_epoch =
   let epoch = epoch command raw_epoch in
   let _, folio = project_make command manifest epoch in
+  let lowered, specialized = emission_counts command folio in
   Printf.printf
-    "status = pass command = %s roots = %d epoch = %s\n"
-    command (List.length folio.parts) (Z.to_string epoch)
+    "status = pass command = %s roots = %d lowered = %d specialized = %d epoch = %s\n"
+    command (List.length folio.parts) lowered specialized (Z.to_string epoch)
 
 let project_check manifest raw_epoch =
   project_check_as "project-check" manifest raw_epoch
@@ -701,6 +1028,7 @@ let project_check manifest raw_epoch =
 let project_build_as command manifest raw_epoch output =
   let epoch = epoch command raw_epoch in
   let _, folio = project_make command manifest epoch in
+  let lowered, specialized = emission_counts command folio in
   let raw =
     match Folio.file folio with
     | Some value -> value
@@ -735,8 +1063,9 @@ let project_build_as command manifest raw_epoch output =
       fail command reason
   end;
   Printf.printf
-    "status = pass command = %s roots = %d bytes = %d sha256 = %s output = %s\n"
-    command (List.length folio.parts) (String.length raw) (sha raw) output
+    "status = pass command = %s roots = %d lowered = %d specialized = %d bytes = %d sha256 = %s output = %s\n"
+    command (List.length folio.parts) lowered specialized (String.length raw)
+    (sha raw) output
 
 let project_build manifest raw_epoch output =
   project_build_as "project-build" manifest raw_epoch output
@@ -754,11 +1083,6 @@ let root_input command (root : Proj.root) =
     | Ok value -> Some value
     | Error error -> fail command (Feed.text error)
 
-let project_origins command folio =
-  match Folio.origins folio with
-  | Some values -> values
-  | None -> fail command "project origin is invalid"
-
 let project_origin command folio name =
   match
     List.find_opt
@@ -769,25 +1093,19 @@ let project_origin command folio name =
   | None -> fail command "root name is absent"
 
 let project_result command (origin : Folio.origin) =
-  let compiled =
-    match origin.input with
-    | None -> Octb.compile origin.src.body
-    | Some input -> Octb.compile_feed origin.src.body input
-  in
-  match compiled with
-  | Ok value -> value.result
-  | Error error -> fail command (Octb.text error)
+  checked_result command (project_artifact command origin)
 
 let project_run path name =
   let _, folio = folio "project-run" path in
   let origin = project_origin "project-run" folio name in
   let result = run_octb "project-run" origin.part.octb in
-  let expected = project_result "project-run" origin in
+  let artifact = project_artifact "project-run" origin in
+  let expected = checked_result "project-run" artifact in
   if not (Octra_vm.C_mach.equal result expected) then
     fail "project-run" "VM result differs from the checked root";
   Printf.printf
-    "status = pass command = project-run root = %s result = %s\n"
-    name (lit_text result)
+    "status = pass command = project-run root = %s emission = %s result = %s veil = %s\n"
+    name (emission artifact) (lit_text result) (veil artifact)
 
 let project_inspect path =
   let raw, folio = folio "project-inspect" path in
@@ -800,20 +1118,22 @@ let project_inspect path =
         | Some input ->
           List.length (Feed.values input), sha (Feed.encode input)
       in
-      let result = project_result "project-inspect" origin in
+      let artifact = project_artifact "project-inspect" origin in
+      let result = checked_result "project-inspect" artifact in
       Printf.printf
-        "event = root name = %s path = %s source_bytes = %d inputs = %d bytes = %d instructions = %d slot_rows = %d source_sha256 = %s feed_sha256 = %s octb_sha256 = %s result = %s\n"
-        origin.root.name origin.root.path (String.length origin.src.body) inputs
+        "event = root name = %s path = %s emission = %s source_bytes = %d inputs = %d bytes = %d instructions = %d slot_rows = %d source_sha256 = %s feed_sha256 = %s octb_sha256 = %s result = %s veil = %s\n"
+        origin.root.name origin.root.path (emission artifact)
+        (String.length origin.src.body) inputs
         (String.length origin.part.octb) (Array.length origin.spans)
         (Array.length origin.rows) (sha origin.src.body) feed_sha
-        (sha origin.part.octb) (lit_text result))
+        (sha origin.part.octb) (lit_text result) (veil artifact))
     origins;
   Printf.printf
     "status = pass command = project-inspect roots = %d epoch = %s bytes = %d sha256 = %s\n"
     (List.length folio.parts) (Z.to_string folio.epoch) (String.length raw)
     (sha raw)
 
-let project_test_as command manifest raw_epoch =
+let project_repeated command manifest raw_epoch =
   let epoch = natural command "epoch" raw_epoch in
   let _, left = project_make command manifest epoch in
   let _, right = project_make command manifest epoch in
@@ -829,22 +1149,24 @@ let project_test_as command manifest raw_epoch =
   in
   if not (String.equal left_raw right_raw) then
     fail command "repeated project compilation differs";
-  begin
-    match Folio.verify left_raw with
-    | Error error -> fail command (Folio.text error)
-    | Ok checked ->
-      let origins = project_origins command checked in
-      List.iter
-        (fun (origin : Folio.origin) ->
-          let result = run_octb command origin.part.octb in
-          let expected = project_result command origin in
-          if not (Octra_vm.C_mach.equal result expected) then
-            fail command "VM result differs from the checked root")
-        origins
-  end;
+  match Folio.verify left_raw with
+  | Error error -> fail command (Folio.text error)
+  | Ok checked -> checked, left_raw
+
+let project_test_as command manifest raw_epoch =
+  let checked, left_raw = project_repeated command manifest raw_epoch in
+  let origins = project_origins command checked in
+  List.iter
+    (fun (origin : Folio.origin) ->
+      let result = run_octb command origin.part.octb in
+      let expected = project_result command origin in
+      if not (Octra_vm.C_mach.equal result expected) then
+        fail command "VM result differs from the checked root")
+    origins;
+  let lowered, specialized = emission_counts command checked in
   Printf.printf
-    "status = pass command = %s repeats = 2 roots = %d sha256 = %s\n"
-    command (List.length left.parts) (sha left_raw)
+    "status = pass command = %s repeats = 2 roots = %d lowered = %d specialized = %d sha256 = %s\n"
+    command (List.length checked.parts) lowered specialized (sha left_raw)
 
 let project_test manifest raw_epoch =
   project_test_as "project-test" manifest raw_epoch
@@ -882,12 +1204,12 @@ let main argv =
     | [_; "build"; input; output] -> build input output None
     | [_; "build"; input; output; "--feed"; feed] ->
       build input output (Some feed)
-    | [_; "run"; path] -> run path None
-    | [_; "run"; path; "--feed"; feed] -> run path (Some feed)
+    | [_; "run"; path] -> run path None None []
+    | [_; "run"; path; "--feed"; feed] -> run path (Some feed) None []
     | _ :: "debug" :: path :: args -> debug path args
     | [_; "inspect"; path] -> inspect path
-    | [_; "test"; path] -> test path None
-    | [_; "test"; path; "--feed"; feed] -> test path (Some feed)
+    | [_; "test"; path] -> test path None None []
+    | [_; "test"; path; "--feed"; feed] -> test path (Some feed) None []
     | [_; "project"; "check"; manifest; epoch] ->
       project_check manifest epoch
     | [_; "project"; "build"; manifest; epoch; output] ->

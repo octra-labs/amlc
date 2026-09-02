@@ -5,6 +5,8 @@ type format = Text | Events | Dot
 
 val select : string list -> (format, string) result
 
+val emission : Octra_vm.C_octb.image -> string
+
 val write :
   out_channel -> format:format -> digest:string -> string ->
   Octra_vm.C_octb.image -> unit

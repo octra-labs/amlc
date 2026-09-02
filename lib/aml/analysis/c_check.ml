@@ -23,10 +23,34 @@ type error =
   | Nodes of int * int
   | Inputs of int * int
 
+type origin =
+  | Direct
+  | Held of C_nat.t
+
+type site = {
+  atom : C_eff.atom;
+  payload : C_type.t;
+  origin : origin;
+}
+
+type flow =
+  | Pure
+  | Action of site
+  | Seq of flow * flow
+  | Fork of flow * flow
+  | Loop of C_nat.t * flow
+
+type location = {
+  index : int;
+  site : site;
+  count : Z.t;
+}
+
 type info = {
   typ : C_type.t;
   eff : C_eff.t;
   res : C_limit.t;
+  flow : flow;
 }
 
 type selected = {
@@ -138,6 +162,7 @@ let shape term =
           | C_term.Div (value, body)
           | C_term.Mod (value, body)
           | C_term.Eq (_, value, body)
+          | C_term.Cmp (_, value, body)
           | C_term.Cat (value, body)
           | C_term.Vcat (value, body)
           | C_term.Step (value, body) ->
@@ -190,15 +215,31 @@ let close_bind (bind : C_term.bind) env =
       | None -> Error (Unknown bind.id)
     end
 
-let item typ res = { typ; eff = C_eff.empty; res }
+let item typ res = { typ; eff = C_eff.empty; res; flow = Pure }
 
 let leaf typ = item typ C_limit.one
+
+let flow_seq left right =
+  match left, right with
+  | Pure, flow | flow, Pure -> flow
+  | _ -> Seq (left, right)
+
+let flow_fork left right =
+  match left, right with
+  | Pure, Pure -> Pure
+  | _ -> Fork (left, right)
+
+let flow_loop len flow =
+  match flow with
+  | Pure -> Pure
+  | _ -> Loop (len, flow)
 
 let seq typ left right =
   {
     typ;
     eff = C_eff.union left.eff right.eff;
     res = C_limit.succ (C_limit.add left.res right.res);
+    flow = flow_seq left.flow right.flow;
   }
 
 let join typ guard yes no =
@@ -206,6 +247,7 @@ let join typ guard yes no =
     typ;
     eff = C_eff.union guard.eff (C_eff.union yes.eff no.eff);
     res = C_limit.succ (C_limit.add guard.res (C_limit.max yes.res no.res));
+    flow = flow_seq guard.flow (flow_fork yes.flow no.flow);
   }
 
 let copy_seq typ len left right =
@@ -214,6 +256,7 @@ let copy_seq typ len left right =
     eff = C_eff.union left.eff right.eff;
     res = C_limit.add (C_limit.make (C_nat.to_z len))
       (C_limit.succ (C_limit.add left.res right.res));
+    flow = flow_seq left.flow right.flow;
   }
 
 let copy_one typ len value =
@@ -221,6 +264,7 @@ let copy_one typ len value =
     typ;
     eff = value.eff;
     res = C_limit.add (C_limit.make (C_nat.to_z len)) (C_limit.succ value.res);
+    flow = value.flow;
   }
 
 let fold_info len vector seed body =
@@ -229,7 +273,26 @@ let fold_info len vector seed body =
     typ = seed.typ;
     eff = C_eff.union vector.eff (C_eff.union seed.eff body.eff);
     res = C_limit.succ (C_limit.add vector.res (C_limit.add seed.res turns));
+    flow = flow_seq vector.flow
+      (flow_seq seed.flow (flow_loop len body.flow));
   }
+
+let locations info =
+  let rec walk index out = function
+    | [] -> List.rev out
+    | (_, Pure) :: rest -> walk index out rest
+    | (count, Action site) :: rest ->
+      walk (index + 1) ({ index; site; count } :: out) rest
+    | (count, Seq (left, right)) :: rest
+    | (count, Fork (left, right)) :: rest ->
+      walk index out ((count, left) :: (count, right) :: rest)
+    | (count, Loop (len, body)) :: rest ->
+      let count = Z.mul count (C_nat.to_z len) in
+      walk index out ((count, body) :: rest)
+  in
+  walk 0 [] [Z.one, info.flow]
+
+let sites info = List.map (fun location -> location.site) (locations info)
 
 exception Infer_error of error * C_term.t
 
@@ -258,8 +321,8 @@ and infer_node env term =
       | Some len -> Ok len
       | None -> Error Size
     in
-    let* eff, res, next_env = infer_vec elem env values in
-    Ok ({ typ = C_type.Vec (len, elem); eff; res }, next_env)
+    let* eff, res, flow, next_env = infer_vec elem env values in
+    Ok ({ typ = C_type.Vec (len, elem); eff; res; flow }, next_env)
   | C_term.Var id ->
     if not (C_nat.valid id) then Error Size
     else
@@ -279,14 +342,16 @@ and infer_node env term =
           let* body_env = open_bind bind env in
           let* body_info, next_env = infer body_env body in
           let* next_env = close_bind bind next_env in
-          Ok ({ body_info with res = C_limit.succ body_info.res }, next_env)
+          let flow = flow_seq value_info.flow body_info.flow in
+          Ok ({ body_info with flow; res = C_limit.succ body_info.res }, next_env)
       | C_type.One | C_type.Many ->
         let* body_env = open_bind bind value_env in
         let* body_info, next_env = infer body_env body in
         let* next_env = close_bind bind next_env in
         let eff = C_eff.union value_info.eff body_info.eff in
         let res = C_limit.succ (C_limit.add value_info.res body_info.res) in
-        Ok ({ body_info with eff; res }, next_env)
+        let flow = flow_seq value_info.flow body_info.flow in
+        Ok ({ body_info with eff; res; flow }, next_env)
     end
   | C_term.If (guard, yes, no) ->
     let* guard_info, guard_env = infer env guard in
@@ -381,6 +446,9 @@ and infer_node env term =
         body_info with
         eff = C_eff.add atom body_info.eff;
         res = C_limit.succ body_info.res;
+        flow = flow_seq
+          (Action { atom; payload = body_info.typ; origin = Direct })
+          body_info.flow;
       } in
       Ok (info, next_env)
   | C_term.Add (left, right)
@@ -407,6 +475,12 @@ and infer_node env term =
       let info = seq C_type.Bool left_info right_info in
       let res = C_limit.add info.res (C_limit.effort (C_type.eq_work typ)) in
       Ok ({ info with res }, right_env)
+  | C_term.Cmp (_, left, right) ->
+    let* left_info, left_env = infer env left in
+    let* () = need C_type.Int left_info.typ in
+    let* right_info, right_env = infer left_env right in
+    let* () = need C_type.Int right_info.typ in
+    Ok (seq C_type.Bool left_info right_info, right_env)
   | C_term.Cat (left, right) ->
     let* left_info, left_env = infer env left in
     let* right_info, right_env = infer left_env right in
@@ -513,7 +587,15 @@ and infer_node env term =
       match cap_info.typ with
       | C_type.Cap kind ->
         let info = seq (C_type.Pair (cap_info.typ, value_info.typ)) cap_info value_info in
-        Ok ({ info with eff = C_eff.add (C_eff.Write kind) info.eff }, next_env)
+        let action = Action {
+          atom = C_eff.Write kind;
+          payload = value_info.typ;
+          origin = Held kind;
+        } in
+        Ok ({ info with
+          eff = C_eff.add (C_eff.Write kind) info.eff;
+          flow = flow_seq info.flow action;
+        }, next_env)
       | actual -> Error (Need (C_type.Cap C_nat.zero, actual))
     end
   | C_term.Close cap ->
@@ -525,19 +607,26 @@ and infer_node env term =
           typ = C_type.Unit;
           eff = C_eff.add (C_eff.Close kind) cap_info.eff;
           res = C_limit.succ cap_info.res;
+          flow = flow_seq cap_info.flow
+            (Action {
+              atom = C_eff.Close kind;
+              payload = C_type.Unit;
+              origin = Held kind;
+            });
         } in
         Ok (info, next_env)
       | actual -> Error (Need (C_type.Cap C_nat.zero, actual))
     end
 
 and infer_vec elem env = function
-  | [] -> Ok (C_eff.empty, C_limit.one, env)
+  | [] -> Ok (C_eff.empty, C_limit.one, Pure, env)
   | value :: rest ->
     let* value_info, next_env = infer env value in
     let* () = need elem value_info.typ in
-    let* eff, res, next_env = infer_vec elem next_env rest in
+    let* eff, res, flow, next_env = infer_vec elem next_env rest in
     Ok (C_eff.union value_info.eff eff,
-      C_limit.succ (C_limit.add value_info.res res), next_env)
+      C_limit.succ (C_limit.add value_info.res res),
+      flow_seq value_info.flow flow, next_env)
 
 let rec open_all env = function
   | [] -> Ok env
@@ -578,6 +667,7 @@ let rec binding_term id = function
       | C_term.Div (value, body)
       | C_term.Mod (value, body)
       | C_term.Eq (_, value, body)
+      | C_term.Cmp (_, value, body)
       | C_term.Cat (value, body)
       | C_term.Vcat (value, body)
       | C_term.Step (value, body) -> [value; body]

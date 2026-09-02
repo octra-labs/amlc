@@ -20,7 +20,7 @@ fi
 
 (
   cd "$work"
-  set -- Fp Lpn Iwork Uni Surf Fin Dec DecRel DecComp DecSound Fuel Lim Rule Proj Pack Bin Ser Pimg Low Fun Data Rift Rec Quant Weave Braid Loom Cmp Orbit Wake Idx Law Raw Norm Rnom Spec Poly Perm Fhe Hop Hfhe Graph Ent Param Crypt Hpar Sess Sbin Pbin Cert Scert Prof Text Lex Read Comp Src Seal Sha Root Host Ciph Turn Feed Rval Emit Trace Mach Smap Live Path Folio Dbg Dbin
+  set -- Fp Lpn Iwork Uni Surf Fin Dec DecRel DecComp DecSound Fuel Lim Rule Proj Pack Bin Ser Pimg Low Fun Data Rift Rec Quant Weave Braid Loom Cmp Orbit Wake Idx Law Raw Norm Rnom Spec Poly Perm Fhe Hop Hfhe Graph Ent Param Crypt Hpar Sess Sbin Pbin Cert Scert Prof Text Lex Read Comp Src Seal Sha Root Host Effect Ciph Turn Feed Rval Emit Trace Mach Smap Live Path Folio Dbg Dbin
   for unit in "$@"; do
     coqc -q "$unit.v"
   done

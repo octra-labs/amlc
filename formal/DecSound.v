@@ -437,6 +437,26 @@ Proof.
     + discriminate.
   - destruct (checkb gamma term1) as [left_out |] eqn:left_run.
     + destruct left_out as [[[left_ty left_row] left_cost] mid].
+      destruct (ty_eqb left_ty TInt) eqn:left_int.
+      * apply ty_eqb_eq in left_int.
+        subst left_ty.
+        destruct (checkb mid term2) as [right_out |] eqn:right_run.
+        -- destruct right_out as [[[right_ty right_row] right_cost] final].
+           destruct (ty_eqb right_ty TInt) eqn:right_int.
+           ++ apply ty_eqb_eq in right_int.
+              subst right_ty.
+              inversion accepted; subst.
+              eapply CCmp with (mid := mid).
+              ** apply IHterm1.
+                 exact left_run.
+              ** apply IHterm2.
+                 exact right_run.
+           ++ discriminate.
+        -- discriminate.
+      * discriminate.
+    + discriminate.
+  - destruct (checkb gamma term1) as [left_out |] eqn:left_run.
+    + destruct left_out as [[[left_ty left_row] left_cost] mid].
       destruct left_ty; try discriminate.
       destruct (checkb mid term2) as [right_out |] eqn:right_run.
       * destruct right_out as [[[right_ty right_row] right_cost] final].

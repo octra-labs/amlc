@@ -4,6 +4,9 @@
 module Emit = Octra_vm.C_emit
 module Octb = Octra_vm.C_octb
 module VM = Octra_vm.C_vm
+module Local = Octra_vm.Local_vm
+module Native = Octra_vm.Contract_vm
+module Bytecode = Octra_vm.Bytecode
 
 let fail name = failwith ("profile " ^ name)
 
@@ -39,6 +42,30 @@ let active_work code cap =
 
 let same_work expected actual = Z.equal (Z.of_int expected) actual
 
+let native raw cap =
+  let image =
+    match Bytecode.decode_image raw with
+    | Ok value -> value
+    | Error _ -> fail "native decode"
+  in
+  begin
+    match Native.Verifier.verify image.code with
+    | Ok () -> ()
+    | Error _ -> fail "native verify"
+  end;
+  let config =
+    Local.config
+      ~view:true
+      ~byte_result:Native.Bytes_result
+      ~limit:cap
+      ~method_name:"main"
+      ~args:[]
+      ()
+  in
+  match Local.run_at ~trace:false config ~entry:0 image.code with
+  | Ok value -> value
+  | Error _ -> fail "native run"
+
 let () =
   let wide = Z.shift_left Z.one 300 in
   if not (String.equal (Octra_vm.C_eval.int_text wide) "int[301]") then
@@ -58,6 +85,41 @@ let () =
     | Ok () when same_work 6 (VM.work state)
         && Octra_vm.C_mach.equal (VM.result state) (Emit.Int (Z.of_int 12)) -> ()
     | _ -> fail "execution"
+  end;
+  begin
+    let active = VM.make ~cap:12 ~activate:(Some Z.zero) () in
+    match VM.run active image.code with
+    | Ok () when same_work 7 (VM.work active)
+        && Octra_vm.C_mach.equal
+          (VM.result active) (Emit.Int (Z.of_int 12)) -> ()
+    | _ -> fail "active execution"
+  end;
+  begin
+    match VM.make_in [Emit.Int (Z.of_int 7); Emit.Bool true] with
+    | Ok seeded
+        when Octra_vm.C_mach.equal
+          (VM.value seeded 1) (Emit.Int (Z.of_int 7))
+          && Octra_vm.C_mach.equal (VM.value seeded 2) (Emit.Bool true) -> ()
+    | Ok _ | Error _ -> fail "input registers"
+  end;
+  begin
+    let maximum = List.init Native.input_limit (fun index -> Emit.Int (Z.of_int index)) in
+    match VM.make_in maximum, VM.make_in (Emit.Int Z.zero :: maximum) with
+    | Ok _, Error (VM.Input_count count) when count = Native.input_limit + 1 -> ()
+    | _ -> fail "input count"
+  end;
+  begin
+    match native raw 12 with
+    | { Local.stop = Local.Returned; result = Native.VInt value;
+        effort = 7; steps = 4; _ }
+        when Z.equal value (Z.of_int 12) -> ()
+    | value ->
+      failwith
+        (Printf.sprintf
+          "profile native execution stop = %s result = %s effort = %d steps = %d"
+          (Local.stop_text value.stop)
+          (Local.value_text value.result)
+          value.effort value.steps)
   end;
   refuse "magic" (function Octb.Magic -> true | _ -> false)
     (alter raw 0 (Char.code 'X'));
@@ -139,4 +201,4 @@ let () =
     | Ok (), used when same_work 15 used -> ()
     | _ -> fail "integer work acceptance"
   end;
-  Printf.printf "aml_profile = pass cases = 17\n"
+  Printf.printf "aml_profile = pass cases = 19\n"

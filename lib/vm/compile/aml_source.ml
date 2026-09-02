@@ -9,6 +9,17 @@ type t = {
   octb : string;
 }
 
+module Names = Set.Make (String)
+
+let repeated names =
+  let rec walk seen = function
+    | [] -> None
+    | name :: rest ->
+      if Names.mem name seen then Some name
+      else walk (Names.add name seen) rest
+  in
+  walk Names.empty names
+
 let verifier_text = function
   | Contract_vm.Verifier.InvalidReg (pc, reg) ->
     Printf.sprintf "register r%d is invalid at pc %d" reg pc
@@ -37,38 +48,77 @@ let body_empty ast =
     && ast.errors = []
     && Option.is_none ast.ctor
     && ast.funcs = []
+    && ast.forms = []
 
 let compile_ast ast =
   let program = ast.Oct_lang.declaration = Oct_lang.ProgramDecl in
-  if body_empty ast then Error "source declaration body is empty"
-  else if program
-     && List.length ast.Oct_lang.funcs > Program_limits.max_functions then
-    Error "program function count exceeds capacity"
-  else
-    let code = Oct_gen.generate ast in
-    if program && Array.length code > Program_limits.max_instructions then
-      Error "program instruction count exceeds capacity"
+  let functions = List.length ast.funcs + List.length ast.forms in
+  let interfaces =
+    List.map (fun item -> item.Oct_lang.if_name) ast.interfaces
+  in
+  match repeated interfaces with
+  | Some name -> Error ("duplicate interface name = " ^ name)
+  | None ->
+    if body_empty ast then Error "source declaration body is empty"
+    else if program && functions > Program_limits.max_functions then
+      Error "program function count exceeds capacity"
     else
-      match Contract_vm.Verifier.verify code with
-      | Error error -> Error (verifier_text error)
-      | Ok () ->
-        let state =
-          match ast.Oct_lang.declaration with
-          | Oct_lang.ProgramDecl ->
+      match Oct_form.link ast with
+      | Error reason -> Error reason
+      | Ok (ast, direct, calls) ->
+        let code, seals = Oct_gen.generate ~direct ~calls ast in
+        if program && Array.length code > Program_limits.max_instructions then
+          Error "program instruction count exceeds capacity"
+        else
+          match Contract_vm.Verifier.verify code with
+          | Error error -> Error (verifier_text error)
+          | Ok () ->
+            let state =
+              match ast.Oct_lang.declaration with
+              | Oct_lang.ProgramDecl ->
+                begin
+                  match Aml_input.storage_kinds ast with
+                  | [] -> None
+                  | rows -> Some rows
+                end
+              | Oct_lang.ContractDecl | Oct_lang.InterfaceDecl -> None
+            in
+            let proof =
+              match seals with
+              | [] -> Ok None
+              | _ ->
+                begin
+                  let image = Bytecode.encode ?state code in
+                  match Aml_call.encode ~image seals with
+                  | Ok raw -> Ok (Some raw)
+                  | Error error -> Error (Aml_call.text error)
+                end
+            in
             begin
-              match Aml_input.storage_kinds ast with
-              | [] -> None
-              | rows -> Some rows
+              match proof with
+              | Error reason -> Error reason
+              | Ok proof ->
+                let octb = Bytecode.encode ?state ?proof code in
+                let checked =
+                  match proof with
+                  | None -> Ok ()
+                  | Some raw ->
+                    let image = Bytecode.encode ?state code in
+                    Aml_call.verify ~image code raw
+                in
+                begin
+                  match checked with
+                  | Error error -> Error (Aml_call.text error)
+                  | Ok () ->
+                    Ok {
+                      name = ast.Oct_lang.name;
+                      declaration = ast.declaration;
+                      ast;
+                      code;
+                      octb;
+                    }
+                end
             end
-          | Oct_lang.ContractDecl | Oct_lang.InterfaceDecl -> None
-        in
-        Ok {
-          name = ast.Oct_lang.name;
-          declaration = ast.declaration;
-          ast;
-          code;
-          octb = Bytecode.encode ?state code;
-        }
 
 let diagnostic source line column message =
   let file =

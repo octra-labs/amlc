@@ -15,35 +15,58 @@ type env = {
   events : event_def list;
   errors : error_def list;
   funcs : func_def list;
+  forms : string list;
+  direct : string list;
   func_labels : (string, int) Hashtbl.t;
   mutable locals : (string * int * typ) list;
   mutable base_reg : int;
   mutable next_reg : int;
   mutable next_label : int;
   mutable code : Contract_vm.instr list;
+  mutable seals : Aml_call.t list;
   mutable line : int;
   mutable column : int;
   has_payable : bool;
   mutable in_nonreentrant : bool;
   mutable fn_is_view : bool;
   mutable fn_is_pure : bool;
+  mutable fn_is_direct : bool;
   mutable fn_ret : typ;
   declaration : declaration;
 }
 
-let make_env declaration structs enums consts state events errors funcs = {
-  structs; enums; consts; state; events; errors; funcs;
+let make_env declaration structs enums consts state events errors funcs forms direct = {
+  structs; enums; consts; state; events; errors; funcs; forms; direct;
   func_labels = Hashtbl.create 16;
   locals = [];
   base_reg = 1; next_reg = 1; next_label = 10000;
-  code = []; line = 0; column = 0;
+  code = []; seals = []; line = 0; column = 0;
   has_payable = List.exists (fun f -> f.fn_payable) funcs;
   in_nonreentrant = false;
   fn_is_view = false;
   fn_is_pure = false;
+  fn_is_direct = false;
   fn_ret = TVoid;
   declaration;
 }
+
+let user_call env name =
+  List.exists (String.equal name) env.direct
+
+let form_call env name =
+  List.exists (String.equal name) env.forms
+
+let direct_call env name =
+  List.exists (String.equal name) env.direct
+
+let is_direct env f =
+  List.exists (String.equal f.fn_name) env.direct
+
+let nonpayable_guard env f =
+  env.has_payable && not f.fn_payable && f.fn_vis = Public
+
+let split_guard env f =
+  is_direct env f && nonpayable_guard env f
 
 let require_type env context expected actual =
   if not (Oct_types.compatible expected actual) then
@@ -865,8 +888,56 @@ let rec typ_of_expr_with constants env = function
     let typ = typ_of_expr_with constants env value in
     require_type env "logical negation type differs" TBool typ;
     TBool
+  | EAction (_, value) -> typ_of_expr_with constants env value
+  | EUse value ->
+    let target =
+      match
+        List.find_opt
+          (fun item ->
+            String.equal item.fn_name value.ux_name
+            && form_call env item.fn_name)
+          env.funcs
+      with
+      | Some found -> found
+      | None ->
+        gerr ~column:env.column env.line
+          ("form is absent = " ^ value.ux_name)
+    in
+    if env.fn_is_pure && not target.fn_pure then
+      gerr ~column:env.column env.line
+        ("pure function form marks are not empty = " ^ value.ux_name);
+    let args = value.ux_caps @ [value.ux_arg] in
+    let expected = List.length target.fn_params in
+    let actual = List.length args in
+    if expected <> actual then
+      gerr ~column:env.column env.line
+        (Printf.sprintf
+          "function argument count differs function = %s expected = %d actual = %d"
+          value.ux_name expected actual);
+    List.iter2
+      (fun arg param ->
+        require_type env "function argument type differs"
+          param.p_typ (typ_of_expr_with constants env arg))
+      args target.fn_params;
+    require_type env "use result type differs" target.fn_ret value.ux_typ;
+    let saved = env.locals in
+    env.locals <- (value.ux_bind, 0, value.ux_typ) :: saved;
+    let result = typ_of_expr_with constants env value.ux_body in
+    env.locals <- saved;
+    result
   | ECall (name, call_args) ->
-    (match name with
+    if form_call env name && not (direct_call env name) then
+      gerr ~column:env.column env.line
+        ("form requires explicit use = " ^ name);
+    let direct =
+      if user_call env name then
+        List.find_opt (fun value -> String.equal value.fn_name name) env.funcs
+      else None
+    in
+    (match direct with
+     | Some value -> value.fn_ret
+     | None ->
+      match name with
      | "concat" | "to_string" | "fhe_ser" | "fhe_ser_pk"
      | "substr" | "sha256" | "keccak256"
      | "digest_sha256" | "digest_keccak256" | "current_tx_hash"
@@ -1733,26 +1804,36 @@ and gen_builtin env name args =
      let cmp = alloc_reg env in
      emit env (Contract_vm.LT (cmp, i_r, exp_r));
      emit env (Contract_vm.JIF (cmp, loop_l))
-   | _ ->
-     match Hashtbl.find_opt env.func_labels name with
-     | Some label ->
-       let target_func = List.find (fun f -> f.fn_name = name) env.funcs in
-       let expected = List.length target_func.fn_params in
-       if expected <> nargs then
-         gerr env.line
-           (Printf.sprintf "function argument count differs function = %s expected = %d actual = %d"
-             name expected nargs);
-       List.iter2
-         (fun arg param ->
-           require_type env "function argument type differs"
-             param.p_typ (typ_of_expr env arg))
-         args target_func.fn_params;
-       List.iteri
-         (fun index src -> emit env (Contract_vm.MSTORE (1001 + index, src)))
-         arg_regs;
-       emit env (Contract_vm.CALL_INT (rd, label))
-     | None -> gerr env.line (Printf.sprintf "unknown function: %s" name));
+   | _ -> emit_user env name args arg_regs rd);
   rd
+
+and gen_user env name args =
+  let arg_regs = List.map (gen_expr env) args in
+  let rd = alloc_reg env in
+  emit_user env name args arg_regs rd;
+  rd
+
+and emit_user env name args arg_regs rd =
+  match Hashtbl.find_opt env.func_labels name with
+  | Some label ->
+    let target = List.find (fun value -> value.fn_name = name) env.funcs in
+    let expected = List.length target.fn_params in
+    let actual = List.length args in
+    if expected <> actual then
+      gerr env.line
+        (Printf.sprintf
+          "function argument count differs function = %s expected = %d actual = %d"
+          name expected actual);
+    List.iter2
+      (fun arg param ->
+        require_type env "function argument type differs"
+          param.p_typ (typ_of_expr env arg))
+      args target.fn_params;
+    List.iteri
+      (fun index src -> emit env (Contract_vm.MSTORE (1001 + index, src)))
+      arg_regs;
+    emit env (Contract_vm.CALL_INT (rd, label))
+  | None -> gerr env.line (Printf.sprintf "unknown function: %s" name)
 
 and gen_storage_path_key env field keys path =
   let key_regs = List.map (gen_expr env) keys in
@@ -1924,6 +2005,20 @@ and gen_expr env expr =
        end else r
      | None -> gerr env.line (Printf.sprintf "undefined field: %s" name))
   | EArray elems | ETuple elems -> gen_netstring_pack env elems
+  | EAction _ ->
+    gerr env.line "effect action requires sealed form"
+  | EUse value ->
+    let args = value.ux_caps @ [value.ux_arg] in
+    ignore (typ_of_expr env (EUse value));
+    let result = gen_user env value.ux_name args in
+    let saved = env.locals in
+    env.locals <- (value.ux_bind, result, value.ux_typ) :: saved;
+    let output = gen_expr env value.ux_body in
+    env.locals <- saved;
+    output
+  | ECall (name, _) when form_call env name && not (direct_call env name) ->
+    gerr env.line ("form requires explicit use = " ^ name)
+  | ECall (name, args) when user_call env name -> gen_user env name args
   | ECall (name, args) -> gen_builtin env name args
   | EStoragePath (field, keys, path) -> gen_storage_path_read env field keys path
   | EFieldProp (field, prop) -> gen_field_prop env field prop
@@ -2681,17 +2776,13 @@ let gen_dispatcher env (funcs : func_def list) =
   ) funcs;
   emit env Contract_vm.REVERT
 
-let should_emit_nonpayable_guard env f =
-  env.has_payable && not f.fn_payable && f.fn_vis = Public
-
-let emit_nonpayable_guard env =
+let emit_nonpayable_guard env ok_label =
   let vr = alloc_reg env in
   emit env (Contract_vm.VALUE vr);
   let zero_r = alloc_reg env in
   emit env (Contract_vm.LDI (zero_r, Contract_vm.VInt Z.zero));
   let cmp_r = alloc_reg env in
   emit env (Contract_vm.EQ (cmp_r, vr, zero_r));
-  let ok_label = alloc_label env in
   emit env (Contract_vm.JIF (cmp_r, ok_label));
   emit env Contract_vm.REVERT;
   emit env (Contract_vm.JDEST ok_label);
@@ -2725,6 +2816,7 @@ let gen_function env (f : func_def) label =
   let saved_next = env.next_reg in
   let saved_view = env.fn_is_view in
   let saved_pure = env.fn_is_pure in
+  let saved_direct = env.fn_is_direct in
   let saved_ret = env.fn_ret in
   env.line <- Oct_types.block_line f.fn_body;
   if f.fn_ret <> TVoid && not (Oct_types.block_returns f.fn_body) then
@@ -2733,11 +2825,15 @@ let gen_function env (f : func_def) label =
         f.fn_name (typ_to_string f.fn_ret));
   env.fn_is_view <- f.fn_view;
   env.fn_is_pure <- f.fn_pure;
+  env.fn_is_direct <- List.exists (String.equal f.fn_name) env.direct;
   env.fn_ret <- f.fn_ret;
   env.locals <- [];
   env.base_reg <- 1;
   env.next_reg <- 1;
+  let call_label = Hashtbl.find env.func_labels f.fn_name in
+  let split = call_label <> label in
   emit env (Contract_vm.JDEST label);
+  if split then emit_nonpayable_guard env call_label;
   List.iteri (fun i p ->
     let r = env.base_reg in
     emit env (Contract_vm.MLOAD (r, 1001 + i));
@@ -2753,6 +2849,9 @@ let gen_function env (f : func_def) label =
   List.iter (fun p ->
     match p.p_refine with
     | None -> ()
+    | Some _ when not (Oct_types.numeric p.p_typ) ->
+      gerr env.line
+        ("refinement type is not numeric parameter = " ^ p.p_name)
     | Some refine ->
       (match find_local env p.p_name with
        | Some (_, reg, _) ->
@@ -2802,7 +2901,8 @@ let gen_function env (f : func_def) label =
             emit env (Contract_vm.JDEST ok_label))
        | None -> ())
   ) f.fn_params;
-  if should_emit_nonpayable_guard env f then emit_nonpayable_guard env;
+  if nonpayable_guard env f && not split then
+    emit_nonpayable_guard env (alloc_label env);
   if f.fn_nonreentrant then emit_nonreentrant_enter env;
   env.in_nonreentrant <- f.fn_nonreentrant;
   List.iter (gen_stmt env) f.fn_body;
@@ -2813,10 +2913,19 @@ let gen_function env (f : func_def) label =
   env.in_nonreentrant <- false;
   env.fn_is_view <- saved_view;
   env.fn_is_pure <- saved_pure;
+  env.fn_is_direct <- saved_direct;
   env.fn_ret <- saved_ret;
   env.locals <- saved_locals;
   env.base_reg <- saved_base;
   env.next_reg <- saved_next
+
+let gen_call env name evidence label =
+  match Aml_call.make ~entry:label ~first:env.next_label evidence with
+  | Error error -> gerr 0 (name ^ " " ^ Aml_call.text error)
+  | Ok value ->
+    env.next_label <- Aml_call.next value;
+    env.seals <- value :: env.seals;
+    Array.iter (emit env) (Aml_call.code value)
 
 let check_interface_arity iface_name im (f : func_def) =
   let expected_n = List.length im.im_params in
@@ -2862,11 +2971,136 @@ let check_interfaces (ct : contract) =
     ) iface.if_methods
   ) ct.implements
 
-let generate (ct : contract) =
+let mark_pc code label =
+  let rec walk pc =
+    if pc = Array.length code then
+      gerr 0 (Printf.sprintf "function label is absent = %d" label)
+    else
+      match code.(pc) with
+      | Contract_vm.JDEST found when found = label -> pc
+      | _ -> walk (pc + 1)
+  in
+  walk 0
+
+let call_graph env code =
+  let labels =
+    List.map
+      (fun f -> Hashtbl.find env.func_labels f.fn_name, f.fn_name)
+      env.funcs
+  in
+  let name label =
+    match List.assoc_opt label labels with
+    | Some value -> value
+    | None -> gerr 0 (Printf.sprintf "function call label is absent = %d" label)
+  in
+  let calls first last =
+    let rec walk pc out =
+      if pc >= last then List.sort_uniq String.compare out
+      else
+        match code.(pc) with
+        | Contract_vm.CALL_INT (_, label) -> walk (pc + 1) (name label :: out)
+        | _ -> walk (pc + 1) out
+    in
+    walk first []
+  in
+  let starts =
+    List.mapi
+      (fun index f ->
+        let label = 200 + index * 100 in
+        f.fn_name, mark_pc code label)
+      env.funcs
+  in
+  let graph = Hashtbl.create (List.length starts) in
+  let rec fill = function
+    | [] -> ()
+    | [caller, first] ->
+      Hashtbl.replace graph caller (calls first (Array.length code))
+    | (caller, first) :: ((_, last) :: _ as rest) ->
+      Hashtbl.replace graph caller (calls first last);
+      fill rest
+  in
+  fill starts;
+  let root =
+    match starts with
+    | (_, first) :: _ -> calls 0 first
+    | [] -> []
+  in
+  graph, root
+
+let validate_depth env code =
+  let graph, root = call_graph env code in
+  let forms = List.sort_uniq String.compare env.forms in
+  let rec close prior =
+    let next =
+      Hashtbl.fold
+        (fun caller targets out ->
+          if List.exists (fun target -> List.mem target out) targets then
+            caller :: out
+          else out)
+        graph prior
+      |> List.sort_uniq String.compare
+    in
+    if next = prior then next else close next
+  in
+  let leads = close forms in
+  let memo = Hashtbl.create (List.length env.funcs * 2) in
+  let rec span trail entered name =
+    if List.mem name trail then
+      gerr 0 ("direct form recursion is forbidden = " ^ name)
+    else
+      let entered = entered || List.mem name forms in
+      match Hashtbl.find_opt memo (name, entered) with
+      | Some value -> value
+      | None ->
+        let targets = Option.value ~default:[] (Hashtbl.find_opt graph name) in
+        let targets =
+          if entered then targets
+          else List.filter (fun target -> List.mem target leads) targets
+        in
+        let value =
+          List.fold_left
+            (fun depth target ->
+              Int.max depth (1 + span (name :: trail) entered target))
+            0 targets
+        in
+        Hashtbl.replace memo (name, entered) value;
+        value
+  in
+  let check actual =
+    if actual > Contract_vm.call_depth_max then
+      gerr 0
+        ("direct form call depth max = "
+          ^ string_of_int Contract_vm.call_depth_max
+          ^ " actual = " ^ string_of_int actual)
+  in
+  List.iter
+    (fun f ->
+      if f.fn_vis = Public && List.mem f.fn_name leads then
+        check (span [] false f.fn_name))
+    env.funcs;
+  let root_depth =
+    List.fold_left
+      (fun depth target ->
+        if List.mem target leads then
+          Int.max depth (1 + span [] false target)
+        else depth)
+      0 root
+  in
+  check root_depth
+
+let generate ?(direct = []) ?(calls = []) (ct : contract) =
   check_interfaces ct;
-  let env = make_env ct.declaration ct.structs ct.enums ct.consts ct.state ct.events ct.errors ct.funcs in
+  let forms = List.map (fun value -> value.fm_name) ct.forms in
+  let env =
+    make_env ct.declaration ct.structs ct.enums ct.consts ct.state ct.events
+      ct.errors ct.funcs forms direct
+  in
+  if forms <> [] then
+    env.next_label <- Int.max env.next_label (200 + List.length ct.funcs * 100);
   List.iteri (fun i f ->
-    Hashtbl.replace env.func_labels f.fn_name (200 + i * 100)
+    let label = 200 + i * 100 in
+    let label = if split_guard env f then alloc_label env else label in
+    Hashtbl.replace env.func_labels f.fn_name label
   ) ct.funcs;
   (match ct.ctor with
    | Some ctor -> gen_constructor env ctor
@@ -2884,9 +3118,13 @@ let generate (ct : contract) =
   gen_dispatcher env ct.funcs;
   List.iteri (fun i f ->
     let label = 200 + i * 100 in
-    gen_function env f label
+    match List.assoc_opt f.fn_name calls with
+    | Some evidence -> gen_call env f.fn_name evidence label
+    | None -> gen_function env f label
   ) ct.funcs;
-  Array.of_list (List.rev env.code)
+  let code = Array.of_list (List.rev env.code) in
+  if env.forms <> [] then validate_depth env code;
+  code, List.rev env.seals
 
 let to_abi (ct : contract) : Ocs01.abi =
   let typ_to_arg = function

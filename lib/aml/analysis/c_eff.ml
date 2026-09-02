@@ -28,6 +28,8 @@ module Atom = struct
       if order = 0 then C_nat.compare left_id right_id else order
 end
 
+let compare = Atom.compare
+
 module Row = Set.Make (Atom)
 
 type t = Row.t

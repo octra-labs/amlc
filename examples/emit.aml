@@ -1,0 +1,12 @@
+program Audit {
+  event Total(value: int)
+
+  form total [many left: int] (many right: int) ->[many] int
+    marks {emit[7]:Total}
+    under {steps[100], depth[16], work[100]} =
+    emit[7](left + right)
+
+  public fn add(left: int, right: int): int {
+    return use total[left](right) as many out: int in out
+  }
+}

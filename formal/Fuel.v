@@ -233,6 +233,15 @@ Proof.
     rewrite (right_ih fuel) by (simpl in enough; lia).
     apply keep_run.
     exact enough.
+  - intros sigma kind left right left_out mid right_out next x y left_run left_ih
+      right_run right_ih left_value right_value fuel enough.
+    destruct fuel as [|fuel]; [simpl in enough; lia |].
+    cbn [run_fuel].
+    rewrite (left_ih fuel) by (simpl in enough; lia).
+    rewrite (right_ih fuel) by (simpl in enough; lia).
+    rewrite left_value, right_value.
+    apply keep_run.
+    exact enough.
   - intros sigma left right left_out mid right_out next x y left_run left_ih
       right_run right_ih left_value right_value fuel enough.
     destruct fuel as [|fuel]; [simpl in enough; lia |].

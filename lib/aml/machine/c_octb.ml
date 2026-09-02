@@ -11,6 +11,8 @@ type op =
   | Negate of int * int
   | Absolute of int * int
   | Same of int * int * int
+  | Less of int * int * int
+  | Greater of int * int * int
   | Join of int * int * int
   | Minus of int * int * int
   | Size of int * int
@@ -21,11 +23,21 @@ type op =
   | Noop
   | Stop
 
+type effect_layout = {
+  index : int;
+  atom : C_eff.atom;
+  payload : int list;
+  scratch : int list;
+}
+
 type t = {
+  inputs : C_term.bind list;
   plan : C_mach.code;
   code : op array;
   octb : string;
-  result : C_emit.lit;
+  typ : C_type.t;
+  result : C_emit.lit option;
+  emission : C_mach.emission;
   veils : int;
   veil_depth : C_nat.t;
   map : C_smap.t;
@@ -53,6 +65,12 @@ type decode_error =
   | Jump_mark of int
   | Trailing_data of int
   | Empty_code
+  | Result_header
+  | Emission_invalid
+  | Emission_repeated
+  | Veil_invalid
+  | Veil_repeated
+  | Exact_image
 
 type error =
   | Mach of C_mach.error
@@ -64,12 +82,14 @@ type error =
   | Smap of C_smap.error
   | Slot
   | Lmap of C_live.error
+  | Effect_map
   | Output of decode_error
   | Output_code
 
 type constant =
   | CInt of string
   | CBool of bool
+  | CText of string
   | CData of C_rval.t
   | CBytes of string
 
@@ -87,17 +107,58 @@ type code_cell = {
 }
 
 type image = {
+  inputs : C_type.t array;
+  output : C_type.t option;
+  emission : C_mach.emission option;
+  veil : (int * C_nat.t) option;
   consts : const_row array;
   cells : code_cell array;
   text_at : int;
   code : op array;
 }
 
+let wire_emission = function
+  | C_mach.Lowered -> Bytecode.Lowered
+  | C_mach.Specialized -> Bytecode.Specialized
+
+let local_emission = function
+  | Bytecode.Lowered -> C_mach.Lowered
+  | Bytecode.Specialized -> C_mach.Specialized
+
+let image_emission image =
+  Option.fold ~none:"opaque" ~some:C_mach.emission_text image.emission
+
+let veil_text count = if count = 0 then "none" else "static"
+
+let image_veil image =
+  Option.fold ~none:"unknown" ~some:(fun (count, _) -> veil_text count)
+    image.veil
+
+let image_veils image =
+  Option.fold ~none:"unknown" ~some:(fun (count, _) -> string_of_int count)
+    image.veil
+
+let image_veil_depth image =
+  Option.fold ~none:"unknown" ~some:(fun (_, depth) -> C_nat.text depth)
+    image.veil
+
+let wire_veil count depth =
+  { Bytecode.count = Z.of_int count; depth = C_nat.to_z depth }
+
+let local_veil value =
+  match C_nat.make value.Bytecode.count, C_nat.make value.depth with
+  | Some count, Some depth
+      when not (C_nat.equal count C_nat.zero)
+        || C_nat.equal depth C_nat.zero ->
+    Some (C_nat.to_int count, depth)
+  | _ -> None
+
 type asm =
   | Op of op
   | Goto of int
   | Branch of int * int
   | Place of int
+  | Apply of effect_layout
 
 type marked = {
   asm : asm;
@@ -118,6 +179,7 @@ type layout =
   | Atom of int
   | Pair of layout * layout
   | Vec of C_mach.shape * layout list
+  | Sum of int * layout
 
 type cell = {
   bind : C_term.bind;
@@ -146,11 +208,40 @@ let view env =
 let one env at asm tail = { asm; at; live = view env } :: tail
 let cat left right tail = left (right tail)
 
+let order env at rel left right =
+  let op value = one env at (Op value) in
+  match rel with
+  | C_term.Lt -> op (Less (left, left, right))
+  | C_term.Gt -> op (Greater (left, left, right))
+  | C_term.Le ->
+    cat (op (Greater (left, left, right)))
+      (cat (op (Load (right, C_emit.Bool false)))
+        (op (Same (left, left, right))))
+  | C_term.Ge ->
+    cat (op (Less (left, left, right)))
+      (cat (op (Load (right, C_emit.Bool false)))
+        (op (Same (left, left, right))))
+
+let input_limit = Contract_vm.input_limit
+
 let fresh_reg state =
   match state.free with
   | reg :: free -> Ok (reg, { state with free })
   | [] when state.next >= 64 -> Error Register
   | [] -> Ok (state.next, { state with next = state.next + 1 })
+
+let scratch_count = function
+  | C_eff.Read _ | C_eff.Fail _ -> 2
+  | C_eff.Write _ | C_eff.Emit _ | C_eff.Close _ -> 0
+
+let scratch atom state =
+  let rec walk count state out =
+    if count = 0 then Ok (List.rev out)
+    else
+      let* reg, state = fresh_reg state in
+      walk (count - 1) state (reg :: out)
+  in
+  walk (scratch_count atom) state []
 
 let release reg state =
   if reg = 0 then state else { state with free = reg :: state.free }
@@ -162,6 +253,7 @@ let rec release_layout value state =
   | Pair (lhs, rhs) ->
     release_layout lhs (release_layout rhs state)
   | Vec (_, values) -> List.fold_right release_layout values state
+  | Sum (tag, payload) -> release tag (release_layout payload state)
 
 let rec layout_regs value out =
   match value with
@@ -169,6 +261,7 @@ let rec layout_regs value out =
   | Atom reg -> reg :: out
   | Pair (lhs, rhs) -> layout_regs lhs (layout_regs rhs out)
   | Vec (_, values) -> List.fold_right layout_regs values out
+  | Sum (tag, payload) -> tag :: layout_regs payload out
 
 let rec same_layout left right =
   match left, right with
@@ -178,6 +271,7 @@ let rec same_layout left right =
     same_layout ll rl && same_layout lr rr
   | Vec (le, lhs), Vec (re, rhs) ->
     C_mach.same_shape le re && same_layouts lhs rhs
+  | Sum (lt, lhs), Sum (rt, rhs) -> lt = rt && same_layout lhs rhs
   | _ -> false
 
 and same_layouts left right =
@@ -196,6 +290,7 @@ let rec fits form value =
     C_mach.same_shape elem found
     && C_nat.to_int len = List.length values
     && List.for_all (fits elem) values
+  | C_mach.SSum form, Sum (_, payload) -> fits form payload
   | _ -> false
 
 let rec alloc form state =
@@ -211,6 +306,10 @@ let rec alloc form state =
   | C_mach.SVec (len, elem) ->
     let* values, state = alloc_vec (C_nat.to_int len) elem state in
     Ok (Vec (elem, values), state)
+  | C_mach.SSum form ->
+    let* tag, state = fresh_reg state in
+    let* payload, state = alloc form state in
+    Ok (Sum (tag, payload), state)
 
 and alloc_vec count elem state =
   if count = 0 then Ok ([], state)
@@ -232,6 +331,11 @@ let rec clone env at value state =
   | Vec (elem, values) ->
     let* next, state, seq = clone_vec env at values state in
     Ok (Vec (elem, next), state, seq)
+  | Sum (tag, payload) ->
+    let* next_tag, state = fresh_reg state in
+    let* next_payload, state, payload_seq = clone env at payload state in
+    let tag_seq = one env at (Op (Move (next_tag, tag))) in
+    Ok (Sum (next_tag, next_payload), state, cat tag_seq payload_seq)
 
 and clone_vec env at values state =
   match values with
@@ -250,6 +354,11 @@ let rec copy env at src dst =
       Option.map (fun right -> cat left right) (copy env at sr dr))
   | Vec (se, source), Vec (de, target) when C_mach.same_shape se de ->
     copy_vec env at source target
+  | Sum (source_tag, source), Sum (target_tag, target) ->
+    Option.map
+      (fun payload ->
+        cat (one env at (Op (Move (target_tag, source_tag)))) payload)
+      (copy env at source target)
   | _ -> None
 
 and copy_vec env at source target =
@@ -355,9 +464,24 @@ let rec lower env state stack code loc =
       seq = cat (one env at (Op (Load (dst, value)))) next.seq }
   | C_mach.Void rest, C_mach.LVoid (_, lrest) ->
     lower env state (Unit :: stack) rest lrest
-  | C_mach.Effect (_, rest), C_mach.LEffect (at, lrest) ->
-    let* next = lower env state stack rest lrest in
-    Ok { next with seq = cat (one env at (Op Noop)) next.seq }
+  | C_mach.Effect (index, atom, body, rest), C_mach.LEffect (at, lbody, lrest) ->
+    let* body = lower env state stack body lbody in
+    begin
+      match body.stack with
+      | payload :: _ ->
+        let* scratch = scratch atom body.gen in
+        let layout = {
+          index;
+          atom;
+          payload = layout_regs payload [];
+          scratch;
+        }
+        in
+        let* next = lower body.env body.gen body.stack rest lrest in
+        Ok { next with
+          seq = cat body.seq (cat (one body.env at (Apply layout)) next.seq) }
+      | [] -> Error Stack
+    end
   | C_mach.Get (id, form, rest), C_mach.LGet (at, lrest) ->
     begin
       match take id [] env with
@@ -445,6 +569,16 @@ let rec lower env state stack code loc =
         let* next = lower env state (Atom left :: tail) rest lrest in
         Ok { next with
           seq = cat (one env at (Op (Same (left, left, right)))) next.seq }
+      | _ -> Error Stack
+    end
+  | C_mach.Order (rel, rest), C_mach.LOrder (found, at, lrest)
+      when rel = found ->
+    begin
+      match stack with
+      | Atom right :: Atom left :: tail ->
+        let state = release right state in
+        let* next = lower env state (Atom left :: tail) rest lrest in
+        Ok { next with seq = cat (order env at rel left right) next.seq }
       | _ -> Error Stack
     end
   | C_mach.Join rest, C_mach.LJoin (at, lrest) ->
@@ -552,6 +686,26 @@ let rec lower env state stack code loc =
           (Pair (first, Vec (elem, values)) :: tail) rest lrest
       | _ -> Error Stack
     end
+  | C_mach.Left rest, C_mach.LLeft (at, lrest) ->
+    begin
+      match stack with
+      | payload :: tail ->
+        let* tag, state = fresh_reg state in
+        let* next = lower env state (Sum (tag, payload) :: tail) rest lrest in
+        Ok { next with
+          seq = cat (one env at (Op (Load (tag, C_emit.Bool true)))) next.seq }
+      | [] -> Error Stack
+    end
+  | C_mach.Right rest, C_mach.LRight (at, lrest) ->
+    begin
+      match stack with
+      | payload :: tail ->
+        let* tag, state = fresh_reg state in
+        let* next = lower env state (Sum (tag, payload) :: tail) rest lrest in
+        Ok { next with
+          seq = cat (one env at (Op (Load (tag, C_emit.Bool false)))) next.seq }
+      | [] -> Error Stack
+    end
   | C_mach.Scope (bind, body, rest), C_mach.LScope (_, lbody, lrest) ->
     begin
       match stack with
@@ -612,6 +766,133 @@ let rec lower env state stack code loc =
             in
             let* next = lower closed state body_out.stack rest lrest in
             Ok { next with seq = cat body_out.seq next.seq }
+        end
+      | _ -> Error Stack
+    end
+  | C_mach.Iter (len, item_bind, state_bind, body, rest),
+      C_mach.LIter (_, lbody, lrest) ->
+    begin
+      match item_bind.C_term.mul, state_bind.C_term.mul, stack,
+          C_mach.shape_of item_bind.C_term.typ,
+          C_mach.shape_of state_bind.C_term.typ with
+      | C_type.Zero, _, _, _, _ | _, C_type.Zero, _, _, _ -> Error Slot
+      | _, _, state_value :: Vec (elem, values) :: tail, Some item_shape,
+          Some state_shape
+          when List.length values = C_nat.to_int len
+            && C_mach.same_shape item_shape elem
+            && fits state_shape state_value
+            && List.for_all (fits elem) values ->
+        let rec loop env state state_value seq = function
+          | [] ->
+            let* next = lower env state (state_value :: tail) rest lrest in
+            Ok { next with seq = cat seq next.seq }
+          | item_value :: values ->
+            let* first =
+              match open_cell item_bind item_value env with
+              | Some value -> Ok value
+              | None -> Error Slot
+            in
+            let* opened =
+              match open_cell state_bind state_value first with
+              | Some value -> Ok value
+              | None -> Error Slot
+            in
+            let* body_out = lower opened state tail body lbody in
+            begin
+              match exact tail body_out.stack with
+              | None -> Error Stack
+              | Some next_state ->
+                let* last =
+                  match close_cell state_bind body_out.env with
+                  | Some value -> Ok value
+                  | None -> Error Slot
+                in
+                let* closed =
+                  match close_cell item_bind last with
+                  | Some value -> Ok value
+                  | None -> Error Slot
+                in
+                let state =
+                  release_layout item_value
+                    (release_layout state_value body_out.gen)
+                in
+                loop closed state next_state (cat seq body_out.seq) values
+            end
+        in
+        loop env state state_value empty values
+      | _ -> Error Stack
+    end
+  | C_mach.Choice (left_bind, yes, right_bind, no, form, rest),
+      C_mach.LChoice (at, yes_at, no_at, lyes, lno, lrest) ->
+    begin
+      match stack with
+      | Sum (guard, payload) :: tail ->
+        let state = release guard state in
+        let* dst, state = alloc form state in
+        let yes_label, state = fresh_label state in
+        let end_label, state = fresh_label state in
+        let* no_env =
+          match open_cell right_bind payload env with
+          | Some value -> Ok value
+          | None -> Error Slot
+        in
+        let* no_out = lower no_env state tail no lno in
+        let* no_closed =
+          match close_cell right_bind no_out.env with
+          | Some value -> Ok value
+          | None -> Error Slot
+        in
+        let yes_start = { state with label = no_out.gen.label } in
+        let* yes_env =
+          match open_cell left_bind payload env with
+          | Some value -> Ok value
+          | None -> Error Slot
+        in
+        let* yes_out = lower yes_env yes_start tail yes lyes in
+        let* yes_closed =
+          match close_cell left_bind yes_out.env with
+          | Some value -> Ok value
+          | None -> Error Slot
+        in
+        begin
+          match exact tail no_out.stack, exact tail yes_out.stack with
+          | Some no_value, Some yes_value
+              when same_env no_closed yes_closed
+                && fits form no_value && fits form yes_value ->
+            let* no_move =
+              match copy no_closed no_at no_value dst with
+              | Some value -> Ok value
+              | None -> Error Stack
+            in
+            let* yes_move =
+              match copy yes_closed yes_at yes_value dst with
+              | Some value -> Ok value
+              | None -> Error Stack
+            in
+            let next_reg = Int.max no_out.gen.next yes_out.gen.next in
+            let live =
+              layout_regs dst
+                (List.fold_right layout_regs tail (regs no_closed))
+            in
+            let state = {
+              next = next_reg;
+              free = avail next_reg live;
+              label = yes_out.gen.label;
+            } in
+            let* next = lower no_closed state (dst :: tail) rest lrest in
+            let branch =
+              cat (one env at (Branch (guard, yes_label)))
+                (cat no_out.seq
+                  (cat no_move
+                    (cat (one no_closed at (Goto end_label))
+                      (cat (one env at (Place yes_label))
+                        (cat yes_out.seq
+                          (cat yes_move
+                            (one no_closed at (Place end_label))))))))
+            in
+            Ok { next with seq = cat branch next.seq }
+          | Some _, Some _ -> Error Slot
+          | _ -> Error Stack
         end
       | _ -> Error Stack
     end
@@ -697,28 +978,154 @@ let resolve values =
     | Branch (reg, id) ->
       Option.fold ~none:(Error Label) ~some:(fun pc -> Ok (Jump_if (reg, pc))) (label id labels)
     | Place id -> Option.fold ~none:(Error Label) ~some:(fun pc -> Ok (Mark pc)) (label id labels)
+    | Apply _ -> Ok Noop
   in
-  let rec walk code map live = function
+  let rec walk code map live effects = function
     | [] ->
       Ok (Array.of_list (List.rev code), Array.of_list (List.rev map),
-        Array.of_list (List.rev live))
+        Array.of_list (List.rev live), List.rev effects)
     | value :: rest ->
       let* op = one value.asm in
-      walk (op :: code) (value.at :: map) (value.live :: live) rest
+      let effects =
+        match value.asm with
+        | Apply layout -> layout :: effects
+        | Op _ | Goto _ | Branch _ | Place _ -> effects
+      in
+      walk (op :: code) (value.at :: map) (value.live :: live) effects rest
   in
-  walk [] [] [] values
+  walk [] [] [] [] values
 
-let lower_plan plan loc at =
-  let* out = lower [] { next = 1; free = []; label = 0 } [] plan loc in
-  match out.stack, out.env with
-  | [Atom result], [] ->
-    let suffix =
-      if result = 0 then one [] at (Op Stop)
-      else cat (one [] at (Op (Move (0, result)))) (one [] at (Op Stop))
+let final_cell inputs cell =
+  match
+    List.find_opt
+      (fun bind -> C_nat.equal bind.C_term.id cell.bind.C_term.id)
+      inputs
+  with
+  | Some bind ->
+    begin
+      match bind.mul, cell.bind.mul, cell.live with
+      | C_type.One, C_type.One, false -> true
+      | C_type.Many, C_type.Many, true -> true
+      | _ -> false
+    end
+  | None -> false
+
+let final_env inputs env =
+  let expected =
+    List.filter (fun bind -> bind.C_term.mul <> C_type.Zero) inputs
+  in
+  List.length expected = List.length env
+  && List.for_all (final_cell inputs) env
+
+let seed inputs =
+  if List.length inputs > input_limit then Error Register
+  else
+    let rec walk index env free = function
+      | [] -> Ok (List.rev env, List.rev free)
+      | bind :: rest ->
+        let reg = index + 1 in
+        begin
+          match bind.C_term.mul with
+          | C_type.Zero -> walk (index + 1) env (reg :: free) rest
+          | C_type.One | C_type.Many ->
+            let cell = { bind; layout = Atom reg; live = true } in
+            walk (index + 1) (cell :: env) free rest
+        end
     in
-    resolve (out.seq (suffix []))
-  | [_], _ :: _ -> Error Slot
+    walk 0 [] [] inputs
+
+let lower_plan inputs plan loc at =
+  let* env, free = seed inputs in
+  let state = {
+    next = List.length inputs + 1;
+    free;
+    label = 0;
+  }
+  in
+  let* out = lower env state [] plan loc in
+  match out.stack with
+  | [Atom result] when final_env inputs out.env ->
+    let suffix =
+      if result = 0 then one out.env at (Op Stop)
+      else
+        cat
+          (one out.env at (Op (Move (0, result))))
+          (one out.env at (Op Stop))
+    in
+    let* code, map, live, effects = resolve (out.seq (suffix [])) in
+    Ok (code, map, live, effects,
+      Array.init (List.length inputs) (fun index -> index + 1))
+  | [Atom _] -> Error Slot
+  | [_] -> Error Stack
   | _ -> Error Stack
+
+let effect_count info =
+  let limit = Z.of_int C_check.max_nodes in
+  let rec walk total = function
+    | [] -> true
+    | location :: rest ->
+      let total = Z.add total location.C_check.count in
+      Z.leq total limit && walk total rest
+  in
+  walk Z.zero (C_check.locations info)
+
+let effect_plan (program : C_low.prog) =
+  let* info =
+    match C_check.check_in program.inputs program.term with
+    | Ok value -> Ok value
+    | Error _ -> Error Effect_map
+  in
+  if Z.gt info.C_check.res.steps C_eval.max_cost then Error Effect_map
+  else if not (effect_count info) then Error Effect_map
+  else
+  let* plan =
+    match C_mach.lower_in program.inputs program.term with
+    | Some value -> Ok value
+    | None -> Error Effect_map
+  in
+  Ok (info, plan)
+
+let effect_layouts program =
+  let* info, plan = effect_plan program in
+  let pos = { C_lex.off = 0; line = 1; col = 1 } in
+  let at = { C_lex.first = pos; last = pos } in
+  let loc = C_mach.locate at plan in
+  let* env, free = seed program.inputs in
+  let state = {
+    next = List.length program.inputs + 1;
+    free;
+    label = 0;
+  }
+  in
+  let* out = lower env state [] plan loc in
+  let* layouts =
+    if List.length out.stack = 1 && final_env program.inputs out.env then
+      let* _, _, _, value = resolve (out.seq []) in
+      Ok value
+    else Error Effect_map
+  in
+  let layouts = List.sort (fun left right -> Int.compare left.index right.index)
+    layouts in
+  let locations = C_check.locations info in
+  let rec take index atom left out = function
+    | rest when left = 0 -> Ok (out, rest)
+    | layout :: rest when layout.index = index && layout.atom = atom ->
+      take index atom (left - 1) (layout :: out) rest
+    | _ -> Error Effect_map
+  in
+  let rec exact index layouts out = function
+    | [] -> if layouts = [] then Ok (List.rev out) else Error Effect_map
+    | location :: rest when location.C_check.index = index ->
+      if not (Z.fits_int location.count) then Error Effect_map
+      else
+        let count = Z.to_int location.count in
+        let* out, layouts =
+          take index location.site.atom count out layouts
+        in
+        exact (index + 1) layouts out rest
+    | _ -> Error Effect_map
+  in
+  exact 0 layouts [] locations
 
 let const_data = function
   | C_emit.Bool value -> 1, if value then "1" else "0"
@@ -765,6 +1172,8 @@ let vm_op = function
   | Negate (dst, src) -> Contract_vm.NEG (dst, src)
   | Absolute (dst, src) -> Contract_vm.ABS (dst, src)
   | Same (dst, left, right) -> Contract_vm.EQ (dst, left, right)
+  | Less (dst, left, right) -> Contract_vm.LT (dst, left, right)
+  | Greater (dst, left, right) -> Contract_vm.GT (dst, left, right)
   | Join (dst, left, right) -> Contract_vm.CONCAT (dst, left, right)
   | Minus (dst, left, right) -> Contract_vm.SUB (dst, left, right)
   | Size (dst, src) -> Contract_vm.STRLEN (dst, src)
@@ -776,10 +1185,256 @@ let vm_op = function
   | Noop -> Contract_vm.NOP
   | Stop -> Contract_vm.STOP
 
-let encode_raw code =
+type piece =
+  | Plain of marked
+  | Host of marked * Contract_vm.instr list
+
+let rec compare_regs left right =
+  match left, right with
+  | [], [] -> 0
+  | [], _ -> -1
+  | _, [] -> 1
+  | lhs :: lrest, rhs :: rrest ->
+    let order = Int.compare lhs rhs in
+    if order = 0 then compare_regs lrest rrest else order
+
+module Layout_order = struct
+  type t = effect_layout
+
+  let compare left right =
+    let index = Int.compare left.index right.index in
+    if index <> 0 then index
+    else
+      let atom = C_eff.compare left.atom right.atom in
+      if atom <> 0 then atom
+      else
+        let payload = compare_regs left.payload right.payload in
+        if payload <> 0 then payload
+        else compare_regs left.scratch right.scratch
+end
+
+module Layout_map = Map.Make(Layout_order)
+
+let block_rows blocks =
+  let rec collect rows = function
+    | [] -> Ok (Layout_map.map List.rev rows)
+    | (_, []) :: _ -> Error Effect_map
+    | (layout, ops) :: rest ->
+      let found = Option.value ~default:[] (Layout_map.find_opt layout rows) in
+      collect (Layout_map.add layout (ops :: found) rows) rest
+  in
+  collect Layout_map.empty blocks
+
+let take_effect layout rows =
+  match Layout_map.find_opt layout rows with
+  | Some (ops :: rest) ->
+    let rows =
+      match rest with
+      | [] -> Layout_map.remove layout rows
+      | _ -> Layout_map.add layout rest rows
+    in
+    Some (ops, rows)
+  | Some [] | None -> None
+
+let attach_effects values blocks =
+  let* rows = block_rows blocks in
+  let rec walk out rows = function
+    | [] ->
+      if Layout_map.is_empty rows then Ok (List.rev out)
+      else Error Effect_map
+    | ({ asm = Apply layout; _ } as value) :: rest ->
+      begin
+        match take_effect layout rows with
+        | Some (ops, rows) -> walk (Host (value, ops) :: out) rows rest
+        | None -> Error Effect_map
+      end
+    | value :: rest -> walk (Plain value :: out) rows rest
+  in
+  walk [] rows values
+
+let effect_places values =
+  let rec walk pc out = function
+    | [] -> Ok out
+    | Plain { asm = Place id; _ } :: _
+        when Option.is_some (label id out) -> Error Label
+    | Plain { asm = Place id; _ } :: rest ->
+      walk (pc + 1) ((id, pc) :: out) rest
+    | Host (_, ops) :: rest -> walk (pc + List.length ops) out rest
+    | Plain _ :: rest -> walk (pc + 1) out rest
+  in
+  walk 0 [] values
+
+let resolve_effects values =
+  let* labels = effect_places values in
+  let one = function
+    | Op value -> Ok (vm_op value)
+    | Goto id ->
+      Option.fold ~none:(Error Label)
+        ~some:(fun pc -> Ok (Contract_vm.JMP pc)) (label id labels)
+    | Branch (reg, id) ->
+      Option.fold ~none:(Error Label)
+        ~some:(fun pc -> Ok (Contract_vm.JIF (reg, pc))) (label id labels)
+    | Place id ->
+      Option.fold ~none:(Error Label)
+        ~some:(fun pc -> Ok (Contract_vm.JDEST pc)) (label id labels)
+    | Apply _ -> Error Effect_map
+  in
+  let rec walk out = function
+    | [] -> Ok (Array.of_list (List.rev out))
+    | Host (_, ops) :: rest -> walk (List.rev_append ops out) rest
+    | Plain value :: rest ->
+      let* op = one value.asm in
+      walk (op :: out) rest
+  in
+  walk [] values
+
+let emit_effects program blocks =
+  let* _, plan = effect_plan program in
+  let pos = { C_lex.off = 0; line = 1; col = 1 } in
+  let at = { C_lex.first = pos; last = pos } in
+  let loc = C_mach.locate at plan in
+  let* env, free = seed program.inputs in
+  let state = {
+    next = List.length program.inputs + 1;
+    free;
+    label = 0;
+  }
+  in
+  let* out = lower env state [] plan loc in
+  match out.stack with
+  | [Atom result] when final_env program.inputs out.env ->
+    let suffix =
+      if result = 0 then one out.env at (Op Stop)
+      else
+        cat
+          (one out.env at (Op (Move (0, result))))
+          (one out.env at (Op Stop))
+    in
+    let* values = attach_effects (out.seq (suffix [])) blocks in
+    let* code = resolve_effects values in
+    begin
+      match Bytecode.decode_image (Bytecode.encode code) with
+      | Ok image when image.code = code -> Ok code
+      | Ok _ | Error _ -> Error Output_code
+    end
+  | [Atom _] -> Error Slot
+  | [_] -> Error Stack
+  | _ -> Error Stack
+
+let encode_raw ?emission ?veil code =
   let _, _, count = pool code in
   if count > 32768 then Error (Constants count)
-  else Ok (Bytecode.encode (Array.map vm_op code))
+  else Ok (Bytecode.encode ?emission ?veil (Array.map vm_op code))
+
+let body_label at = 10_000_000 + at
+
+let open_vm_op = function
+  | Jump at -> Contract_vm.JMP (body_label at)
+  | Jump_if (reg, at) -> Contract_vm.JIF (reg, body_label at)
+  | Mark at -> Contract_vm.JDEST (body_label at)
+  | value -> vm_op value
+
+let check_label index = 1000 + index
+
+let input_code index reg typ =
+  let load = Contract_vm.MLOAD (reg, 1001 + index) in
+  match typ with
+  | C_type.Int -> [
+      load;
+      Contract_vm.LDI (61, Contract_vm.VInt Z.zero);
+      Contract_vm.SUB (reg, reg, 61);
+    ]
+  | C_type.Bool ->
+    let label = check_label index in
+    [
+      load;
+      Contract_vm.JIF (reg, label);
+      Contract_vm.JMP label;
+      Contract_vm.JDEST label;
+    ]
+  | C_type.Bytes len ->
+    let label = check_label index in
+    [
+      load;
+      Contract_vm.LDI (61, Contract_vm.VBytes "");
+      Contract_vm.EQ (63, reg, 61);
+      Contract_vm.STRLEN (61, reg);
+      Contract_vm.LDI (62, Contract_vm.VInt (C_nat.to_z len));
+      Contract_vm.EQ (63, 61, 62);
+      Contract_vm.JIF (63, label);
+      Contract_vm.REVERT;
+      Contract_vm.JDEST label;
+      Contract_vm.LDI (61, Contract_vm.VInt Z.zero);
+      Contract_vm.SUBSTR (reg, reg, 61, 62);
+    ]
+  | C_type.Unit | C_type.Vec _ | C_type.Cap _ | C_type.Enc _
+  | C_type.Pair _ | C_type.Sum _ -> invalid_arg "machine input is not scalar"
+
+let result_code typ code =
+  let count = Array.length code in
+  if count = 0 || code.(count - 1) <> Stop then None
+  else
+    let body = Array.sub code 0 (count - 1) in
+    let first = Array.length body in
+    let tail =
+      match typ with
+      | C_type.Int -> [|
+          Load (61, C_emit.Int Z.zero);
+          Minus (0, 0, 61);
+          Stop;
+        |]
+      | C_type.Bool ->
+        let mark = first + 2 in
+        [|Jump_if (0, mark); Jump mark; Mark mark; Stop|]
+      | C_type.Bytes len ->
+        let mark = first + 9 in
+        [|
+          Load (61, C_emit.Bytes "");
+          Same (63, 0, 61);
+          Size (61, 0);
+          Load (62, C_emit.Int (C_nat.to_z len));
+          Same (63, 61, 62);
+          Jump_if (63, mark);
+          Load (61, C_emit.Int Z.one);
+          Load (62, C_emit.Int Z.zero);
+          Quotient (61, 61, 62);
+          Mark mark;
+          Stop;
+        |]
+      | C_type.Unit | C_type.Vec _ | C_type.Cap _ | C_type.Enc _
+      | C_type.Pair _ | C_type.Sum _ -> [||]
+    in
+    if Array.length tail = 0 then None else Some (Array.append body tail)
+
+let encode_open emission veil inputs regs typ code =
+  let* code =
+    match result_code typ code with
+    | Some value -> Ok value
+    | None -> Error Output_code
+  in
+  let _, _, count = pool code in
+  if count > 32768 then Error (Constants count)
+  else
+    let head = [
+      Contract_vm.JDEST 100;
+      Contract_vm.MLOAD (61, 1000);
+      Contract_vm.LDI (62, Contract_vm.VString "main");
+      Contract_vm.EQ (63, 61, 62);
+      Contract_vm.JIF (63, 200);
+      Contract_vm.REVERT;
+      Contract_vm.JDEST 200;
+    ]
+    in
+    let args =
+      List.mapi
+        (fun index bind -> input_code index regs.(index) bind.C_term.typ)
+        inputs
+      |> List.concat
+    in
+    let body = Array.to_list (Array.map open_vm_op code) in
+    Ok
+      (Bytecode.encode ~emission:(wire_emission emission) ~veil
+        (Array.of_list (head @ args @ [Contract_vm.NOP] @ body)))
 
 type reader = {
   raw : string;
@@ -852,7 +1507,7 @@ let constant input id =
       begin
         match C_rval.decode raw with
         | Ok value when String.equal (C_rval.encode value) raw -> CData value
-        | Ok _ | Error _ -> refuse (Constant_value id)
+        | Ok _ | Error _ -> CText raw
       end
     | 3 -> CBytes raw
     | _ -> refuse (Constant_tag (id, tag))
@@ -896,6 +1551,8 @@ let profile_op pc value =
   | Contract_vm.NEG (dst, src) -> Negate (r dst, r src)
   | Contract_vm.ABS (dst, src) -> Absolute (r dst, r src)
   | Contract_vm.EQ (dst, left, right) -> Same (r dst, r left, r right)
+  | Contract_vm.LT (dst, left, right) -> Less (r dst, r left, r right)
+  | Contract_vm.GT (dst, left, right) -> Greater (r dst, r left, r right)
   | Contract_vm.CONCAT (dst, left, right) ->
     Join (r dst, r left, r right)
   | Contract_vm.STRLEN (dst, src) -> Size (r dst, r src)
@@ -909,26 +1566,54 @@ let profile_op pc value =
   | value -> refuse (Opcode (pc, Bytecode.op_tag value))
 
 let decode_failure reason =
-  try
-    Scanf.sscanf reason "unsupported OCTB version: %d"
-      (fun version -> Version version)
-  with _ ->
+  if String.equal reason "OCTB AML emission is invalid" then Emission_invalid
+  else if String.equal reason "OCTB AML emission is repeated" then
+    Emission_repeated
+  else if String.equal reason "OCTB AML veil is invalid" then Veil_invalid
+  else if String.equal reason "OCTB AML veil is repeated" then Veil_repeated
+  else
     try
-      Scanf.sscanf reason "unknown opcode 0x%x at pc %d"
-        (fun tag pc -> Opcode (pc, tag))
+      Scanf.sscanf reason "unsupported OCTB version: %d"
+        (fun version -> Version version)
     with _ ->
       try
-        Scanf.sscanf reason "truncated instruction at pc %d"
-          (fun pc -> Instruction_data pc)
+        Scanf.sscanf reason "unknown opcode 0x%x at pc %d"
+          (fun tag pc -> Opcode (pc, tag))
       with _ ->
         try
-          Scanf.sscanf reason "constant reference %d at pc %d"
-            (fun id pc -> Constant_ref (pc, id))
+          Scanf.sscanf reason "truncated instruction at pc %d"
+            (fun pc -> Instruction_data pc)
         with _ ->
           try
-            Scanf.sscanf reason "OCTB trailing bytes: %d"
-              (fun count -> Trailing_data count)
-          with _ -> Instruction_data 0
+            Scanf.sscanf reason "constant reference %d at pc %d"
+              (fun id pc -> Constant_ref (pc, id))
+          with _ ->
+            try
+              Scanf.sscanf reason "OCTB trailing bytes: %d"
+                (fun count -> Trailing_data count)
+            with _ -> Instruction_data 0
+
+let claims_aml raw =
+  try
+    let size = String.length raw in
+    if size > max_input_bytes || size < 12 then false
+    else
+      let input = { raw; size; at = 0 } in
+      if not (String.equal (read_size input 4 Header) "OCTB") then false
+      else if read_u16 input Header <> 1 then false
+      else
+        let count = read_u16 input Header in
+        if count > max_consts then false
+        else begin
+          ignore (read_u32 input Header);
+          Array.init count (constant input)
+          |> Array.exists (fun row ->
+            match row.value with
+            | CText value ->
+              Bytecode.emission_value value || Bytecode.veil_value value
+            | _ -> false)
+        end
+  with Read_error _ -> false
 
 let verify code =
   if Array.length code = 0 then refuse Empty_code;
@@ -949,6 +1634,202 @@ let verify code =
       | Jump target | Jump_if (_, target) -> jump pc target
       | _ -> ())
     code
+
+let open_header code =
+  Array.length code >= 8
+  && match code.(0), code.(1), code.(2), code.(3), code.(4), code.(5),
+      code.(6) with
+    | Contract_vm.JDEST 100,
+        Contract_vm.MLOAD (61, 1000),
+        Contract_vm.LDI (62, Contract_vm.VString name),
+        Contract_vm.EQ (63, 61, 62),
+        Contract_vm.JIF (63, 200),
+        Contract_vm.REVERT,
+        Contract_vm.JDEST 200 -> String.equal name "main"
+    | _ -> false
+
+let claims_open raw =
+  try
+    let size = String.length raw in
+    if size > max_input_bytes || size < 12 then false
+    else
+      let input = { raw; size; at = 0 } in
+      if not (String.equal (read_size input 4 Header) "OCTB") then false
+      else if read_u16 input Header <> 1 then false
+      else
+        let count = read_u16 input Header in
+        let instructions = read_u32 input Header in
+        if count > max_consts || Int64.compare instructions (Int64.of_int 7) < 0
+        then false
+        else
+          let consts = Array.init count (constant input) in
+          let byte wanted = read_u8 input Header = wanted in
+          let word wanted = read_u16 input Header = wanted in
+          let wide wanted =
+            Int64.equal (read_u32 input Header) (Int64.of_int wanted)
+          in
+          if not (byte 0x16 && wide 100) then false
+          else if not (byte 0x12 && byte 61 && word 1000) then false
+          else if not (byte 0x0B && byte 62) then false
+          else
+            let id = read_u16 input Header in
+            let main =
+              id < Array.length consts
+              && match consts.(id).value with
+                | CText value -> String.equal value "main"
+                | CInt _ | CBool _ | CData _ | CBytes _ -> false
+            in
+            main
+            && byte 0x07 && byte 63 && byte 61 && byte 62
+            && byte 0x15 && byte 63 && wide 200
+            && byte 0x18
+            && byte 0x16 && wide 200
+  with Read_error _ -> false
+
+let input_type code pc index =
+  let count = Array.length code in
+  let reg = index + 1 in
+  let address = 1001 + index in
+  let label = check_label index in
+  if pc + 2 < count then
+    match code.(pc), code.(pc + 1), code.(pc + 2) with
+    | Contract_vm.MLOAD (dst, at),
+        Contract_vm.LDI (61, Contract_vm.VInt zero),
+        Contract_vm.SUB (out, source, 61)
+        when dst = reg && at = address && out = reg && source = reg
+          && Z.equal zero Z.zero -> Some (C_type.Int, pc + 3)
+    | _ ->
+      if pc + 3 < count then
+        match code.(pc), code.(pc + 1), code.(pc + 2), code.(pc + 3) with
+        | Contract_vm.MLOAD (dst, at),
+            Contract_vm.JIF (guard, yes),
+            Contract_vm.JMP no,
+            Contract_vm.JDEST mark
+            when dst = reg && at = address && guard = reg
+              && yes = label && no = label && mark = label ->
+          Some (C_type.Bool, pc + 4)
+        | _ ->
+          if pc + 10 < count then
+            match code.(pc), code.(pc + 1), code.(pc + 2), code.(pc + 3),
+                code.(pc + 4), code.(pc + 5), code.(pc + 6), code.(pc + 7),
+                code.(pc + 8), code.(pc + 9), code.(pc + 10) with
+            | Contract_vm.MLOAD (dst, at),
+                Contract_vm.LDI (61, Contract_vm.VBytes empty),
+                Contract_vm.EQ (kind, left, 61),
+                Contract_vm.STRLEN (size, text),
+                Contract_vm.LDI (62, Contract_vm.VInt raw_len),
+                Contract_vm.EQ (same, found, 62),
+                Contract_vm.JIF (guard, yes),
+                Contract_vm.REVERT,
+                Contract_vm.JDEST mark,
+                Contract_vm.LDI (61, Contract_vm.VInt zero),
+                Contract_vm.SUBSTR (out, source, first, length)
+                when dst = reg && at = address && String.equal empty ""
+                  && kind = 63 && left = reg && size = 61 && text = reg
+                  && same = 63 && found = 61 && guard = 63
+                  && yes = label && mark = label && Z.equal zero Z.zero
+                  && out = reg && source = reg && first = 61 && length = 62 ->
+              Option.map
+                (fun len -> C_type.Bytes len, pc + 11)
+                (C_nat.make raw_len)
+            | _ -> None
+          else None
+      else None
+  else None
+
+let open_target pc count target =
+  let local = target - body_label 0 in
+  if local < 0 || local >= count then refuse (Jump_ref (pc, target));
+  local
+
+let open_code native at =
+  let count = Array.length native - at in
+  if count <= 0 then refuse Empty_code;
+  let code =
+    Array.init count (fun pc ->
+      match native.(at + pc) with
+      | Contract_vm.JMP target -> Jump (open_target (at + pc) count target)
+      | Contract_vm.JIF (guard, target) ->
+        Jump_if (reg (at + pc) guard, open_target (at + pc) count target)
+      | Contract_vm.JDEST target ->
+        if target = body_label pc then Mark pc
+        else refuse (Jump_ref (at + pc, target))
+      | value -> profile_op (at + pc) value)
+  in
+  verify code;
+  code
+
+let result_type code =
+  let count = Array.length code in
+  let at size = count - size in
+  if count >= 3 then
+    match code.(at 3), code.(at 2), code.(at 1) with
+    | Load (61, C_emit.Int zero), Minus (0, 0, 61), Stop
+        when Z.equal zero Z.zero -> Some (C_type.Int, at 3)
+    | _ ->
+      if count >= 4 then
+        match code.(at 4), code.(at 3), code.(at 2), code.(at 1) with
+        | Jump_if (0, yes), Jump no, Mark mark, Stop
+            when yes = at 2 && no = at 2 && mark = at 2 ->
+          Some (C_type.Bool, at 4)
+        | _ ->
+          if count >= 11 then
+            match code.(at 11), code.(at 10), code.(at 9), code.(at 8),
+                code.(at 7), code.(at 6), code.(at 5), code.(at 4),
+                code.(at 3), code.(at 2), code.(at 1) with
+            | Load (61, C_emit.Bytes empty), Same (63, 0, 61), Size (61, 0),
+                Load (62, C_emit.Int raw_len), Same (63, 61, 62),
+                Jump_if (63, yes), Load (61, C_emit.Int one),
+                Load (62, C_emit.Int zero), Quotient (61, 61, 62),
+                Mark mark, Stop
+                when String.equal empty "" && Z.equal one Z.one
+                  && Z.equal zero Z.zero && yes = at 2 && mark = at 2 ->
+              Option.map (fun len -> C_type.Bytes len, at 11)
+                (C_nat.make raw_len)
+            | _ -> None
+          else None
+      else None
+  else None
+
+let verify_result code first =
+  Array.iteri
+    (fun pc -> function
+      | Stop when pc < first -> refuse Result_header
+      | Jump target | Jump_if (_, target)
+          when pc < first && target >= first -> refuse Result_header
+      | _ -> ())
+    code
+
+let open_profile native =
+  if not (open_header native) then None
+  else
+    let rec inputs pc index out =
+      if pc >= Array.length native then refuse Empty_code
+      else
+        match native.(pc) with
+        | Contract_vm.NOP ->
+          if index = 0 then refuse Empty_code;
+          Some (Array.of_list (List.rev out), pc + 1)
+        | _ when index >= input_limit ->
+          refuse (Register_ref (pc, index + 1))
+        | _ ->
+          begin
+            match input_type native pc index with
+            | Some (typ, next) -> inputs next (index + 1) (typ :: out)
+            | None -> refuse (Opcode (pc, Bytecode.op_tag native.(pc)))
+          end
+    in
+    match inputs 7 0 [] with
+    | Some (types, at) ->
+      let code = open_code native at in
+      begin
+        match result_type code with
+        | Some (output, first) ->
+          verify_result code first;
+          Some (types, output, at, code)
+        | None -> refuse Result_header
+      end
+    | None -> None
 
 let decode raw =
   try
@@ -975,21 +1856,42 @@ let decode raw =
     if native.Bytecode.text_at <> text_at then refuse Header;
     if Array.length native.code <> instruction_count then
       refuse (Instruction_count raw_count);
-    let code = Array.mapi profile_op native.code in
+    if not
+        (String.equal raw
+          (Bytecode.encode ?emission:native.emission ?veil:native.veil native.code))
+    then refuse Exact_image;
+    let emission = Option.map local_emission native.emission in
+    let veil =
+      match native.veil with
+      | None -> None
+      | Some value ->
+        begin
+          match local_veil value with
+          | Some veil -> Some veil
+          | None -> refuse Veil_invalid
+        end
+    in
+    let inputs, output, code_at, code =
+      match open_profile native.code with
+      | Some (inputs, output, at, code) ->
+        inputs, Some output, at, code
+      | None -> [||], None, 0, Array.mapi profile_op native.code
+    in
     let cells =
-      Array.map
-        (fun (cell : Bytecode.code_cell) ->
-          { pc = cell.pc; at = cell.at; size = cell.size })
-        native.cells
+      Array.init (Array.length code) (fun pc ->
+        let cell = native.cells.(code_at + pc) in
+        { pc; at = cell.at; size = cell.size })
     in
     verify code;
-    Ok { consts; cells; text_at; code }
+    Ok { inputs; output; emission; veil; consts; cells; text_at; code }
   with Read_error error -> Error error
 
 let encode code =
   let* raw = encode_raw code in
   match decode raw with
-  | Ok image when image.code = code -> Ok raw
+  | Ok image
+      when Array.length image.inputs = 0 && Option.is_none image.output
+        && image.code = code -> Ok raw
   | Ok _ -> Error Output_code
   | Error error -> Error (Output error)
 
@@ -1014,6 +1916,10 @@ let op_text = function
   | Absolute (dst, src) -> Printf.sprintf "abs(r%d,r%d)" dst src
   | Same (dst, left, right) ->
     Printf.sprintf "eq(r%d,r%d,r%d)" dst left right
+  | Less (dst, left, right) ->
+    Printf.sprintf "lt(r%d,r%d,r%d)" dst left right
+  | Greater (dst, left, right) ->
+    Printf.sprintf "gt(r%d,r%d,r%d)" dst left right
   | Join (dst, left, right) ->
     Printf.sprintf "concat(r%d,r%d,r%d)" dst left right
   | Minus (dst, left, right) ->
@@ -1064,6 +1970,12 @@ let decode_text = function
   | Jump_mark pc -> Printf.sprintf "OCTB mark differs from pc = %d" pc
   | Trailing_data value -> Printf.sprintf "OCTB trailing bytes = %d" value
   | Empty_code -> "OCTB instruction stream is empty"
+  | Result_header -> "OCTB result header is invalid"
+  | Emission_invalid -> "OCTB AML emission is invalid"
+  | Emission_repeated -> "OCTB AML emission is repeated"
+  | Veil_invalid -> "OCTB AML veil is invalid"
+  | Veil_repeated -> "OCTB AML veil is repeated"
+  | Exact_image -> "OCTB open image differs from exact encoding"
 
 let finish (image : C_mach.t) =
   let* () =
@@ -1071,8 +1983,8 @@ let finish (image : C_mach.t) =
     | [] -> Ok ()
     | effects -> Error (Mach (C_mach.Effects effects))
   in
-  let* code, raw_map, raw_live =
-    lower_plan image.code image.loc image.span
+  let* code, raw_map, raw_live, _, regs =
+    lower_plan image.inputs image.code image.loc image.span
   in
   let* map =
     match C_smap.make raw_map with
@@ -1084,12 +1996,34 @@ let finish (image : C_mach.t) =
     | Ok value -> Ok value
     | Error error -> Error (Lmap error)
   in
-  let* octb = encode code in
+  let veil = wire_veil image.veils image.veil_depth in
+  let* octb =
+    match image.inputs with
+    | [] -> encode_raw ~emission:(wire_emission image.emission) ~veil code
+    | inputs ->
+      let* raw = encode_open image.emission veil inputs regs image.typ code in
+      let expected = result_code image.typ code in
+      begin
+        match decode raw with
+        | Ok decoded
+            when Some decoded.code = expected
+              && Array.to_list decoded.inputs
+                = List.map (fun bind -> bind.C_term.typ) inputs
+              && decoded.output = Some image.typ
+              && decoded.emission = Some image.emission
+              && decoded.veil = Some (image.veils, image.veil_depth) -> Ok raw
+        | Ok _ -> Error Output_code
+        | Error error -> Error (Output error)
+      end
+  in
   Ok {
+    inputs = image.inputs;
     plan = image.code;
     code;
     octb;
+    typ = image.typ;
     result = image.result;
+    emission = image.emission;
     veils = image.veils;
     veil_depth = image.veil_depth;
     map;
@@ -1122,5 +2056,6 @@ let text = function
   | Smap error -> C_smap.text error
   | Slot -> "OCTB linear slot transition is invalid"
   | Lmap error -> C_live.text error
+  | Effect_map -> "OCTB effect register map differs from static sites"
   | Output error -> "OCTB output refusal reason = " ^ decode_text error
   | Output_code -> "OCTB output differs after decoding"

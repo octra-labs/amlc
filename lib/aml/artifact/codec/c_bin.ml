@@ -501,6 +501,26 @@ let pack bits =
     in
     loop 0 0 0 bits
 
+let unpack size raw =
+  if size < 0 || size > C_nat.str_max
+      || String.length raw <> (size + 7) / 8 then None
+  else
+    let rec loop index out =
+      if index = size then
+        let bits = List.rev out in
+        begin
+          match pack bits with
+          | Some exact when String.equal exact raw -> Some bits
+          | Some _ | None -> None
+        end
+      else
+        let byte = Char.code raw.[index / 8] in
+        let shift = 7 - index mod 8 in
+        let bit = byte land (1 lsl shift) <> 0 in
+        loop (index + 1) (bit :: out)
+    in
+    loop 0 []
+
 let transcript records =
   let count = List.length records in
   let* count = u32 count in

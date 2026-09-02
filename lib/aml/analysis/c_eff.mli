@@ -11,6 +11,7 @@ type atom =
 type t
 
 val valid : atom -> bool
+val compare : atom -> atom -> int
 val empty : t
 val one : atom -> t
 val add : atom -> t -> t

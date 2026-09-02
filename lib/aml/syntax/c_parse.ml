@@ -183,7 +183,8 @@ let rec mark_term at term tail =
   | C_syn.Pair (left, right) | C_syn.Add (left, right)
   | C_syn.Sub (left, right) | C_syn.Mul (left, right)
   | C_syn.Div (left, right) | C_syn.Mod (left, right)
-  | C_syn.Eq (_, left, right) | C_syn.Cat (left, right)
+  | C_syn.Eq (_, left, right) | C_syn.Cmp (_, left, right)
+  | C_syn.Cat (left, right)
   | C_syn.Vcat (left, right) | C_syn.Step (left, right) ->
       mark_term at left (mark_term at right (at :: tail))
   | C_syn.Fst value | C_syn.Snd value | C_syn.Inl (value, _)
@@ -259,7 +260,8 @@ let rec trace_term parent term (marks, origins) =
     | C_syn.Pair (left, right) | C_syn.Add (left, right)
     | C_syn.Sub (left, right) | C_syn.Mul (left, right)
     | C_syn.Div (left, right) | C_syn.Mod (left, right)
-    | C_syn.Eq (_, left, right) | C_syn.Cat (left, right)
+    | C_syn.Eq (_, left, right) | C_syn.Cmp (_, left, right)
+    | C_syn.Cat (left, right)
     | C_syn.Vcat (left, right) | C_syn.Step (left, right) ->
         trace_term at right (trace_term at left state)
     | C_syn.Fst value | C_syn.Snd value | C_syn.Inl (value, _)
@@ -2230,6 +2232,7 @@ let rec term_order term tail =
   | C_term.Div (value, body)
   | C_term.Mod (value, body)
   | C_term.Eq (_, value, body)
+  | C_term.Cmp (_, value, body)
   | C_term.Cat (value, body)
   | C_term.Vcat (value, body)
   | C_term.Step (value, body) ->
