@@ -36,6 +36,8 @@ let equal left right =
   | C_emit.Int lhs, C_emit.Int rhs -> Z.equal lhs rhs
   | C_emit.Bytes lhs, C_emit.Bytes rhs -> String.equal lhs rhs
   | C_emit.Data lhs, C_emit.Data rhs -> C_rval.equal lhs rhs
+  | C_emit.Cap (lk, li), C_emit.Cap (rk, ri) ->
+    C_nat.equal lk rk && C_nat.equal li ri
   | _ -> false
 
 let replay = function

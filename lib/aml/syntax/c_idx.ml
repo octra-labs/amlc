@@ -30,6 +30,7 @@ type error =
   | False of rel * C_nat.t * C_nat.t
 
 let lit value = Option.map (fun value -> Lit value) (C_nat.make value)
+let exact value = Lit value
 let var name = Var name
 let add left right = Add (left, right)
 let mul left right = Mul (left, right)

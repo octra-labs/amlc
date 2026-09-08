@@ -26,7 +26,8 @@ let stat term =
         match term with
         | C_syn.KUnit | C_syn.KBool _ | C_syn.KInt _ | C_syn.KBytes _
         | C_syn.Var _ -> rest
-        | C_syn.KVec (_, values) -> push next values rest
+        | C_syn.KVec (_, values) | C_syn.KSeq (_, _, values) ->
+          push next values rest
         | C_syn.Let (_, value, body)
         | C_syn.Pair (value, body)
         | C_syn.Add (value, body)
@@ -46,6 +47,7 @@ let stat term =
         | C_syn.Fst value | C_syn.Snd value
         | C_syn.Inl (value, _) | C_syn.Inr (_, value)
         | C_syn.Act (_, value) | C_syn.Neg value | C_syn.Abs value
+        | C_syn.Fit (_, value) | C_syn.Wide value | C_syn.Length value
         | C_syn.Take (_, value)
         | C_syn.Drop (_, value) | C_syn.At (_, value)
         | C_syn.Uncons value | C_syn.Close value -> (next, value) :: rest
@@ -79,7 +81,8 @@ let add_terms names terms =
         match term with
         | C_syn.KUnit | C_syn.KBool _ | C_syn.KInt _ | C_syn.KBytes _ ->
           names, rest
-        | C_syn.KVec (_, values) -> names, push values rest
+        | C_syn.KVec (_, values) | C_syn.KSeq (_, _, values) ->
+          names, push values rest
         | C_syn.Var _ -> names, rest
         | C_syn.Let (bind, value, body) ->
           add_bind names bind, value :: body :: rest
@@ -98,6 +101,7 @@ let add_terms names terms =
         | C_syn.Fst value | C_syn.Snd value
         | C_syn.Inl (value, _) | C_syn.Inr (_, value)
         | C_syn.Act (_, value) | C_syn.Neg value | C_syn.Abs value
+        | C_syn.Fit (_, value) | C_syn.Wide value | C_syn.Length value
         | C_syn.Take (_, value)
         | C_syn.Drop (_, value) | C_syn.At (_, value)
         | C_syn.Uncons value | C_syn.Close value -> names, value :: rest

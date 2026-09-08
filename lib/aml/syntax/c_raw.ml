@@ -29,6 +29,7 @@ and t =
   | KInt of Z.t
   | KBytes of string
   | KVec of C_decl.typ * t list
+  | KSeq of C_idx.t * C_decl.typ * t list
   | Var of C_syn.name
   | Let of bind * t * t
   | If of t * t * t
@@ -47,6 +48,9 @@ and t =
   | Mod of t * t
   | Neg of t
   | Abs of t
+  | Fit of C_decl.typ * t
+  | Wide of t
+  | Length of t
   | Eq of C_decl.typ * t * t
   | Cmp of C_syn.rel * t * t
   | Cat of t * t
@@ -111,6 +115,8 @@ let rec of_syn = function
   | C_syn.KBytes value -> KBytes value
   | C_syn.KVec (typ, values) ->
       KVec (C_decl.Exact typ, List.map of_syn values)
+  | C_syn.KSeq (cap, typ, values) ->
+      KSeq (C_idx.exact cap, C_decl.Exact typ, List.map of_syn values)
   | C_syn.Var name -> Var name
   | C_syn.Let (item, value, body) ->
       Let (bind_of_syn item, of_syn value, of_syn body)
@@ -133,6 +139,9 @@ let rec of_syn = function
   | C_syn.Mod (left, right) -> Mod (of_syn left, of_syn right)
   | C_syn.Neg value -> Neg (of_syn value)
   | C_syn.Abs value -> Abs (of_syn value)
+  | C_syn.Fit (typ, value) -> Fit (C_decl.Exact typ, of_syn value)
+  | C_syn.Wide value -> Wide (of_syn value)
+  | C_syn.Length value -> Length (of_syn value)
   | C_syn.Eq (typ, left, right) ->
       Eq (C_decl.Exact typ, of_syn left, of_syn right)
   | C_syn.Cmp (rel, left, right) -> Cmp (rel, of_syn left, of_syn right)
@@ -170,7 +179,7 @@ let stat term =
           let rest =
             match term with
             | KUnit | KBool _ | KInt _ | KBytes _ | Var _ -> rest
-            | KVec (_, values) -> push next values rest
+            | KVec (_, values) | KSeq (_, _, values) -> push next values rest
             | Let (_, value, body)
             | Pair (value, body)
             | Add (value, body)
@@ -188,7 +197,8 @@ let stat term =
             | Unpair (value, _, _, body) ->
                 (next, value) :: (next, body) :: rest
             | Fst value | Snd value | Inl (value, _) | Inr (_, value)
-            | Act (_, value) | Neg value | Abs value | Take (_, value)
+            | Act (_, value) | Neg value | Abs value | Fit (_, value)
+            | Wide value | Length value | Take (_, value)
             | Drop (_, value) | At (_, value)
             | Uncons value | Close value | Dmake (_, _, value) ->
                 (next, value) :: rest
@@ -265,6 +275,11 @@ and term env trace = function
       let* elem = typ env raw in
       let* values, trace = terms env trace [] values in
       node (C_syn.KVec (elem, values)) trace
+  | KSeq (raw_cap, raw, values) ->
+      let* cap = index env raw_cap in
+      let* elem = typ env raw in
+      let* values, trace = terms env trace [] values in
+      node (C_syn.KSeq (cap, elem, values)) trace
   | Var name -> node (C_syn.Var name) trace
   | Let (item, value, body) ->
       let* item = bind_in env item in
@@ -336,6 +351,16 @@ and term env trace = function
   | Abs value ->
       let* value, trace = term env trace value in
       node (C_syn.Abs value) trace
+  | Fit (raw, value) ->
+      let* typ = typ env raw in
+      let* value, trace = term env trace value in
+      node (C_syn.Fit (typ, value)) trace
+  | Wide value ->
+      let* value, trace = term env trace value in
+      node (C_syn.Wide value) trace
+  | Length value ->
+      let* value, trace = term env trace value in
+      node (C_syn.Length value) trace
   | Eq (raw, left, right) ->
       let* typ = typ env raw in
       let* left, trace = term env trace left in

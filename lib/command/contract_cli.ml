@@ -26,22 +26,7 @@ let artifact command path =
   | Ok value -> value
   | Error reason -> Aml_cli.fail command reason
 
-type probe =
-  | Accept
-  | Refuse of int * int
-
-let probe_source source =
-  try
-    ignore (Octra_vm.Oct_parse.syntax source);
-    Accept
-  with
-  | Octra_vm.Oct_lex.LexError (_, line, col) -> Refuse (line, col)
-  | Octra_vm.Oct_parse.ParseError (_, line, col) -> Refuse (line, col)
-
-let accepts_source source =
-  match probe_source source with
-  | Accept -> true
-  | Refuse _ -> false
+let owns_source = Octra_vm.Aml_source.owns
 
 let image_result raw =
   match Octra_vm.Bytecode.decode_image raw with
@@ -255,7 +240,7 @@ let local_args command artifact method_name values =
     Aml_cli.fail command (Octra_vm.Aml_input.error_text error)
 
 let raw_value command index value =
-  match Octra_vm.Aml_input.tagged value with
+  match Octra_vm.Aml_input.detached value with
   | Some parsed -> parsed
   | None ->
     Aml_cli.fail command
@@ -297,11 +282,12 @@ let storage_text (action, key, value) =
   Printf.printf "event = storage action = %s key = %S value = %S\n"
     action key value
 
-let execute command trace program options method_name args storage_kinds code proof =
+let execute command trace program options method_name args strict_values storage_kinds code proof =
   let config =
     Octra_vm.Local_vm.config
       ~storage:options.storage
       ~storage_kinds
+      ~strict_values
       ~limit:options.limit
       ~step_cap:options.step_cap
       ~epoch:options.epoch
@@ -339,11 +325,7 @@ let execute command trace program options method_name args storage_kinds code pr
   | Octra_vm.Local_vm.Reverted
   | Octra_vm.Local_vm.Step_cap
   | Octra_vm.Local_vm.Host_operation _ ->
-    Aml_cli.fail command
-      (Printf.sprintf "execution stopped stop = %s effort = %d steps = %d"
-        (Octra_vm.Local_vm.stop_text outcome.stop)
-        outcome.effort
-        outcome.steps)
+    Aml_cli.fail command (Aml_cli.stop_reason outcome)
 
 let local command trace path args =
   let artifact = artifact command path in
@@ -351,8 +333,10 @@ let local command trace path args =
   let method_name = selected_method command artifact options.method_name in
   let args = local_args command artifact method_name options.values in
   let proof = image command artifact.octb |> proof_text in
+  let strict_values = artifact.declaration = Octra_vm.Oct_lang.ProgramDecl in
   execute command trace artifact.name options method_name args
-    (Octra_vm.Aml_input.storage_kinds artifact.ast) artifact.code proof
+    strict_values (Octra_vm.Aml_input.storage_kinds artifact.ast)
+    artifact.code proof
 
 let local_octb_as command trace path args =
   let options = exec_args command exec_defaults args in
@@ -365,7 +349,7 @@ let local_octb_as command trace path args =
   let image = image command (Aml_cli.source path) in
   let storage_kinds = Option.value ~default:[] image.state in
   execute command trace (Filename.basename path) options method_name values
-    storage_kinds image.code (proof_text image)
+    false storage_kinds image.code (proof_text image)
 
 let run_octb_as command path args = local_octb_as command false path args
 let debug_octb_as command path args = local_octb_as command true path args

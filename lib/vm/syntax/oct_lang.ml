@@ -66,6 +66,10 @@ type expr =
   | EIndexField of string * expr list * string
   | EEnumVariant of string * string
   | ETernary of expr * expr * expr
+  | EEqual of typ * expr * expr
+  | ELet of string * mult * typ * expr * expr
+  | ESplit of expr * (string * mult * typ) * (string * mult * typ) * expr
+  | EOrbit of C_nat.t * expr option * expr * (string * mult * typ) * expr
   | EAction of C_eff.atom * expr
   | EUse of use_expr
 
@@ -157,13 +161,13 @@ type form_mark = {
 
 type form_def = {
   fm_name : string;
-  fm_caps : form_param list;
-  fm_arg : form_param;
+  fm_params : form_param list;
   fm_ret : typ;
   fm_mult : mult;
   fm_marks : form_mark list;
   fm_lim : C_limit.t option;
   fm_body : expr;
+  fm_public : bool;
   fm_line : int;
   fm_column : int;
 }
@@ -244,7 +248,7 @@ type token =
   | TkSelf | TkCaller | TkOrigin | TkEpoch | TkEpochTime | TkValue | TkBalance
   | TkTrue | TkFalse
   | TkTyInt | TkTyBool | TkTyString | TkTyAddress | TkTyBytes | TkTyBytes32
-  | TkTyU64 | TkTyU128 | TkTyU256
+  | TkTyU64 | TkTyU128 | TkTyU256 | TkTyUint
   | TkTyCipher | TkTyPubKey | TkMap
   | TkTreeHash | TkNodeId | TkTxHash
   | TkFor | TkIn | TkDotDot | TkTyList

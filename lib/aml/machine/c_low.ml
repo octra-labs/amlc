@@ -30,6 +30,9 @@ let rec typ_raw = function
   | C_syn.TUnit -> Ok C_type.Unit
   | C_syn.TBool -> Ok C_type.Bool
   | C_syn.TInt -> Ok C_type.Int
+  | C_syn.TNum (sign, bits) ->
+    let* bits = nat bits in
+    Ok (C_type.Num (sign, bits))
   | C_syn.TBytes len ->
     let* len = nat len in
     Ok (C_type.Bytes len)
@@ -37,6 +40,10 @@ let rec typ_raw = function
     let* len = nat len in
     let* elem = typ_raw elem in
     Ok (C_type.Vec (len, elem))
+  | C_syn.TSeq (cap, elem) ->
+    let* cap = nat cap in
+    let* elem = typ_raw elem in
+    Ok (C_type.Seq (cap, elem))
   | C_syn.TCap kind ->
     let* kind = nat kind in
     Ok (C_type.Cap kind)
@@ -58,12 +65,16 @@ let typ_shape value =
     | (depth, value) :: rest ->
       let next = depth + 1 in
       match value with
-      | C_syn.TUnit | C_syn.TBool | C_syn.TInt -> walk (nodes + 1) rest
+      | C_syn.TUnit | C_syn.TBool | C_syn.TInt | C_syn.TNum _ ->
+        walk (nodes + 1) rest
       | C_syn.TBytes len | C_syn.TCap len ->
         let* _ = nat len in
         walk (nodes + 1) rest
       | C_syn.TVec (len, elem) ->
         let* _ = nat len in
+        walk (nodes + 1) ((next, elem) :: rest)
+      | C_syn.TSeq (cap, elem) ->
+        let* _ = nat cap in
         walk (nodes + 1) ((next, elem) :: rest)
       | C_syn.TPair (left, right) | C_syn.TSum (left, right) ->
         walk (nodes + 1) ((next, left) :: (next, right) :: rest)
@@ -139,7 +150,8 @@ let shape term =
         match term with
         | C_syn.KUnit | C_syn.KBool _ | C_syn.KInt _ | C_syn.KBytes _
         | C_syn.Var _ -> rest
-        | C_syn.KVec (_, values) -> push next values rest
+        | C_syn.KVec (_, values) | C_syn.KSeq (_, _, values) ->
+          push next values rest
         | C_syn.Let (_, value, body)
         | C_syn.Pair (value, body)
         | C_syn.Add (value, body)
@@ -160,6 +172,7 @@ let shape term =
         | C_syn.Fst value | C_syn.Snd value
         | C_syn.Inl (value, _) | C_syn.Inr (_, value)
         | C_syn.Act (_, value) | C_syn.Neg value | C_syn.Abs value
+        | C_syn.Fit (_, value) | C_syn.Wide value | C_syn.Length value
         | C_syn.Take (_, value)
         | C_syn.Drop (_, value) | C_syn.At (_, value)
         | C_syn.Uncons value | C_syn.Close value ->
@@ -188,6 +201,10 @@ and lower env next = function
     let* elem = typ elem in
     let* values, next = list env next [] values in
     Ok (C_term.Vec (elem, values), next)
+  | C_syn.KSeq (cap, elem, values) ->
+    let* elem = typ elem in
+    let* values, next = list env next [] values in
+    Ok (C_term.Seq (cap, elem, values), next)
   | C_syn.Var name ->
     begin
       match find name env with
@@ -269,6 +286,16 @@ and lower env next = function
   | C_syn.Abs value ->
     let* value, next = lower env next value in
     Ok (C_term.Abs value, next)
+  | C_syn.Fit (target, value) ->
+    let* target = typ target in
+    let* value, next = lower env next value in
+    Ok (C_term.Fit (target, value), next)
+  | C_syn.Wide value ->
+    let* value, next = lower env next value in
+    Ok (C_term.Wide value, next)
+  | C_syn.Length value ->
+    let* value, next = lower env next value in
+    Ok (C_term.Length value, next)
   | C_syn.Eq (kind, left, right) ->
     let* kind = typ kind in
     let* left, next = lower env next left in
@@ -324,6 +351,63 @@ let term term =
   let* () = shape term in
   let* term, _ = lower [] C_nat.zero term in
   Ok term
+
+let rec name_order term tail =
+  match term with
+  | C_syn.KUnit | C_syn.KBool _ | C_syn.KInt _ | C_syn.KBytes _
+  | C_syn.Var _ -> tail
+  | C_syn.KVec (_, values) | C_syn.KSeq (_, _, values) ->
+    List.fold_right name_order values tail
+  | C_syn.Let (bind, value, body) ->
+    name_order value (bind.name :: name_order body tail)
+  | C_syn.If (guard, yes, no) ->
+    name_order guard (name_order yes (name_order no tail))
+  | C_syn.Pair (left, right)
+  | C_syn.Add (left, right)
+  | C_syn.Sub (left, right)
+  | C_syn.Mul (left, right)
+  | C_syn.Div (left, right)
+  | C_syn.Mod (left, right)
+  | C_syn.Eq (_, left, right)
+  | C_syn.Cmp (_, left, right)
+  | C_syn.Cat (left, right)
+  | C_syn.Vcat (left, right)
+  | C_syn.Step (left, right) ->
+    name_order left (name_order right tail)
+  | C_syn.Unpair (pair, left, right, body) ->
+    name_order pair (left.name :: right.name :: name_order body tail)
+  | C_syn.Fst value | C_syn.Snd value | C_syn.Inl (value, _)
+  | C_syn.Inr (_, value) | C_syn.Act (_, value) | C_syn.Neg value
+  | C_syn.Abs value | C_syn.Fit (_, value) | C_syn.Wide value
+  | C_syn.Length value | C_syn.Take (_, value) | C_syn.Drop (_, value)
+  | C_syn.At (_, value) | C_syn.Uncons value | C_syn.Close value ->
+    name_order value tail
+  | C_syn.Case (value, left, yes, right, no) ->
+    name_order value
+      (left.name :: name_order yes (right.name :: name_order no tail))
+  | C_syn.Vfold (vector, seed, fold) ->
+    name_order vector
+      (name_order seed
+        (fold.item.name :: fold.state.name :: name_order fold.body tail))
+
+let names inputs term =
+  let ordered =
+    List.fold_right
+      (fun (bind : C_syn.bind) tail -> bind.name :: tail)
+      inputs
+      (name_order term [])
+  in
+  let rec number index out = function
+    | [] -> Some (List.rev out)
+    | name :: rest ->
+      begin
+        match C_nat.of_int index with
+        | Some id ->
+          number (index + 1) ((id, C_syn.name_text name) :: out) rest
+        | None -> None
+      end
+  in
+  number 0 [] ordered
 
 let rec inputs env next out = function
   | [] -> Ok (env, next, List.rev out)

@@ -212,6 +212,10 @@ let rec value typ state =
   | C_type.Int ->
     let* number, state = integer state in
     Ok (C_eval.Int number, state)
+  | C_type.Num _ ->
+    let* number, state = integer state in
+    if C_type.admits typ number then Ok (C_eval.Int number, state)
+    else Error (Type ("value", typ, at))
   | C_type.Bytes len ->
     begin
       match (item state).tok with
@@ -225,6 +229,37 @@ let rec value typ state =
     let* items, state = seq (C_nat.to_int len) elem state in
     let* state = need C_lex.F_rparen state in
     Ok (C_eval.Vec (Array.of_list items), state)
+  | C_type.Seq (cap, elem) ->
+    let* state = need C_lex.F_seq state in
+    let* state = need C_lex.F_lparen state in
+    let limit = C_nat.to_int cap in
+    let rec items count out state =
+      match (item state).tok with
+      | C_lex.Rparen -> Ok (List.rev out, next state)
+      | _ when count = limit -> Error (Type ("value", typ, at))
+      | _ ->
+        let* value, state = value elem state in
+        begin
+          match (item state).tok with
+          | C_lex.Comma -> more (count + 1) (value :: out) (next state)
+          | C_lex.Rparen -> Ok (List.rev (value :: out), next state)
+          | _ -> Error (Type ("value", typ, at))
+        end
+    and more count out state =
+      match (item state).tok with
+      | C_lex.Rparen -> Error (Type ("value", typ, at))
+      | _ -> items count out state
+    in
+    let* active, state = items 0 [] state in
+    begin
+      match C_eval.zero elem with
+      | None -> Error (Type ("value", typ, at))
+      | Some empty ->
+        let count = List.length active in
+        let values = Array.make limit empty in
+        List.iteri (Array.set values) active;
+        Ok (C_eval.Pair (C_eval.Int (Z.of_int count), C_eval.Vec values), state)
+    end
   | C_type.Cap kind ->
     let* state = need C_lex.F_cap state in
     let* state = need C_lex.F_lbrack state in
@@ -291,6 +326,16 @@ and seq count typ state =
     in
     loop (count - 1) [first] state
 
+let parse_value typ source =
+  let* items =
+    match C_lex.scan source with
+    | Ok value -> Ok value
+    | Error error -> Error (Lex error)
+  in
+  let* value, state = value typ { items; at = 0 } in
+  let* _ = need C_lex.F_eof state in
+  if Result.is_ok (shape [value]) then Ok value else Error Form
+
 let parse specs source =
   let* items =
     match C_lex.scan source with
@@ -321,24 +366,7 @@ let parse specs source =
   in
   entries [] state specs
 
-let rec typed typ value =
-  match typ, value with
-  | C_type.Unit, C_eval.Unit
-  | C_type.Bool, C_eval.Bool _
-  | C_type.Int, C_eval.Int _ -> true
-  | C_type.Bytes len, C_eval.Bytes raw -> C_nat.to_int len = String.length raw
-  | C_type.Vec (len, elem), C_eval.Vec values ->
-    C_nat.to_int len = Array.length values && Array.for_all (typed elem) values
-  | C_type.Cap kind, C_eval.Cap (actual, id) ->
-    C_nat.equal kind actual && C_nat.valid id
-  | C_type.Enc (key, rem), C_eval.Enc (actual_key, actual_rem, field) ->
-    C_nat.equal key actual_key && C_nat.equal rem actual_rem
-    && C_fp.valid (C_fp.to_z field)
-  | C_type.Pair (lhs, rhs), C_eval.Pair (left, right) ->
-    typed lhs left && typed rhs right
-  | C_type.Sum (lhs, _), C_eval.Inl value -> typed lhs value
-  | C_type.Sum (_, rhs), C_eval.Inr value -> typed rhs value
-  | _ -> false
+let typed = C_eval.typed
 
 let shaped value = Result.is_ok (shape [value])
 
@@ -371,8 +399,11 @@ let rec subst values = function
   | C_term.Unit -> C_term.Unit
   | C_term.Bool value -> C_term.Bool value
   | C_term.Int value -> C_term.Int value
+  | C_term.Narrow (typ, value) -> C_term.Narrow (typ, value)
   | C_term.Bytes value -> C_term.Bytes value
   | C_term.Vec (typ, items) -> C_term.Vec (typ, List.map (subst values) items)
+  | C_term.Seq (cap, typ, items) ->
+    C_term.Seq (cap, typ, List.map (subst values) items)
   | C_term.Var id -> Option.value ~default:(C_term.Var id) (sub_get id values)
   | C_term.Let (bind, value, body) ->
     C_term.Let (bind, subst values value, subst (drop bind.id values) body)
@@ -397,6 +428,9 @@ let rec subst values = function
   | C_term.Mod (lhs, rhs) -> C_term.Mod (subst values lhs, subst values rhs)
   | C_term.Neg value -> C_term.Neg (subst values value)
   | C_term.Abs value -> C_term.Abs (subst values value)
+  | C_term.Fit (typ, value) -> C_term.Fit (typ, subst values value)
+  | C_term.Wide value -> C_term.Wide (subst values value)
+  | C_term.Length value -> C_term.Length (subst values value)
   | C_term.Eq (typ, lhs, rhs) -> C_term.Eq (typ, subst values lhs, subst values rhs)
   | C_term.Cmp (rel, lhs, rhs) ->
     C_term.Cmp (rel, subst values lhs, subst values rhs)
@@ -419,10 +453,15 @@ let rec term_of typ value =
     | C_type.Unit, C_eval.Unit -> Some C_term.Unit
     | C_type.Bool, C_eval.Bool value -> Some (C_term.Bool value)
     | C_type.Int, C_eval.Int value -> Some (C_term.Int value)
+    | C_type.Num _, C_eval.Int value -> Some (C_term.Narrow (typ, value))
     | C_type.Bytes _, C_eval.Bytes value -> Some (C_term.Bytes value)
     | C_type.Vec (_, elem), C_eval.Vec values ->
       Option.map (fun items -> C_term.Vec (elem, items))
         (terms elem (Array.to_list values))
+    | C_type.Seq (cap, elem), C_eval.Pair (C_eval.Int len, C_eval.Vec values) ->
+      let count = Z.to_int len in
+      Option.map (fun items -> C_term.Seq (cap, elem, items))
+        (terms elem (Array.to_list (Array.sub values 0 count)))
     | C_type.Pair (left_ty, right_ty), C_eval.Pair (left, right) ->
       Option.bind (term_of left_ty left) (fun left_term ->
         Option.map (fun right_term -> C_term.Pair (left_term, right_term))

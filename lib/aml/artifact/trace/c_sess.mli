@@ -62,6 +62,7 @@ val scope_equal : scope -> scope -> bool
 val token : scope -> kind:Z.t -> id:Z.t -> rev:Z.t -> (token, error) result
 val cell : kind:Z.t -> id:Z.t -> rev:Z.t -> live:bool -> (cell, error) result
 val empty : scope -> state
+val scope_of : state -> scope
 val view : state -> scope * cell list
 val of_cells : scope -> cell list -> (state, error) result
 val issue : state -> kind:Z.t -> id:Z.t -> (state * token, error) result

@@ -4,6 +4,7 @@
 type shape =
   | SUnit
   | SAtom
+  | SCap of C_nat.t
   | SPair of shape * shape
   | SVec of C_nat.t * shape
   | SSum of shape
@@ -25,6 +26,7 @@ type code =
   | Negate of code
   | Absolute of code
   | Same of code
+  | Different of code
   | Order of C_term.rel * code
   | Join of code
   | Clip of C_nat.t * code
@@ -39,10 +41,15 @@ type code =
   | Unhead of code
   | Left of code
   | Right of code
+  | Pack of C_nat.t * C_type.t * code
+  | Fit of C_type.t * code
+  | Wide of code
+  | Close of C_nat.t * code
   | Effect of int * C_eff.atom * code * code
   | Scope of C_term.bind * code * code
   | Scope2 of C_term.bind * C_term.bind * code * code
   | Iter of C_nat.t * C_term.bind * C_term.bind * code * code
+  | Iter_seq of C_nat.t * C_term.bind * C_term.bind * code * code
   | Choice of C_term.bind * code * C_term.bind * code * shape * code
   | Fork of shape * code * code * code
 
@@ -59,6 +66,7 @@ type loc =
   | LNegate of C_lex.span * loc
   | LAbsolute of C_lex.span * loc
   | LSame of C_lex.span * loc
+  | LDifferent of C_lex.span * loc
   | LOrder of C_term.rel * C_lex.span * loc
   | LJoin of C_lex.span * loc
   | LClip of C_nat.t * C_lex.span * loc
@@ -73,6 +81,10 @@ type loc =
   | LUnhead of C_lex.span * loc
   | LLeft of C_lex.span * loc
   | LRight of C_lex.span * loc
+  | LPack of C_lex.span * loc
+  | LFit of C_lex.span * loc
+  | LWide of C_lex.span * loc
+  | LClose of C_lex.span * loc
   | LEffect of C_lex.span * loc * loc
   | LScope of C_lex.span * loc * loc
   | LScope2 of C_lex.span * loc * loc
@@ -96,7 +108,9 @@ type error =
   | Source of C_parse.error
   | Feed of C_feed.error
   | Input of C_term.id * C_type.t
-  | Inputs of int
+  | Inputs of Z.t
+  | Layout of Z.t
+  | Types of Z.t
   | Effects of C_eff.atom list
   | Term
   | Run of C_eval.error
@@ -119,10 +133,17 @@ val replay_plan_in : code -> (C_term.bind * C_emit.lit) list ->
   (C_emit.lit list * C_eff.atom list) option
 val replay_in : code -> (C_term.bind * C_emit.lit) list ->
   C_emit.lit list option
+val replay_value_in : code -> (C_term.bind * C_emit.lit) list ->
+  C_type.t -> C_emit.lit option
 val effects : code -> C_eff.atom list
 val equal : C_emit.lit -> C_emit.lit -> bool
+val literal : C_type.t -> C_eval.value -> C_emit.lit option
+val atoms : C_type.t -> C_eval.value -> C_emit.lit list option
+val value : C_type.t -> C_emit.lit list ->
+  (C_eval.value * C_emit.lit list) option
 val shape_of : C_type.t -> shape option
 val shape_width : shape -> Z.t
+val shape_cells : shape -> Z.t
 val same_shape : shape -> shape -> bool
 val emission_text : emission -> string
 val text : error -> string

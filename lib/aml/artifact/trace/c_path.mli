@@ -11,12 +11,14 @@ type kind =
   | Negate
   | Absolute
   | Same
+  | Different
   | Less
   | Greater
   | Join
   | Minus
   | Size
   | Slice
+  | Cap_close
   | Jump
   | Jump_if
   | Mark
@@ -52,5 +54,6 @@ type cause =
 
 val make : string -> (t, cause) result
 val make_feed : string -> C_feed.t -> (t, cause) result
+val make_in : string -> C_eval.value list -> (t, cause) result
 val replay : t -> C_emit.lit list option
 val text : cause -> string

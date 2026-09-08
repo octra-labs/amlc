@@ -60,12 +60,24 @@ let lit_text = function
   | Emit.Data value ->
     "data[" ^ Octra_vm.C_type.text (Rval.typ value) ^ "]:"
     ^ Octra_vm.C_eval.value_text (Rval.value value)
+  | Emit.Cap (kind, id) ->
+    "cap[" ^ Octra_vm.C_nat.text kind ^ "](" ^ Octra_vm.C_nat.text id ^ ")"
+
+let lit_image = function
+  | Emit.Bool false -> "b0"
+  | Emit.Bool true -> "b1"
+  | Emit.Int value -> "i" ^ Z.to_string value
+  | Emit.Bytes value -> "x" ^ value
+  | Emit.Data value -> "d" ^ Rval.encode value
+  | Emit.Cap (kind, id) ->
+    "c" ^ Octra_vm.C_nat.text kind ^ ":" ^ Octra_vm.C_nat.text id
 
 let lit_shape = function
   | Emit.Bool _ -> "bool"
   | Emit.Int _ -> "int"
   | Emit.Bytes value -> "bytes[" ^ string_of_int (String.length value) ^ "]"
   | Emit.Data value -> Octra_vm.C_type.text (Rval.typ value)
+  | Emit.Cap (kind, _) -> "cap[" ^ Octra_vm.C_nat.text kind ^ "]"
 
 let slot_text (value : Live.slot) =
   Octra_vm.C_nat.text value.id ^ ":" ^ Octra_vm.C_type.mul_text value.mul ^ ":"
@@ -75,6 +87,14 @@ let slots_text values =
   "[" ^ String.concat "," (List.map slot_text values) ^ "]"
 
 let sha value = Digestif.SHA256.(to_hex (digest_string value))
+
+let input_hash source method_name values =
+  let args =
+    List.map
+      (fun (value : Input.core_value) -> sha (lit_image value.lit))
+      values
+  in
+  sha (String.concat "\000" ("AML_DEBUG_INPUT" :: source :: method_name :: args))
 
 let fail command reason =
   Printf.eprintf "status = fail command = %s reason = %s\n" command reason;
@@ -156,7 +176,61 @@ let same_native expected actual =
     String.equal left right
   | Emit.Data left, Octra_vm.Contract_vm.VString right ->
     String.equal (Rval.encode left) right
+  | Emit.Cap (kind, id), Octra_vm.Contract_vm.VCap right ->
+    Octra_vm.C_nat.to_int kind = right.kind
+    && Octra_vm.C_nat.to_int id = right.id
   | _ -> false
+
+let fault_name value =
+  let size = String.length value in
+  let valid = function
+    | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' -> true
+    | _ -> false
+  in
+  size > 0 && String.for_all valid value
+
+type fault =
+  | Typed of string * Z.t * string
+  | Require of string
+
+let fault_event events =
+  let prefix = "Error:" in
+  let size = String.length prefix in
+  let select (event : Octra_vm.Contract_vm.event_record) =
+    if String.equal event.event "Require" then
+      match event.values with
+      | [Octra_vm.Contract_vm.VString message] -> Some (Require message)
+      | _ -> None
+    else if String.length event.event <= size
+        || not (String.equal (String.sub event.event 0 size) prefix) then None
+    else
+      let name = String.sub event.event size (String.length event.event - size) in
+      match event.values with
+      | Octra_vm.Contract_vm.VInt code
+          :: Octra_vm.Contract_vm.VString message :: _
+          when fault_name name -> Some (Typed (name, code, message))
+      | _ -> None
+  in
+  List.find_map select (List.rev events)
+
+let stop_reason outcome =
+  let stop = Local.stop_text outcome.Local.stop in
+  match outcome.stop, fault_event outcome.events with
+  | Local.Reverted, Some (Typed (name, code, message)) ->
+    Printf.sprintf
+      "execution stopped stop = %s error = %s code = %s message = %s effort = %d steps = %d"
+      stop name (Z.to_string code)
+      (Local.value_text (Octra_vm.Contract_vm.VString message))
+      outcome.effort outcome.steps
+  | Local.Reverted, Some (Require message) ->
+    Printf.sprintf
+      "execution stopped stop = %s error = Require message = %s effort = %d steps = %d"
+      stop (Local.value_text (Octra_vm.Contract_vm.VString message))
+      outcome.effort outcome.steps
+  | (Local.Returned | Local.Reverted | Local.Step_cap
+      | Local.Host_operation _), _ ->
+    Printf.sprintf "execution stopped stop = %s effort = %d steps = %d"
+      stop outcome.effort outcome.steps
 
 let run_octb command raw =
   let image = decode command raw in
@@ -182,9 +256,7 @@ let run_octb command raw =
     match outcome.stop with
     | Local.Returned -> ()
     | Local.Reverted | Local.Step_cap | Local.Host_operation _ ->
-      fail command
-        (Printf.sprintf "execution stopped stop = %s effort = %d steps = %d"
-          (Local.stop_text outcome.stop) outcome.effort outcome.steps)
+      fail command (stop_reason outcome)
   end;
   let machine = state () in
   begin
@@ -212,12 +284,26 @@ let octb_values command inputs values =
 
 let local_run ?(trace = false) command raw method_name values =
   let image = native_image command raw in
+  let args =
+    List.concat_map (fun (value : Input.core_value) -> value.vms) values
+  in
+  let grants =
+    List.filter_map
+      (function Octra_vm.Contract_vm.VCap cap -> Some cap | _ -> None)
+      args
+  in
+  let closes =
+    Array.exists
+      (function Octra_vm.Contract_vm.CAP_CLOSE _ -> true | _ -> false)
+      image.code
+  in
   let config =
     Local.config
-      ~view:true
+      ~view:(not closes)
       ~byte_result:Octra_vm.Contract_vm.Bytes_result
       ~method_name
-      ~args:(List.map (fun (value : Input.core_value) -> value.vm) values)
+      ~args
+      ~grants
       ()
   in
   match Local.run ~trace config image.code with
@@ -227,24 +313,109 @@ let local_run ?(trace = false) command raw method_name values =
       match outcome.stop with
       | Local.Returned -> outcome
       | Local.Reverted | Local.Step_cap | Local.Host_operation _ ->
-        fail command
-          (Printf.sprintf "execution stopped stop = %s effort = %d steps = %d"
-            (Local.stop_text outcome.stop) outcome.effort outcome.steps)
+        fail command (stop_reason outcome)
     end
 
-let open_frame outcome =
+let open_frame entry outcome =
   List.find_opt
     (fun (frame : Local.frame) ->
       match frame.op with
-      | Octra_vm.Contract_vm.NOP -> true
+      | Octra_vm.Contract_vm.NOP -> frame.pc = entry - 1
       | _ -> false)
     outcome.Local.frames
 
-let open_match code values outcome =
-  match open_frame outcome with
+let open_cost guarded code frame outcome =
+  if guarded then
+    let pc = frame.Local.pc + Array.length code in
+    List.find_opt (fun item -> item.Local.pc = pc) outcome.Local.frames
+    |> Option.map (fun stop ->
+      stop.Local.index - frame.index,
+      stop.effort_after - frame.effort_after)
+  else
+    Some
+      (outcome.Local.steps - frame.index - 1,
+        outcome.effort - frame.effort_after)
+
+let local_lit = function
+  | Octra_vm.Contract_vm.VInt value -> Some (Emit.Int value)
+  | Octra_vm.Contract_vm.VBool value -> Some (Emit.Bool value)
+  | Octra_vm.Contract_vm.VBytes value -> Some (Emit.Bytes value)
+  | Octra_vm.Contract_vm.VCap value ->
+    begin
+      match Octra_vm.C_nat.of_int value.kind,
+          Octra_vm.C_nat.of_int value.id with
+      | Some kind, Some id -> Some (Emit.Cap (kind, id))
+      | _ -> None
+    end
+  | Octra_vm.Contract_vm.VString _
+  | Octra_vm.Contract_vm.VBytes32 _
+  | Octra_vm.Contract_vm.VU64 _
+  | Octra_vm.Contract_vm.VU128 _
+  | Octra_vm.Contract_vm.VU256 _
+  | Octra_vm.Contract_vm.VAddr _
+  | Octra_vm.Contract_vm.VCipher _
+  | Octra_vm.Contract_vm.VPubKey _ -> None
+
+let local_values_opt results regs =
+  let rec walk index out =
+    if index = Array.length results then Some (List.rev out)
+    else
+      let reg = results.(index) in
+      if reg < 0 || reg >= Array.length regs then None
+      else
+        match local_lit regs.(reg) with
+        | Some value -> walk (index + 1) (value :: out)
+        | None -> None
+  in
+  walk 0 []
+
+let local_values command results regs =
+  match local_values_opt results regs with
+  | Some values -> values
+  | None -> fail command "VM result type differs from program type"
+
+let local_closes values =
+  let rec walk out = function
+    | [] -> Some (List.rev out)
+    | cap :: rest ->
+      begin
+        match Octra_vm.C_nat.of_int cap.Octra_vm.Contract_vm.kind,
+            Octra_vm.C_nat.of_int cap.id with
+        | Some kind, Some id -> walk ((kind, id) :: out) rest
+        | _ -> None
+      end
+  in
+  walk [] values
+
+let core_result command typ results regs =
+  let values = local_values command results regs in
+  match Octra_vm.C_mach.value typ values with
+  | Some (value, []) ->
+    begin
+      match Octra_vm.C_mach.literal typ value with
+      | Some lit -> lit, value
+      | None -> fail command "VM result type differs from program type"
+    end
+  | Some (_, _ :: _) | None ->
+    fail command "VM result type differs from program type"
+
+let debug_result command typ results machine =
+  let values = Array.map (VM.value machine) results |> Array.to_list in
+  match Octra_vm.C_mach.value typ values with
+  | Some (value, []) ->
+    begin
+      match Octra_vm.C_mach.literal typ value with
+      | Some lit -> lit
+      | None -> fail command "VM result type differs from program type"
+    end
+  | Some (_, _ :: _) | None ->
+    fail command "VM result type differs from program type"
+
+let open_match ~guarded ~entry code output results values outcome =
+  match open_frame entry outcome with
   | None -> Error "open VM separator is absent"
   | Some frame ->
-    let inputs = List.map (fun (value : Input.core_value) -> value.lit) values in
+    let inputs = List.concat_map (fun (value : Input.core_value) -> value.lits) values in
     begin
       match VM.make_in ~activate:(Some Z.zero) inputs with
       | Error error -> Error (VM.text error)
@@ -253,37 +424,43 @@ let open_match code values outcome =
           match VM.run machine code with
           | Error error -> Error (VM.text error)
           | Ok () ->
-            let steps = outcome.steps - frame.index - 1 in
-            let work = outcome.effort - frame.effort_after in
-            if steps >= 0 && work >= 0
-                && same_native (VM.result machine) outcome.result
-                && VM.steps machine = steps
-                && Z.equal (VM.work machine) (Z.of_int work)
-                && outcome.storage = [] && outcome.events = [] then Ok ()
-            else Error "production VM differs from the open checked machine"
+            begin
+              match open_cost guarded code frame outcome with
+              | None -> Error "open VM output guard is absent"
+              | Some (steps, work) ->
+                let checked =
+                  Array.map (fun reg -> VM.value machine reg) results
+                  |> Array.to_list
+                in
+                begin
+                  match local_values_opt results outcome.regs,
+                      local_closes outcome.closes with
+                  | Some actual, Some closes
+                      when (match Octra_vm.C_mach.value output checked with
+                        | Some (_, []) -> true
+                        | Some (_, _ :: _) | None -> false)
+                        && steps >= 0 && work >= 0
+                        && List.length checked = List.length actual
+                        && List.for_all2 Octra_vm.C_mach.equal checked actual
+                        && VM.steps machine = steps
+                        && Z.equal (VM.work machine) (Z.of_int work)
+                        && outcome.storage = [] && outcome.events = []
+                        && List.equal
+                          (fun (lk, li) (rk, ri) ->
+                            Octra_vm.C_nat.equal lk rk
+                            && Octra_vm.C_nat.equal li ri)
+                          (VM.closes machine) closes -> Ok ()
+                  | _, _ ->
+                    Error "production VM differs from the open checked machine"
+                end
+            end
         end
     end
 
-let open_machine command code values outcome =
-  match open_match code values outcome with
+let open_machine command guarded entry code output results values outcome =
+  match open_match ~guarded ~entry code output results values outcome with
   | Ok () -> ()
   | Error reason -> fail command reason
-
-let core_result command typ = function
-  | Octra_vm.Contract_vm.VInt value when Octra_vm.C_type.equal typ Octra_vm.C_type.Int ->
-    Emit.Int value, Eval.Int value
-  | Octra_vm.Contract_vm.VBool value
-      when Octra_vm.C_type.equal typ Octra_vm.C_type.Bool ->
-    Emit.Bool value, Eval.Bool value
-  | Octra_vm.Contract_vm.VBytes value ->
-    begin
-      match typ with
-      | Octra_vm.C_type.Bytes len
-          when Octra_vm.C_nat.to_int len = String.length value ->
-        Emit.Bytes value, Eval.Bytes value
-      | _ -> fail command "VM result type differs from program type"
-    end
-  | _ -> fail command "VM result type differs from program type"
 
 let main_method command = function
   | None -> "main"
@@ -342,16 +519,21 @@ let open_source command raw (artifact : Octb.t) method_name values =
   let values = core_values command artifact.Octb.inputs values in
   let outcome = local_run ~trace:true command artifact.octb method_name values in
   let image = decode command artifact.octb in
-  open_machine command image.code values outcome;
-  let result, eval_result = core_result command artifact.typ outcome.result in
+  open_machine command image.guarded image.entry image.code artifact.typ
+    artifact.results values outcome;
+  let result, eval_result =
+    core_result command artifact.typ artifact.results outcome.regs
+  in
   let machine_inputs =
     List.map2
       (fun bind (value : Input.core_value) -> bind, value.lit)
       artifact.inputs values
   in
   begin
-    match Octra_vm.C_mach.replay_in artifact.plan machine_inputs with
-    | Some [expected] when Octra_vm.C_mach.equal expected result -> ()
+    match
+      Octra_vm.C_mach.replay_value_in artifact.plan machine_inputs artifact.typ
+    with
+    | Some expected when Octra_vm.C_mach.equal expected result -> ()
     | Some _ | None -> fail command "VM result differs from the checked machine"
   end;
   let parsed =
@@ -396,9 +578,9 @@ let run path feed_path method_name values =
       open_source "run" raw artifact method_name values
     in
     Printf.printf
-      "status = pass command = run emission = %s method = %s result = %s effort = %d steps = %d veil = %s\n"
+      "status = pass command = run emission = %s method = %s result = %s effort = %d steps = %d closes = %d veil = %s\n"
       (emission artifact) method_name (lit_text result) outcome.effort
-      outcome.steps (veil artifact)
+      outcome.steps (List.length outcome.closes) (veil artifact)
 
 let open_octb command raw method_name values =
   let image = decode command raw in
@@ -412,8 +594,9 @@ let open_octb command raw method_name values =
   let method_name = main_method command method_name in
   let values = octb_values command image.inputs values in
   let outcome = local_run ~trace:true command raw method_name values in
-  open_machine command image.code values outcome;
-  let result, _ = core_result command output outcome.result in
+  open_machine command image.guarded image.entry image.code output image.results
+    values outcome;
+  let result, _ = core_result command output image.results outcome.regs in
   image, method_name, result, outcome
 
 let run_open_octb command raw method_name values =
@@ -421,9 +604,10 @@ let run_open_octb command raw method_name values =
     open_octb command raw method_name values
   in
   Printf.printf
-    "status = pass command = %s input = octb emission = %s method = %s result = %s effort = %d steps = %d vm = AML storage = memory veil = %s\n"
+    "status = pass command = %s input = octb emission = %s method = %s result = %s effort = %d steps = %d closes = %d vm = AML storage = memory veil = %s\n"
     command (Octb.image_emission image) method_name (lit_text result)
-    outcome.effort outcome.steps (Octb.image_veil image)
+    outcome.effort outcome.steps (List.length outcome.closes)
+    (Octb.image_veil image)
 
 let test_open_octb command raw method_name values =
   let left_image, left_method, left_result, left =
@@ -437,12 +621,14 @@ let test_open_octb command raw method_name values =
       || not (String.equal left_method right_method)
       || not (Octra_vm.C_mach.equal left_result right_result)
       || left.effort <> right.effort || left.steps <> right.steps
-      || left.storage <> right.storage || left.events <> right.events then
+      || left.storage <> right.storage || left.events <> right.events
+      || left.closes <> right.closes then
     fail command "repeated execution differs";
   Printf.printf
-    "status = pass command = %s input = octb emission = %s repeats = 2 method = %s result = %s effort = %d steps = %d sha256 = %s veil = %s\n"
+    "status = pass command = %s input = octb emission = %s repeats = 2 method = %s result = %s effort = %d steps = %d closes = %d sha256 = %s veil = %s\n"
     command (Octb.image_emission left_image) left_method (lit_text left_result)
-    left.effort left.steps (sha raw) (Octb.image_veil left_image)
+    left.effort left.steps (List.length left.closes) (sha raw)
+    (Octb.image_veil left_image)
 
 let op_text = function
   | Octb.Load (dst, value) ->
@@ -460,6 +646,8 @@ let op_text = function
   | Octb.Absolute (dst, src) -> Printf.sprintf "abs(r%d,r%d)" dst src
   | Octb.Same (dst, left, right) ->
       Printf.sprintf "eq(r%d,r%d,r%d)" dst left right
+  | Octb.Different (dst, left, right) ->
+      Printf.sprintf "neq(r%d,r%d,r%d)" dst left right
   | Octb.Less (dst, left, right) ->
       Printf.sprintf "lt(r%d,r%d,r%d)" dst left right
   | Octb.Greater (dst, left, right) ->
@@ -471,6 +659,8 @@ let op_text = function
   | Octb.Size (dst, src) -> Printf.sprintf "strlen(r%d,r%d)" dst src
   | Octb.Slice (dst, src, first, count) ->
       Printf.sprintf "substr(r%d,r%d,r%d,r%d)" dst src first count
+  | Octb.Cap_close (kind, reg) ->
+    Printf.sprintf "cap_close(%s,r%d)" (Octra_vm.C_nat.text kind) reg
   | Octb.Jump at -> Printf.sprintf "jmp(%d)" at
   | Octb.Jump_if (reg, at) -> Printf.sprintf "jif(r%d,%d)" reg at
   | Octb.Mark at -> Printf.sprintf "jdest(%d)" at
@@ -480,6 +670,7 @@ let op_text = function
 let op_reg = function
   | Octb.Load (dst, _) | Octb.Move (dst, _)
   | Octb.Plus (dst, _, _) | Octb.Same (dst, _, _)
+  | Octb.Different (dst, _, _)
   | Octb.Less (dst, _, _) | Octb.Greater (dst, _, _)
   | Octb.Times (dst, _, _)
   | Octb.Quotient (dst, _, _) | Octb.Remainder (dst, _, _)
@@ -487,6 +678,7 @@ let op_reg = function
   | Octb.Join (dst, _, _) | Octb.Minus (dst, _, _)
   | Octb.Size (dst, _) | Octb.Slice (dst, _, _, _) -> Some dst
   | Octb.Jump_if (reg, _) -> Some reg
+  | Octb.Cap_close (_, reg) -> Some reg
   | Octb.Stop -> Some 0
   | Octb.Jump _ | Octb.Mark _ | Octb.Noop -> None
 
@@ -496,6 +688,8 @@ let reg_text machine = function
 
 type debug_req = {
   feed : string option;
+  method_name : string option;
+  values : string list;
   cap : int option;
   points : Dbg.point list;
   expect : Emit.lit option;
@@ -507,6 +701,8 @@ type debug_req = {
 
 let debug_req = {
   feed = None;
+  method_name = None;
+  values = [];
   cap = None;
   points = [];
   expect = None;
@@ -541,9 +737,15 @@ let epoch command raw =
         (Z.to_string Folio.epoch_max))
 
 let rec debug_args req = function
-  | [] -> req
+  | [] -> { req with values = List.rev req.values }
   | "--feed" :: path :: rest ->
     debug_args { req with feed = one "debug" "feed path" req.feed path } rest
+  | "--method" :: name :: rest ->
+    debug_args
+      { req with method_name = one "debug" "method" req.method_name name }
+      rest
+  | "--arg" :: value :: rest ->
+    debug_args { req with values = value :: req.values } rest
   | "--cap" :: raw :: rest ->
     debug_args { req with cap = one "debug" "step cap" req.cap (int "debug" "step cap" raw) } rest
   | "--break-pc" :: raw :: rest ->
@@ -606,33 +808,68 @@ let debug_with path fixed args =
     | None -> feed_opt "debug" req.feed
   in
   let artifact = compile "debug" raw feed in
-  if artifact.inputs <> [] then
-    fail "debug" "runtime input debugging is unavailable";
+  let call =
+    match artifact.inputs with
+    | [] ->
+      if Option.is_some req.method_name || req.values <> [] then
+        fail "debug" "runtime arguments do not apply to a closed program";
+      None
+    | _ ->
+      if Option.is_some feed then
+        fail "debug" "feed and runtime arguments are mutually exclusive";
+      let method_name = main_method "debug" req.method_name in
+      let values = core_values "debug" artifact.inputs req.values in
+      Some (method_name, values)
+  in
+  let checked_values =
+    match call with
+    | None -> []
+    | Some (_, values) ->
+      List.map (fun (value : Input.core_value) -> value.value) values
+  in
   let proved =
-    match feed with
-    | None ->
+    match feed, call with
+    | None, None ->
       begin
         match Path.make raw with
         | Ok value -> value
         | Error error -> fail "debug" (Path.text error)
       end
-    | Some feed ->
+    | Some feed, None ->
       begin
         match Path.make_feed raw feed with
         | Ok value -> value
         | Error error -> fail "debug" (Path.text error)
       end
+    | None, Some _ ->
+      begin
+        match Path.make_in raw checked_values with
+        | Ok value -> value
+        | Error error -> fail "debug" (Path.text error)
+      end
+    | Some _, Some _ -> fail "debug" "input configuration is ambiguous"
   in
   let image = decode "debug" artifact.octb in
   let code = image.code in
   if Array.length code <> Array.length artifact.code
       || Array.length code <> Array.length proved.frames then
     fail "debug" "instruction metadata lengths differ";
-  let production = run_octb "debug" artifact.octb in
+  let production =
+    match call with
+    | None -> run_octb "debug" artifact.octb
+    | Some _ ->
+      let _, result, _ =
+        open_source "debug" raw artifact req.method_name req.values
+      in
+      result
+  in
   let source_hash =
-    match feed with
-    | None -> sha raw
-    | Some feed -> sha (raw ^ "\000" ^ Feed.encode feed)
+    match feed, call with
+    | None, None -> sha raw
+    | Some feed, None -> sha (raw ^ "\000" ^ Feed.encode feed)
+    | None, Some (method_name, values) ->
+      input_hash raw method_name values
+    | Some _, Some _ -> fail "debug" "input configuration is ambiguous"
   in
   let code_hash = sha artifact.octb in
   let cfg, skip, session_path, prior_trace =
@@ -667,7 +904,19 @@ let debug_with path fixed args =
   in
   if not (List.for_all point_valid (Dbg.points cfg)) then
     fail "debug" "breakpoint is outside the program";
-  let machine = state () in
+  let machine =
+    match call with
+    | None -> state ()
+    | Some (_, values) ->
+      let inputs =
+        List.concat_map (fun (value : Input.core_value) -> value.lits) values
+      in
+      begin
+        match VM.make_in ~activate:(Some Z.zero) inputs with
+        | Ok value -> value
+        | Error error -> fail "debug" (VM.text error)
+      end
+  in
   let rec step count rows replayed =
     if VM.halted machine then `Done (rows, replayed)
     else if VM.pc machine >= Array.length code then
@@ -736,9 +985,13 @@ let debug_with path fixed args =
   | `Done (rows, replayed) ->
     if Option.is_some prior_trace && not replayed then
       fail "debug" "session step is outside the execution path";
-    let result = VM.result machine in
+    let result =
+      match call with
+      | None -> VM.result machine
+      | Some _ -> debug_result "debug" artifact.typ artifact.results machine
+    in
     if not (Octra_vm.C_mach.equal result production)
-        || not (Octra_vm.C_mach.equal result (checked_result "debug" artifact)) then
+        || not (Octra_vm.C_mach.equal result proved.result) then
       fail "debug" "VM result differs from the checked machine";
     if not (Dbg.check cfg result) then fail "debug" "result differs from expectation";
     let text = trace_text rows in
@@ -757,8 +1010,9 @@ let debug_with path fixed args =
         end
     end;
     Printf.printf
-      "status = pass command = debug emission = %s result = %s trace = %s veil = %s\n"
-      (emission artifact) (lit_text result) (sha text) (veil artifact)
+      "status = pass command = debug emission = %s result = %s closes = %d trace = %s veil = %s\n"
+      (emission artifact) (lit_text result) (List.length (VM.closes machine))
+      (sha text) (veil artifact)
 
 let debug path args = debug_with path None args
 
@@ -774,9 +1028,25 @@ let debug_octb path args =
   distinct path req;
   let raw = source path in
   let image = decode "debug" raw in
-  if Array.length image.inputs <> 0 then
-    fail "debug" "runtime input debugging is unavailable";
-  let production = run_octb "debug" raw in
+  let call =
+    if Array.length image.inputs = 0 then begin
+      if Option.is_some req.method_name || req.values <> [] then
+        fail "debug" "runtime arguments do not apply to a closed program";
+      None
+    end else
+      let method_name = main_method "debug" req.method_name in
+      let values = octb_values "debug" image.inputs req.values in
+      Some (method_name, values)
+  in
+  let production =
+    match call with
+    | None -> run_octb "debug" raw
+    | Some _ ->
+      let _, _, result, _ =
+        open_octb "debug" raw req.method_name req.values
+      in
+      result
+  in
   let code = image.code in
   let cap = Option.value ~default:(Array.length code) req.cap in
   let cfg =
@@ -790,7 +1060,19 @@ let debug_octb path args =
   in
   if not (List.for_all point_valid (Dbg.points cfg)) then
     fail "debug" "breakpoint is outside the program";
-  let machine = state () in
+  let machine =
+    match call with
+    | None -> state ()
+    | Some (_, values) ->
+      let inputs =
+        List.concat_map (fun (value : Input.core_value) -> value.lits) values
+      in
+      begin
+        match VM.make_in ~activate:(Some Z.zero) inputs with
+        | Ok value -> value
+        | Error error -> fail "debug" (VM.text error)
+      end
+  in
   let rec step count rows =
     if VM.halted machine then `Done rows
     else if VM.pc machine >= Array.length code then
@@ -826,7 +1108,13 @@ let debug_octb path args =
   match step 0 [] with
   | `Pause -> ()
   | `Done rows ->
-    let result = VM.result machine in
+    let result =
+      match call, image.output with
+      | None, _ -> VM.result machine
+      | Some _, Some output ->
+        debug_result "debug" output image.results machine
+      | Some _, None -> fail "debug" "OCTB result type is absent"
+    in
     if not (Octra_vm.C_mach.equal result production) then
       fail "debug" "VM result differs from the production VM";
     if not (Dbg.check cfg result) then
@@ -847,8 +1135,9 @@ let debug_octb path args =
         end
     end;
     Printf.printf
-      "status = pass command = debug emission = %s result = %s trace = %s veil = %s\n"
-      (Octb.image_emission image) (lit_text result) (sha text)
+      "status = pass command = debug emission = %s result = %s closes = %d trace = %s veil = %s\n"
+      (Octb.image_emission image) (lit_text result)
+      (List.length (VM.closes machine)) (sha text)
       (Octb.image_veil image)
 
 let feed input values output =
@@ -926,12 +1215,14 @@ let test path feed_path method_name values =
         || left_out.effort <> right_out.effort
         || left_out.steps <> right_out.steps
         || left_out.storage <> right_out.storage
-        || left_out.events <> right_out.events then
+        || left_out.events <> right_out.events
+        || left_out.closes <> right_out.closes then
       fail "test" "repeated execution differs";
     Printf.printf
-      "status = pass command = test emission = %s repeats = 2 method = %s result = %s effort = %d steps = %d sha256 = %s veil = %s veils = %d veil_depth = %s\n"
+      "status = pass command = test emission = %s repeats = 2 method = %s result = %s effort = %d steps = %d closes = %d sha256 = %s veil = %s veils = %d veil_depth = %s\n"
       (emission left) left_method (lit_text left_result) left_out.effort
-      left_out.steps (sha left.octb) (veil left) left.veils
+      left_out.steps (List.length left_out.closes) (sha left.octb) (veil left)
+      left.veils
       (Octra_vm.C_nat.text left.veil_depth)
 
 type project_input = {

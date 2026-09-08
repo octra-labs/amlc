@@ -9,6 +9,79 @@ type t = {
   octb : string;
 }
 
+let owns source =
+  let stream = Oct_lex.make_stream source in
+  let modifier = function
+    | Oct_lang.TkFn
+    | Oct_lang.TkView
+    | Oct_lang.TkPure
+    | Oct_lang.TkPublic
+    | Oct_lang.TkPrivate
+    | Oct_lang.TkInternal
+    | Oct_lang.TkPayable -> true
+    | _ -> false
+  in
+  let rec scan braces parens brackets before prior =
+    let token = Oct_lex.peek_token stream in
+    Oct_lex.eat stream;
+    let next = Oct_lex.peek_token stream in
+    let outer = braces = 1 && parens = 0 && brackets = 0 in
+    let owned =
+      match token with
+      | Oct_lang.TkContract
+      | Oct_lang.TkInterface
+      | Oct_lang.TkImport -> braces = 0
+      | Oct_lang.TkImplements -> braces = 0
+      | Oct_lang.TkLBrace ->
+        outer && (prior = Oct_lang.TkState
+          || (match before, prior with
+            | (Oct_lang.TkStruct | Oct_lang.TkEnum), Oct_lang.TkIdent _ -> true
+            | _ -> false))
+      | Oct_lang.TkLParen ->
+        outer && (prior = Oct_lang.TkConstructor
+          || (match before, prior with
+            | (Oct_lang.TkEvent | Oct_lang.TkFn | Oct_lang.TkError),
+                Oct_lang.TkIdent _ -> true
+            | _ -> false))
+      | Oct_lang.TkColon ->
+        outer && (match before, prior with
+          | Oct_lang.TkConst, Oct_lang.TkIdent _ -> true
+          | _ -> false)
+      | Oct_lang.TkEq ->
+        outer && (match before, prior with
+          | Oct_lang.TkConst, Oct_lang.TkIdent _
+          | Oct_lang.TkIdent "invariant", Oct_lang.TkIdent _ -> true
+          | _ -> false)
+      | Oct_lang.TkPublic ->
+        outer && (modifier next || next = Oct_lang.TkIdent "main")
+      | Oct_lang.TkView
+      | Oct_lang.TkPure
+      | Oct_lang.TkPrivate
+      | Oct_lang.TkInternal
+      | Oct_lang.TkPayable -> outer && modifier next
+      | _ -> false
+    in
+    if owned then true
+    else
+      match token with
+      | Oct_lang.TkEOF -> false
+      | Oct_lang.TkLBrace ->
+        scan (braces + 1) parens brackets prior token
+      | Oct_lang.TkRBrace ->
+        scan (max 0 (braces - 1)) parens brackets prior token
+      | Oct_lang.TkLParen ->
+        scan braces (parens + 1) brackets prior token
+      | Oct_lang.TkRParen ->
+        scan braces (max 0 (parens - 1)) brackets prior token
+      | Oct_lang.TkLBrack ->
+        scan braces parens (brackets + 1) prior token
+      | Oct_lang.TkRBrack ->
+        scan braces parens (max 0 (brackets - 1)) prior token
+      | _ -> scan braces parens brackets prior token
+  in
+  try scan 0 0 0 Oct_lang.TkEOF Oct_lang.TkEOF
+  with Oct_lex.LexError _ -> false
+
 module Names = Set.Make (String)
 
 let repeated names =
@@ -34,6 +107,11 @@ let verifier_text = function
   | Contract_vm.Verifier.EmptyCode -> "instruction stream is empty"
   | Contract_vm.Verifier.ReservedKey (pc, _) ->
     Printf.sprintf "storage key is reserved at pc %d" pc
+  | Contract_vm.Verifier.CapabilityLiteral pc ->
+    Printf.sprintf "capability literal is forbidden at pc %d" pc
+  | Contract_vm.Verifier.CapabilityKind (pc, kind) ->
+    Printf.sprintf "capability kind is invalid at pc %d kind = %s"
+      pc (Z.to_string kind)
 
 let body_empty ast =
   match ast.Oct_lang.declaration with

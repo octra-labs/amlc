@@ -188,6 +188,14 @@ let rec ty_code = function
     let* key = num key in
     let* rem = num rem in
     Some (Tag (Z.of_int 8, Cons (key, Cons (rem, Nil))))
+  | C_type.Num (sign, bits) ->
+    let sign = match sign with C_type.Signed -> Z.zero | C_type.Unsigned -> Z.one in
+    let* bits = num bits in
+    Some (Tag (Z.of_int 9, Cons (Num sign, Cons (bits, Nil))))
+  | C_type.Seq (cap, elem) ->
+    let* cap = num cap in
+    let* elem = ty_code elem in
+    Some (Tag (Z.of_int 10, Cons (cap, Cons (elem, Nil))))
 
 let rec ty_get_f fuel input =
   if fuel = 0 then None
@@ -221,6 +229,21 @@ let rec ty_get_f fuel input =
       let* key = get_num key in
       let* rem = get_num rem in
       Some (C_type.Enc (key, rem))
+    | Tag (tag, Cons (Num sign, Cons (bits, Nil)))
+        when Z.equal tag (Z.of_int 9) ->
+      let* sign =
+        if Z.equal sign Z.zero then Some C_type.Signed
+        else if Z.equal sign Z.one then Some C_type.Unsigned
+        else None
+      in
+      let* bits = get_num bits in
+      let typ = C_type.Num (sign, bits) in
+      if C_type.valid typ then Some typ else None
+    | Tag (tag, Cons (cap, Cons (elem, Nil))) when Z.equal tag (Z.of_int 10) ->
+      let* cap = get_num cap in
+      let* elem = ty_get_f fuel elem in
+      let typ = C_type.Seq (cap, elem) in
+      if C_type.valid typ then Some typ else None
     | _ -> None
 
 let ty_get = ty_get_f (C_type.max_depth + 1)

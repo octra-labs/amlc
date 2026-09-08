@@ -33,6 +33,7 @@ val typed : C_type.t -> C_eval.value -> bool
 val shaped : C_eval.value -> bool
 val encode : t -> string
 val decode : string -> (t, error) result
+val parse_value : C_type.t -> string -> (C_eval.value, error) result
 val parse : spec list -> string -> (t, error) result
 val attach : C_term.bind list -> t -> ((C_term.bind * C_eval.value) list, error) result
 val term_of : C_type.t -> C_eval.value -> C_term.t option

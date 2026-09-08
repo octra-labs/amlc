@@ -98,6 +98,7 @@ let scope ~chain ~prog ~root =
   Ok { chain; prog; root }
 
 let empty scope = { scope; slots = Kmap.empty; count = 0 }
+let scope_of state = state.scope
 
 let nat field value =
   match C_nat.make value with

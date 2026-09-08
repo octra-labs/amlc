@@ -70,10 +70,11 @@ let bind_type env value =
 
 let rec vec_len env = function
   | C_term.Vec (_, values) -> C_nat.of_int (List.length values)
+  | C_term.Seq (cap, _, _) -> Some cap
   | C_term.Var id ->
       begin
         match lookup id env with
-        | Some (C_type.Vec (len, _)) -> Some len
+        | Some (C_type.Vec (len, _)) | Some (C_type.Seq (len, _)) -> Some len
         | _ -> None
       end
   | C_term.Vcat (first, second) ->
@@ -95,6 +96,10 @@ let rec term_code env = function
       let* typ = C_bin.ty_code C_type.Int in
       Some (C_bin.Tag (Z.zero,
         C_bin.Cons (value_int value, C_bin.Cons (typ, C_bin.Nil))))
+  | C_term.Narrow (typ, value) ->
+      let* typ = C_bin.ty_code typ in
+      Some (C_bin.Tag (tag 33,
+        C_bin.Cons (typ, C_bin.Cons (C_bin.Int value, C_bin.Nil))))
   | C_term.Bytes value ->
       let bytes =
         List.init (String.length value)
@@ -104,6 +109,12 @@ let rec term_code env = function
           (fun byte -> Some (C_bin.Num (Z.of_int byte))) bytes in
       Some (C_bin.Tag (Z.one, bytes))
   | C_term.Vec (elem, values) -> vec_code env elem values
+  | C_term.Seq (cap, elem, values) ->
+      let* cap = C_bin.num cap in
+      let* elem = C_bin.ty_code elem in
+      let* values = C_bin.list_code (term_code env) values in
+      Some (C_bin.Tag (tag 34,
+        C_bin.Cons (cap, C_bin.Cons (elem, C_bin.Cons (values, C_bin.Nil)))))
   | C_term.Var id ->
       let* id = C_bin.num id in
       Some (C_bin.Tag (tag 3, id))
@@ -198,6 +209,13 @@ let rec term_code env = function
   | C_term.Mod (first, second) -> pair_code env 29 first second
   | C_term.Neg value -> unary_code env 30 value
   | C_term.Abs value -> unary_code env 31 value
+  | C_term.Fit (typ, value) ->
+      let* typ = C_bin.ty_code typ in
+      let* value = term_code env value in
+      Some (C_bin.Tag (tag 35,
+        C_bin.Cons (typ, C_bin.Cons (value, C_bin.Nil))))
+  | C_term.Wide value -> unary_code env 36 value
+  | C_term.Length value -> unary_code env 37 value
   | C_term.Cmp (rel, first, second) ->
       let* first = term_code env first in
       let* second = term_code env second in
@@ -273,6 +291,20 @@ let rec term_get_f fuel input =
               end
         in
         fill bytes
+    | C_bin.Tag (mark, C_bin.Cons (typ, C_bin.Cons (C_bin.Int value, C_bin.Nil)))
+        when Z.equal mark (tag 33) ->
+        let* typ = C_bin.ty_get typ in
+        if C_type.admits typ value then Some (C_term.Narrow (typ, value))
+        else None
+    | C_bin.Tag (mark,
+        C_bin.Cons (cap, C_bin.Cons (elem, C_bin.Cons (values, C_bin.Nil))))
+        when Z.equal mark (tag 34) ->
+        let* cap = C_bin.get_num cap in
+        let* elem = C_bin.ty_get elem in
+        let* values = term_list_get next 0 [] values in
+        if List.length values <= C_nat.to_int cap then
+          Some (C_term.Seq (cap, elem, values))
+        else None
     | C_bin.Tag (mark, _) when Z.equal mark (tag 2)
         || Z.equal mark (tag 19) -> vec_get next input
     | C_bin.Tag (mark, id) when Z.equal mark (tag 3) ->
@@ -424,6 +456,17 @@ let rec term_get_f fuel input =
         let* first = term_get_f next first in
         let* second = term_get_f next second in
         Some (C_term.Cmp (rel, first, second))
+    | C_bin.Tag (mark, C_bin.Cons (typ, C_bin.Cons (value, C_bin.Nil)))
+        when Z.equal mark (tag 35) ->
+        let* typ = C_bin.ty_get typ in
+        let* value = term_get_f next value in
+        Some (C_term.Fit (typ, value))
+    | C_bin.Tag (mark, value) when Z.equal mark (tag 36) ->
+        let* value = term_get_f next value in
+        Some (C_term.Wide value)
+    | C_bin.Tag (mark, value) when Z.equal mark (tag 37) ->
+        let* value = term_get_f next value in
+        Some (C_term.Length value)
     | _ -> None
 
 and vec_get fuel input =
@@ -439,6 +482,14 @@ and vec_get fuel input =
     | _ -> None
   in
   loop 0 [] input
+
+and term_list_get fuel count out = function
+  | C_bin.Nil -> Some (List.rev out)
+  | _ when count = C_rule.local.tm_nodes -> None
+  | C_bin.Cons (value, rest) ->
+      let* value = term_get_f fuel value in
+      term_list_get fuel (count + 1) (value :: out) rest
+  | _ -> None
 
 let term_get = term_get_f (C_rule.local.tm_depth + 1)
 

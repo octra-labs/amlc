@@ -23,6 +23,7 @@ type error =
   | False of rel * C_nat.t * C_nat.t
 
 val lit : Z.t -> t option
+val exact : C_nat.t -> t
 val var : C_syn.name -> t
 val add : t -> t -> t
 val mul : t -> t -> t

@@ -5,9 +5,11 @@ type typ =
   | Unit
   | Bool
   | Int
+  | Num of C_type.sign * C_idx.t
   | Var of C_syn.name
   | Bytes of C_idx.t
   | Vec of C_idx.t * typ
+  | Seq of C_idx.t * typ
   | Cap of Z.t
   | Pair of typ * typ
   | Result of typ * typ

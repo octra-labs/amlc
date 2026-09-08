@@ -3,6 +3,7 @@
 
 From Stdlib Require Import List.
 From Stdlib Require Import Bool.
+From Stdlib Require Import Lia.
 From Stdlib Require Import ZArith.ZArith.
 From Stdlib Require Import Strings.String.
 
@@ -16,12 +17,15 @@ Require Import Emit.
 Require Import Trace.
 Require Import Rval.
 Require Import Feed.
+Require Import Lim.
+Require Import Rule.
 
 Import ListNotations.
 
 Inductive shape : Type :=
 | ShUnit : shape
 | ShAtom : shape
+| ShCap : nat -> shape
 | ShPair : shape -> shape -> shape
 | ShVec : nat -> shape -> shape
 | ShSum : shape -> shape.
@@ -39,6 +43,7 @@ Inductive code : Type :=
 | Negate : code -> code
 | Absolute : code -> code
 | Same : code -> code
+| Different : code -> code
 | Order : rel -> code -> code
 | Join : code -> code
 | Clip : nat -> code -> code
@@ -53,6 +58,7 @@ Inductive code : Type :=
 | Unhead : code -> code
 | Left : code -> code
 | Right : code -> code
+| CloseCap : nat -> code -> code
 | Effect : atom -> code -> code -> code
 | Scope : bind -> code -> code -> code
 | Scope2 : bind -> bind -> code -> code -> code
@@ -63,6 +69,7 @@ Inductive code : Type :=
 Fixpoint shape_eqb (left right : shape) : bool :=
   match left, right with
   | ShUnit, ShUnit | ShAtom, ShAtom => true
+  | ShCap lhs, ShCap rhs => Nat.eqb lhs rhs
   | ShPair ll lr, ShPair rl rr => shape_eqb ll rl && shape_eqb lr rr
   | ShVec ln le, ShVec rn re => Nat.eqb ln rn && shape_eqb le re
   | ShSum lhs, ShSum rhs => shape_eqb lhs rhs
@@ -73,6 +80,7 @@ Fixpoint shape_of (typ : ty) : option shape :=
   match typ with
   | TUnit => Some ShUnit
   | TBool | TInt | TBytes _ => Some ShAtom
+  | TCap kind => Some (ShCap kind)
   | TVec len elem =>
       match shape_of elem with
       | Some item => Some (ShVec len item)
@@ -89,17 +97,247 @@ Fixpoint shape_of (typ : ty) : option shape :=
           if shape_eqb lhs rhs then Some (ShSum lhs) else None
       | _, _ => None
       end
-  | TCap _ | TEnc _ _ => None
+  | TEnc _ _ => None
   end.
 
 Fixpoint shape_width (value : shape) : nat :=
   match value with
   | ShUnit => 0
   | ShAtom => 1
+  | ShCap _ => 1
   | ShPair lhs rhs => shape_width lhs + shape_width rhs
   | ShVec len elem => len * shape_width elem
   | ShSum payload => S (shape_width payload)
   end.
+
+Fixpoint shape_regs (first : nat) (value : shape) : list nat :=
+  match value with
+  | ShUnit => []
+  | ShAtom | ShCap _ => [first]
+  | ShPair lhs rhs =>
+      shape_regs first lhs ++
+        shape_regs (first + shape_width lhs) rhs
+  | ShVec len elem =>
+      List.concat
+        (map
+          (fun index =>
+            shape_regs (first + index * shape_width elem) elem)
+          (List.seq 0 len))
+  | ShSum payload => first :: shape_regs (S first) payload
+  end.
+
+Lemma seq_blocks : forall count width first,
+  List.concat
+    (map (fun index => List.seq (first + index * width) width)
+      (List.seq 0 count)) = List.seq first (count * width).
+Proof.
+  induction count as [|count repeat]; intros width first.
+  - reflexivity.
+  - rewrite seq_S, map_app, concat_app, repeat.
+    simpl.
+    rewrite app_nil_r.
+    replace (width + count * width) with (count * width + width) by lia.
+    rewrite seq_app.
+    reflexivity.
+Qed.
+
+Theorem shape_regs_exact : forall value first,
+  shape_regs first value = List.seq first (shape_width value).
+Proof.
+  induction value; intros first; simpl.
+  - reflexivity.
+  - reflexivity.
+  - reflexivity.
+  - rewrite IHvalue1, IHvalue2, <- seq_app.
+    reflexivity.
+  - rewrite map_ext with
+      (g := fun index => List.seq (first + index * shape_width value)
+        (shape_width value)).
+    + apply seq_blocks.
+    + intros index.
+      apply IHvalue.
+  - rewrite IHvalue.
+    apply cons_seq.
+Qed.
+
+Corollary shape_regs_size : forall value first,
+  List.length (shape_regs first value) = shape_width value.
+Proof.
+  intros value first.
+  rewrite shape_regs_exact, length_seq.
+  reflexivity.
+Qed.
+
+Corollary shape_regs_distinct : forall value first,
+  NoDup (shape_regs first value).
+Proof.
+  intros value first.
+  rewrite shape_regs_exact.
+  apply seq_NoDup.
+Qed.
+
+Fixpoint result_regs_b (values : list nat) : bool :=
+  match values with
+  | [] => true
+  | value :: rest =>
+      Nat.ltb value 61 &&
+        (negb (existsb (Nat.eqb value) rest) && result_regs_b rest)
+  end.
+
+Lemma result_reg_absent : forall value values,
+  negb (existsb (Nat.eqb value) values) = true -> ~ In value values.
+Proof.
+  intros value values absent present.
+  apply Bool.negb_true_iff in absent.
+  assert (found : existsb (Nat.eqb value) values = true).
+  { apply existsb_exists.
+    exists value.
+    split.
+    - exact present.
+    - apply Nat.eqb_refl. }
+  rewrite absent in found.
+  discriminate.
+Qed.
+
+Lemma result_reg_fresh : forall value values,
+  ~ In value values -> negb (existsb (Nat.eqb value) values) = true.
+Proof.
+  intros value values absent.
+  apply Bool.negb_true_iff.
+  destruct (existsb (Nat.eqb value) values) eqn:found.
+  - apply existsb_exists in found.
+    destruct found as [item [member same]].
+    apply Nat.eqb_eq in same.
+    subst item.
+    contradiction.
+  - reflexivity.
+Qed.
+
+Theorem result_regs_safe : forall values,
+  result_regs_b values = true ->
+  NoDup values /\ (forall value, In value values -> value < 61).
+Proof.
+  induction values as [|value rest repeat]; intros accepted.
+  - split.
+    + constructor.
+    + intros found present.
+      contradiction.
+  - simpl in accepted.
+    apply andb_true_iff in accepted as [range accepted].
+    apply andb_true_iff in accepted as [fresh rest_ok].
+    apply repeat in rest_ok as [distinct rest_range].
+    split.
+    + constructor.
+      * apply result_reg_absent.
+        exact fresh.
+      * exact distinct.
+    + intros found present.
+      simpl in present.
+      destruct present as [same | member].
+      * subst found.
+        apply Nat.ltb_lt.
+        exact range.
+      * apply rest_range.
+        exact member.
+Qed.
+
+Theorem result_regs_complete : forall values,
+  NoDup values ->
+  (forall value, In value values -> value < 61) ->
+  result_regs_b values = true.
+Proof.
+  induction values as [|value rest repeat]; intros distinct range.
+  - reflexivity.
+  - apply NoDup_cons_iff in distinct.
+    destruct distinct as [fresh rest_distinct].
+    simpl.
+    apply andb_true_iff.
+    split.
+    + apply Nat.ltb_lt.
+      apply range.
+      left.
+      reflexivity.
+    + apply andb_true_iff.
+      split.
+      * apply result_reg_fresh.
+        exact fresh.
+      * apply repeat.
+        -- exact rest_distinct.
+        -- intros found present.
+           apply range.
+           right.
+           exact present.
+Qed.
+
+Theorem result_regs_spec : forall values,
+  result_regs_b values = true <->
+  NoDup values /\ (forall value, In value values -> value < 61).
+Proof.
+  intros values.
+  split.
+  - apply result_regs_safe.
+  - intros [distinct range].
+    apply result_regs_complete; assumption.
+Qed.
+
+Lemma result_regs_seq : forall count first,
+  first + count <= 61 ->
+  result_regs_b (List.seq first count) = true.
+Proof.
+  induction count as [|count repeat]; intros first fit.
+  - reflexivity.
+  - simpl.
+    apply andb_true_iff.
+    split.
+    + apply Nat.ltb_lt.
+      lia.
+    + apply andb_true_iff.
+      split.
+      * apply result_reg_fresh.
+        intros member.
+        apply in_seq in member.
+        lia.
+      * apply repeat.
+        lia.
+Qed.
+
+Theorem result_shape_accepted : forall value first,
+  first + shape_width value <= 61 ->
+  result_regs_b (shape_regs first value) = true.
+Proof.
+  intros value first fit.
+  rewrite shape_regs_exact.
+  apply result_regs_seq.
+  exact fit.
+Qed.
+
+Fixpoint shape_cells (value : shape) : nat :=
+  match value with
+  | ShUnit | ShAtom | ShCap _ => 1
+  | ShPair lhs rhs => S (shape_cells lhs + shape_cells rhs)
+  | ShVec len elem => S (len * shape_cells elem)
+  | ShSum payload => S (shape_cells payload)
+  end.
+
+Fixpoint type_nodes (value : ty) : nat :=
+  match value with
+  | TUnit | TBool | TInt | TBytes _ | TCap _ | TEnc _ _ => 1
+  | TVec _ elem => S (type_nodes elem)
+  | TPair lhs rhs | TSum lhs rhs =>
+      S (type_nodes lhs + type_nodes rhs)
+  end.
+
+Fixpoint type_depth (value : ty) : nat :=
+  match value with
+  | TUnit | TBool | TInt | TBytes _ | TCap _ | TEnc _ _ => 0
+  | TVec _ elem => S (type_depth elem)
+  | TPair lhs rhs | TSum lhs rhs =>
+      S (Nat.max (type_depth lhs) (type_depth rhs))
+  end.
+
+Definition type_b (value : ty) : bool :=
+  ty_b value && Nat.leb (type_depth value) (Rule.rty_depth Rule.local)
+    && Nat.leb (type_nodes value) (Rule.rty_nodes Rule.local).
 
 Fixpoint shapes_eqb (left right : list shape) : bool :=
   match left, right with
@@ -123,7 +361,7 @@ Fixpoint shape_run (value : code) (stack : list shape)
   | Void rest => shape_run rest (ShUnit :: stack)
   | Get _ form rest => shape_run rest (form :: stack)
   | Plus rest | Minus rest | Times rest | Quot rest | Rem rest
-  | Same rest | Order _ rest | Join rest =>
+  | Same rest | Different rest | Order _ rest | Join rest =>
       match stack with
       | ShAtom :: ShAtom :: tail => shape_run rest (ShAtom :: tail)
       | _ => None
@@ -186,6 +424,14 @@ Fixpoint shape_run (value : code) (stack : list shape)
       match stack with
       | payload :: tail => shape_run rest (ShSum payload :: tail)
       | [] => None
+      end
+  | CloseCap kind rest =>
+      match stack with
+      | ShCap found :: tail =>
+          if Nat.eqb kind found
+          then shape_run rest (ShUnit :: tail)
+          else None
+      | _ => None
       end
   | Effect _ body rest =>
       match shape_run body stack with
@@ -379,6 +625,11 @@ Fixpoint build (gamma : list bind) (term : tm) (rest : code) : option code :=
       end
   | Neg value => build gamma value (Negate rest)
   | Abs value => build gamma value (Absolute rest)
+  | Eq TBool (Eq TInt lhs rhs) (K (VBool false) TBool) =>
+      match build gamma rhs (Different rest) with
+      | Some rhs_code => build gamma lhs rhs_code
+      | None => None
+      end
   | Eq typ lhs rhs =>
       match shape_of typ with
       | Some ShAtom =>
@@ -490,6 +741,15 @@ Fixpoint build (gamma : list bind) (term : tm) (rest : code) : option code :=
           | None => None
           end
       end
+  | Close cap =>
+      match build gamma cap Done with
+      | Some cap_code =>
+          match shape_one cap_code with
+          | Some (ShCap kind) => build gamma cap (CloseCap kind rest)
+          | _ => None
+          end
+      | None => None
+      end
   | _ => None
   end.
 
@@ -501,6 +761,7 @@ Definition lower (term : tm) : option code := into term Done.
 Inductive mvalue : Type :=
 | MUnit : mvalue
 | MAtom : lit -> mvalue
+| MCap : nat -> nat -> mvalue
 | MPair : mvalue -> mvalue -> mvalue
 | MVec : shape -> list mvalue -> mvalue
 | MSum : bool -> mvalue -> mvalue.
@@ -512,6 +773,7 @@ Fixpoint core_value (item : mvalue) : value :=
   | MAtom (LInt value) => VInt value
   | MAtom (LBytes value) => VBytes value
   | MAtom (LData value) => Rval.rvalue value
+  | MCap kind id => VCap kind id
   | MPair lhs rhs => VPair (core_value lhs) (core_value rhs)
   | MVec _ values => VVec (map core_value values)
   | MSum true value => VInl (core_value value)
@@ -525,6 +787,7 @@ Inductive mrep : ty -> value -> mvalue -> Prop :=
 | MRBytes : forall raw,
     Forall (fun value => value < 256) raw ->
     mrep (TBytes (List.length raw)) (VBytes raw) (MAtom (LBytes raw))
+| MRCap : forall kind id, mrep (TCap kind) (VCap kind id) (MCap kind id)
 | MRVec : forall elem form values items,
     shape_of elem = Some form ->
     Forall2 (mrep elem) values items ->
@@ -550,6 +813,7 @@ Fixpoint mshape (value : mvalue) : shape :=
   match value with
   | MUnit => ShUnit
   | MAtom _ => ShAtom
+  | MCap kind _ => ShCap kind
   | MPair lhs rhs => ShPair (mshape lhs) (mshape rhs)
   | MVec elem values => ShVec (List.length values) elem
   | MSum _ payload => ShSum (mshape payload)
@@ -559,6 +823,31 @@ Lemma shape_eqb_refl : forall value, shape_eqb value value = true.
 Proof.
   induction value; simpl; rewrite ?IHvalue, ?IHvalue1, ?IHvalue2,
     ?Nat.eqb_refl; reflexivity.
+Qed.
+
+Lemma shape_eqb_eq : forall left right,
+  shape_eqb left right = true -> left = right.
+Proof.
+  induction left; destruct right; simpl; intros same; try discriminate;
+    try reflexivity.
+  - apply Nat.eqb_eq in same.
+    subst.
+    reflexivity.
+  - apply andb_true_iff in same.
+    destruct same as [lhs rhs].
+    apply IHleft1 in lhs.
+    apply IHleft2 in rhs.
+    subst.
+    reflexivity.
+  - apply andb_true_iff in same.
+    destruct same as [len elem].
+    apply Nat.eqb_eq in len.
+    apply IHleft in elem.
+    subst.
+    reflexivity.
+  - apply IHleft in same.
+    subst.
+    reflexivity.
 Qed.
 
 Lemma mrep_shape : forall typ value item,
@@ -616,12 +905,188 @@ Proof.
   - constructor.
     exact H.
   - constructor.
+  - constructor.
     exact H2.
   - constructor; assumption.
   - constructor.
     exact IHrepresented.
   - constructor.
     exact IHrepresented.
+Qed.
+
+Fixpoint collect_values (make : value -> option mvalue)
+    (values : list value) : option (list mvalue) :=
+  match values with
+  | [] => Some []
+  | value :: rest =>
+      match make value, collect_values make rest with
+      | Some item, Some items => Some (item :: items)
+      | _, _ => None
+      end
+  end.
+
+Fixpoint machine_value (typ : ty) (value : value) {struct typ}
+    : option mvalue :=
+  match typ, value with
+  | TUnit, VUnit => Some MUnit
+  | TBool, VBool flag => Some (MAtom (LBool flag))
+  | TInt, VInt number => Some (MAtom (LInt number))
+  | TBytes len, VBytes raw =>
+      if Nat.eqb len (List.length raw) && forallb octet_b raw
+      then Some (MAtom (LBytes raw))
+      else None
+  | TCap kind, VCap found id =>
+      if Nat.eqb kind found then Some (MCap kind id) else None
+  | TVec len elem, VVec values =>
+      if Nat.eqb len (List.length values) then
+        match shape_of elem, collect_values (machine_value elem) values with
+        | Some form, Some items => Some (MVec form items)
+        | _, _ => None
+        end
+      else None
+  | TPair lhs rhs, VPair first second =>
+      match machine_value lhs first, machine_value rhs second with
+      | Some first, Some second => Some (MPair first second)
+      | _, _ => None
+      end
+  | TSum lhs rhs, VInl value =>
+      match shape_of lhs, shape_of rhs, machine_value lhs value with
+      | Some lshape, Some rshape, Some item =>
+          if shape_eqb lshape rshape then Some (MSum true item) else None
+      | _, _, _ => None
+      end
+  | TSum lhs rhs, VInr value =>
+      match shape_of lhs, shape_of rhs, machine_value rhs value with
+      | Some lshape, Some rshape, Some item =>
+          if shape_eqb lshape rshape then Some (MSum false item) else None
+      | _, _, _ => None
+      end
+  | _, _ => None
+  end.
+
+Lemma collect_values_sound : forall make typ values items,
+  (forall value item, make value = Some item -> mrep typ value item) ->
+  collect_values make values = Some items ->
+  Forall2 (mrep typ) values items.
+Proof.
+  intros make typ values.
+  induction values as [|value rest repeat]; intros items sound accepted.
+  - cbn [collect_values] in accepted.
+    inversion accepted; subst.
+    constructor.
+  - cbn [collect_values] in accepted.
+    destruct (make value) as [item |] eqn:head; try discriminate.
+    destruct (collect_values make rest) as [tail |] eqn:body;
+      try discriminate.
+    inversion accepted; subst.
+    constructor.
+    + apply sound.
+      exact head.
+    + apply repeat.
+      * exact sound.
+      * reflexivity.
+Qed.
+
+Lemma mrep_values_core : forall typ values items,
+  Forall2 (mrep typ) values items -> map core_value items = values.
+Proof.
+  intros typ values items represented.
+  induction represented; simpl.
+  - reflexivity.
+  - rewrite (mrep_core typ x y H), IHrepresented.
+    reflexivity.
+Qed.
+
+Lemma mrep_values_hasv : forall typ values items,
+  Forall2 (mrep typ) values items ->
+  Forall (fun value => hasv value typ) values.
+Proof.
+  intros typ values items represented.
+  induction represented.
+  - constructor.
+  - constructor.
+    + eapply mrep_hasv.
+      exact H.
+    + exact IHrepresented.
+Qed.
+
+Lemma machine_value_rep : forall typ value item,
+  machine_value typ value = Some item -> mrep typ value item.
+Proof.
+  induction typ; intros value item accepted; destruct value;
+    cbn [machine_value] in accepted; try discriminate;
+    try (inversion accepted; subst; constructor).
+  - destruct (Nat.eqb n (List.length l) && forallb octet_b l)
+      eqn:valid; try discriminate.
+    apply andb_true_iff in valid.
+    destruct valid as [size bytes].
+    apply Nat.eqb_eq in size.
+    subst.
+    inversion accepted; subst.
+    constructor.
+    apply octets_forall.
+    exact bytes.
+  - destruct (Nat.eqb n (List.length l)) eqn:size; try discriminate.
+    destruct (shape_of typ) as [form |] eqn:formed; try discriminate.
+    destruct (collect_values (machine_value typ) l) as [items |]
+      eqn:collected; try discriminate.
+    inversion accepted; subst.
+    apply Nat.eqb_eq in size.
+    subst.
+    apply MRVec with (form := form).
+    + exact formed.
+    + apply collect_values_sound with (make := machine_value typ).
+      * exact IHtyp.
+      * exact collected.
+    + apply mrep_values_core with (typ := typ).
+      apply collect_values_sound with (make := machine_value typ).
+      * exact IHtyp.
+      * exact collected.
+    + apply mrep_values_hasv with (items := items).
+      apply collect_values_sound with (make := machine_value typ).
+      * exact IHtyp.
+      * exact collected.
+  - destruct (Nat.eqb n n0) eqn:same; try discriminate.
+    apply Nat.eqb_eq in same.
+    subst.
+    inversion accepted; subst.
+    constructor.
+  - destruct (machine_value typ1 value1) as [lhs |] eqn:left;
+      try discriminate.
+    destruct (machine_value typ2 value2) as [rhs |] eqn:right;
+      try discriminate.
+    inversion accepted; subst.
+    constructor.
+    + apply IHtyp1.
+      exact left.
+    + apply IHtyp2.
+      exact right.
+  - destruct (shape_of typ1) as [left |] eqn:left_shape; try discriminate.
+    destruct (shape_of typ2) as [right |] eqn:right_shape; try discriminate.
+    destruct (machine_value typ1 value) as [payload |] eqn:converted;
+      try discriminate.
+    destruct (shape_eqb left right) eqn:same; try discriminate.
+    apply shape_eqb_eq in same.
+    subst right.
+    inversion accepted; subst.
+    apply MRInl with (form := left).
+    + exact left_shape.
+    + exact right_shape.
+    + apply IHtyp1.
+      exact converted.
+  - destruct (shape_of typ1) as [left |] eqn:left_shape; try discriminate.
+    destruct (shape_of typ2) as [right |] eqn:right_shape; try discriminate.
+    destruct (machine_value typ2 value) as [payload |] eqn:converted;
+      try discriminate.
+    destruct (shape_eqb left right) eqn:same; try discriminate.
+    apply shape_eqb_eq in same.
+    subst right.
+    inversion accepted; subst.
+    apply MRInr with (form := left).
+    + exact left_shape.
+    + exact right_shape.
+    + apply IHtyp2.
+      exact converted.
 Qed.
 
 Fixpoint mvalues_eqb (left right : list mvalue) : bool :=
@@ -839,10 +1304,11 @@ Fixpoint size (value : code) : nat :=
   | Done => 1
   | Push _ rest | Void rest | Get _ _ rest | Plus rest | Minus rest
   | Times rest | Quot rest | Rem rest | Negate rest | Absolute rest | Same rest
+  | Different rest
   | Order _ rest
   | Join rest | Clip _ rest | Skip _ rest | Duo rest | First rest
   | Second rest | Empty _ rest | Cons rest | Append rest | Pick _ rest
-  | Unhead rest | Left rest | Right rest => S (size rest)
+  | Unhead rest | Left rest | Right rest | CloseCap _ rest => S (size rest)
   | Effect _ body rest => S (size body + size rest)
   | Scope _ body rest => S (size body + size rest)
   | Scope2 _ _ body rest => S (size body + size rest)
@@ -922,6 +1388,13 @@ Fixpoint exec (fuel : nat) (value : code) (rho : env) (stack : list mvalue)
           | MAtom rhs_value :: MAtom lhs_value :: tail =>
               exec fuel_left rest rho
                 (MAtom (LBool (lit_eqb lhs_value rhs_value)) :: tail) plan
+          | _ => None
+          end
+      | Different rest =>
+          match stack with
+          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: tail =>
+              exec fuel_left rest rho
+                (MAtom (LBool (negb (Z.eqb lhs_value rhs_value))) :: tail) plan
           | _ => None
           end
       | Order kind rest =>
@@ -1018,6 +1491,15 @@ Fixpoint exec (fuel : nat) (value : code) (rho : env) (stack : list mvalue)
           | payload :: tail =>
               exec fuel_left rest rho (MSum false payload :: tail) plan
           | [] => None
+          end
+      | CloseCap kind rest =>
+          match stack with
+          | MCap found id :: tail =>
+              if Nat.eqb kind found then
+                exec fuel_left rest rho (MUnit :: tail)
+                  (Action (AClose kind) VUnit (OHeld kind id) :: plan)
+              else None
+          | _ => None
           end
       | Scope binder body rest =>
           match stack with
@@ -1152,6 +1634,26 @@ Fixpoint exec (fuel : nat) (value : code) (rho : env) (stack : list mvalue)
       end
   end.
 
+Theorem close_lower : forall kind,
+  build [Bind 0 M1 (TCap kind)] (Close (Var 0)) Done =
+    Some (Get 0 (ShCap kind) (CloseCap kind Done)).
+Proof.
+  intros kind.
+  reflexivity.
+Qed.
+
+Theorem close_exec : forall kind id,
+  exec 4 (Get 0 (ShCap kind) (CloseCap kind Done))
+    [MSlot 0 M1 (MCap kind id) true] [] [] =
+  Some ([MUnit], [MSlot 0 M1 (MCap kind id) false],
+    [Action (AClose kind) VUnit (OHeld kind id)]).
+Proof.
+  intros kind id.
+  simpl.
+  rewrite !Nat.eqb_refl.
+  reflexivity.
+Qed.
+
 Definition replay_actions (value : code) : option (list lit * list action) :=
   match exec (S (size value)) value [] [] [] with
   | Some ([MAtom item], [], plan) => Some ([item], rev plan)
@@ -1208,9 +1710,51 @@ Proof.
       (scalar_value_rep typ value item accepted)).
 Qed.
 
+Definition runtime_value (typ : ty) (value : lit) : option mvalue :=
+  match value with
+  | LData data =>
+      if ty_eqb typ (Rval.rtyp data)
+      then machine_value typ (Rval.rvalue data)
+      else None
+  | _ => scalar_value typ value
+  end.
+
+Lemma runtime_value_rep : forall typ value item,
+  runtime_value typ value = Some item ->
+  mrep typ (core_value item) item.
+Proof.
+  intros typ value item accepted.
+  destruct value as [flag | number | raw | [found data]].
+  - apply scalar_value_rep with (value := LBool flag).
+    exact accepted.
+  - apply scalar_value_rep with (value := LInt number).
+    exact accepted.
+  - apply scalar_value_rep with (value := LBytes raw).
+    exact accepted.
+  - cbn [runtime_value Rval.rtyp Rval.rvalue] in accepted.
+    destruct (ty_eqb typ found) eqn:same; try discriminate.
+    apply ty_eqb_eq in same.
+    subst found.
+    destruct (machine_value typ data) as [actual |] eqn:converted;
+      try discriminate.
+    inversion accepted; subst actual.
+    pose proof (machine_value_rep typ data item converted) as represented.
+    rewrite (mrep_core typ data item represented).
+    exact represented.
+Qed.
+
+Lemma runtime_value_hasv : forall typ value item,
+  runtime_value typ value = Some item -> hasv (core_value item) typ.
+Proof.
+  intros typ value item accepted.
+  eapply mrep_hasv.
+  apply runtime_value_rep with (value := value).
+  exact accepted.
+Qed.
+
 Definition open_input (rho : env) (input : bind * lit) : option env :=
   let '(binder, value) := input in
-  match scalar_value (bty binder) value with
+  match runtime_value (bty binder) value with
   | Some item =>
       match bmul binder with
       | M0 => Some rho
@@ -1232,7 +1776,7 @@ Fixpoint open_inputs (rho : env) (inputs : list (bind * lit)) : option env :=
 Definition core_input (sigma : Uni.env) (input : bind * lit)
     : option Uni.env :=
   let '(binder, value) := input in
-  match scalar_value (bty binder) value with
+  match runtime_value (bty binder) value with
   | Some item => openf binder (core_value item) sigma
   | None => None
   end.
@@ -1257,22 +1801,22 @@ Lemma open_input_rep : forall input sigma rho core,
 Proof.
   intros [[id mode typ] value] sigma rho core related loaded.
   cbn [core_input] in loaded.
-  destruct (scalar_value typ value) as [item |] eqn:scalar.
-  - pose proof (scalar_value_rep typ value item scalar) as item_rep.
+  destruct (runtime_value typ value) as [item |] eqn:loaded_value.
+  - pose proof (runtime_value_rep typ value item loaded_value) as item_rep.
     pose proof (mrep_shape typ (core_value item) item item_rep) as item_shape.
     cbn [bty] in loaded.
-    rewrite scalar in loaded.
+    rewrite loaded_value in loaded.
     destruct mode; cbn [openf] in loaded; inversion loaded; subst.
     + exists rho.
       split.
       * cbn [open_input bty bmul].
-        rewrite scalar.
+        rewrite loaded_value.
         reflexivity.
       * exact related.
     + exists (MSlot id M1 item true :: rho).
       split.
       * cbn [open_input bty bmul].
-        rewrite scalar.
+        rewrite loaded_value.
         unfold openm.
         cbn [bty bmul bid].
         rewrite item_shape, shape_eqb_refl.
@@ -1281,14 +1825,14 @@ Proof.
     + exists (MSlot id MM item true :: rho).
       split.
       * cbn [open_input bty bmul].
-        rewrite scalar.
+        rewrite loaded_value.
         unfold openm.
         cbn [bty bmul bid].
         rewrite item_shape, shape_eqb_refl.
         reflexivity.
       * constructor; assumption.
   - cbn [bty] in loaded.
-    rewrite scalar in loaded.
+    rewrite loaded_value in loaded.
     discriminate.
 Qed.
 
@@ -1334,10 +1878,12 @@ Proof.
     destruct (openb binder gamma) as [mid |] eqn:context_open;
       try discriminate.
     cbn [core_inputs core_input] in loaded.
-    destruct (scalar_value (bty binder) value) as [item |] eqn:scalar;
+    destruct (runtime_value (bty binder) value) as [item |]
+      eqn:loaded_value;
       try discriminate.
     pose proof (openb_sound binder gamma mid context_open) as context_rel.
-    pose proof (scalar_value_hasv (bty binder) value item scalar) as typed.
+    pose proof
+      (runtime_value_hasv (bty binder) value item loaded_value) as typed.
     destruct (open_ok binder gamma mid (core_value item) sigma context_rel typed
       related) as [out [value_open out_ok]].
     rewrite (openf_run binder (core_value item) sigma out value_open) in loaded.
@@ -1407,6 +1953,20 @@ Definition replay_in (value : code) (inputs : list (bind * lit))
     : option (list lit) :=
   match replay_plan_in value inputs with
   | Some (out, _) => Some out
+  | None => None
+  end.
+
+Definition replay_value_in (value : code) (inputs : list (bind * lit))
+    (typ : ty) : option lit :=
+  match open_inputs [] inputs with
+  | Some rho =>
+      match exec (S (size value)) value rho [] [] with
+      | Some ([item], final, _) =>
+          if terminal (map fst inputs) final
+          then Emit.lit_of typ (core_value item)
+          else None
+      | _ => None
+      end
   | None => None
   end.
 
@@ -1488,6 +2048,29 @@ Proof.
     as [rho [final [plan [opened [executed [ended _]]]]]].
   exists rho, final, plan.
   repeat split; assumption.
+Qed.
+
+Lemma replay_value_in_sound : forall value inputs typ result,
+  replay_value_in value inputs typ = Some result ->
+  exists rho final plan item,
+    open_inputs [] inputs = Some rho /\
+    exec (S (size value)) value rho [] [] =
+      Some ([item], final, plan) /\
+    terminal (map fst inputs) final = true /\
+    Emit.rep typ (core_value item) result.
+Proof.
+  intros value inputs typ result accepted.
+  unfold replay_value_in in accepted.
+  destruct (open_inputs [] inputs) as [rho |] eqn:opened; try discriminate.
+  destruct (exec (S (size value)) value rho [] [])
+    as [[[out final] plan] |] eqn:ran; try discriminate.
+  destruct out as [|item rest]; try discriminate.
+  destruct rest; try discriminate.
+  destruct (terminal (map fst inputs) final) eqn:ended; try discriminate.
+  exists rho, final, plan, item.
+  repeat split; try assumption.
+  apply Emit.lit_of_sound.
+  exact accepted.
 Qed.
 
 Record artifact : Type := Artifact {
@@ -1575,31 +2158,383 @@ Definition image_feed_code (image : Comp.image) (values : list value)
 
 Record open_artifact : Type := OpenArtifact {
   oinputs : list bind;
+  ooutput : ty;
   ocode : code
 }.
 
-Definition scalar_input (value : bind) : bool :=
-  match shape_of (bty value) with
-  | Some ShAtom => true
-  | Some _ | None => false
+Fixpoint input_width (values : list bind) : option nat :=
+  match values with
+  | [] => Some 0
+  | value :: rest =>
+      match shape_of (bty value), input_width rest with
+      | Some form, Some width => Some (shape_width form + width)
+      | _, _ => None
+      end
   end.
 
+Fixpoint input_regs_from (first : nat) (values : list bind)
+    : option (list nat) :=
+  match values with
+  | [] => Some []
+  | value :: rest =>
+      match shape_of (bty value) with
+      | Some form =>
+          match input_regs_from (first + shape_width form) rest with
+          | Some regs => Some (List.app (shape_regs first form) regs)
+          | None => None
+          end
+      | None => None
+      end
+  end.
+
+Definition input_regs (values : list bind) : option (list nat) :=
+  input_regs_from 1 values.
+
+Lemma input_regs_from_exact : forall values width first,
+  input_width values = Some width ->
+  input_regs_from first values = Some (List.seq first width).
+Proof.
+  induction values as [|value rest repeat]; intros width first measured.
+  - inversion measured.
+    reflexivity.
+  - simpl in measured.
+    destruct (shape_of (bty value)) as [form |] eqn:formed;
+      try discriminate.
+    destruct (input_width rest) as [tail |] eqn:rest_width;
+      try discriminate.
+    inversion measured; subst width.
+    simpl.
+    rewrite formed, (repeat tail (first + shape_width form) eq_refl).
+    rewrite shape_regs_exact, <- seq_app.
+    reflexivity.
+Qed.
+
+Corollary input_regs_exact : forall values width,
+  input_width values = Some width ->
+  input_regs values = Some (List.seq 1 width).
+Proof.
+  intros values width measured.
+  apply input_regs_from_exact.
+  exact measured.
+Qed.
+
+Fixpoint input_cells (values : list bind) : option nat :=
+  match values with
+  | [] => Some 0
+  | value :: rest =>
+      match shape_of (bty value), input_cells rest with
+      | Some form, Some cells => Some (shape_cells form + cells)
+      | _, _ => None
+      end
+  end.
+
+Fixpoint input_nodes (values : list bind) : nat :=
+  match values with
+  | [] => 0
+  | value :: rest => type_nodes (bty value) + input_nodes rest
+  end.
+
+Definition input_type_b (value : bind) : bool := type_b (bty value).
+
 Definition inputs_b (values : list bind) : bool :=
-  negb (Nat.eqb (List.length values) 0)
-    && Nat.leb (List.length values) 60
-    && forallb scalar_input values.
+  negb (Nat.eqb (List.length values) 0) &&
+  forallb input_type_b values &&
+  match input_width values, input_cells values with
+  | Some width, Some cells =>
+      Nat.leb width 60 && Nat.leb cells 4096
+        && Nat.leb (input_nodes values) 4096
+  | _, _ => false
+  end.
+
+Theorem input_regs_safe : forall values,
+  inputs_b values = true ->
+  exists width regs,
+    input_width values = Some width /\
+    input_regs values = Some regs /\
+    regs = List.seq 1 width /\
+    NoDup regs /\
+    (forall reg, In reg regs -> 1 <= reg /\ reg < 61).
+Proof.
+  intros values accepted.
+  unfold inputs_b in accepted.
+  destruct (input_width values) as [width |] eqn:measured.
+  - destruct (input_cells values) as [cells |] eqn:cell_count.
+    + apply andb_true_iff in accepted.
+      destruct accepted as [_ accepted].
+      apply andb_true_iff in accepted.
+      destruct accepted as [accepted _].
+      apply andb_true_iff in accepted.
+      destruct accepted as [width_ok _].
+      apply Nat.leb_le in width_ok.
+      exists width, (List.seq 1 width).
+      split.
+      * reflexivity.
+      * split.
+        -- apply input_regs_exact.
+           exact measured.
+        -- split.
+           ++ reflexivity.
+           ++ split.
+              ** apply seq_NoDup.
+              ** intros found member.
+                 apply in_seq in member.
+                 lia.
+    + simpl in accepted.
+      apply andb_true_iff in accepted.
+      destruct accepted as [_ impossible].
+      discriminate impossible.
+  - simpl in accepted.
+    apply andb_true_iff in accepted.
+    destruct accepted as [_ impossible].
+    discriminate impossible.
+Qed.
+
+Definition service_regs : list nat := [61; 62; 63].
+
+Definition label_limit : nat := 1000 * 1000.
+
+Definition dispatch_label (index : nat) : nat := 100 + index * 100.
+
+Definition check_label (index side : nat) : nat :=
+  1000 + index * 2 + side.
+
+Definition data_label (index : nat) : nat := label_limit + index.
+
+Definition guard_label (index : nat) : nat := 2 * label_limit + index.
+
+Definition body_label (index : nat) : nat := 10 * label_limit + index.
+
+Definition label_count_b (count : nat) : bool :=
+  Nat.leb count label_limit.
+
+Inductive label_zone : Type :=
+| ZDispatch : nat -> label_zone
+| ZCheck : nat -> nat -> label_zone
+| ZData : nat -> label_zone
+| ZGuard : nat -> label_zone
+| ZBody : nat -> label_zone.
+
+Definition zone_value (zone : label_zone) : nat :=
+  match zone with
+  | ZDispatch index => dispatch_label index
+  | ZCheck index side => check_label index side
+  | ZData index => data_label index
+  | ZGuard index => guard_label index
+  | ZBody index => body_label index
+  end.
+
+Definition zone_b (zone : label_zone) : bool :=
+  match zone with
+  | ZDispatch index => Nat.ltb index 2
+  | ZCheck index side => Nat.ltb index 60 && Nat.ltb side 2
+  | ZData index | ZGuard index => Nat.ltb index label_limit
+  | ZBody _ => true
+  end.
+
+Definition body_target (count target : nat) : option nat :=
+  let base := body_label 0 in
+  if Nat.leb base target then
+    let index := target - base in
+    if Nat.ltb index count then Some index else None
+  else None.
+
+Lemma label_limit_gap : 1120 < label_limit.
+Proof.
+  unfold label_limit.
+  nia.
+Qed.
+
+Theorem zone_value_unique : forall left right,
+  zone_b left = true ->
+  zone_b right = true ->
+  zone_value left = zone_value right ->
+  left = right.
+Proof.
+  intros left right left_ok right_ok same.
+  pose proof label_limit_gap as gap.
+  destruct left; destruct right;
+    cbn [zone_b zone_value] in left_ok, right_ok, same;
+    try apply andb_true_iff in left_ok;
+    try apply andb_true_iff in right_ok;
+    repeat match goal with
+    | range : Nat.ltb _ _ = true |- _ => apply Nat.ltb_lt in range
+    | pair : _ /\ _ |- _ => destruct pair
+    end;
+    unfold dispatch_label, check_label, data_label, guard_label,
+      body_label in same;
+    try (exfalso; lia);
+    f_equal;
+    lia.
+Qed.
+
+Lemma label_count_index : forall count index,
+  label_count_b count = true ->
+  index < count ->
+  index < label_limit.
+Proof.
+  intros count index accepted present.
+  unfold label_count_b in accepted.
+  apply Nat.leb_le in accepted.
+  lia.
+Qed.
+
+Theorem wrapper_label_order : forall dispatch input side data guard body
+    data_count guard_count,
+  dispatch < 2 ->
+  input < 60 ->
+  side < 2 ->
+  label_count_b data_count = true ->
+  data < data_count ->
+  label_count_b guard_count = true ->
+  guard < guard_count ->
+  dispatch_label dispatch < check_label input side /\
+  check_label input side < data_label data /\
+  data_label data < guard_label guard /\
+  guard_label guard < body_label body.
+Proof.
+  intros dispatch input side data guard body data_count guard_count
+    dispatch_ok input_ok side_ok data_ok data_present guard_ok guard_present.
+  pose proof (label_count_index data_count data data_ok data_present) as data_fit.
+  pose proof
+    (label_count_index guard_count guard guard_ok guard_present) as guard_fit.
+  pose proof label_limit_gap as gap.
+  unfold dispatch_label, check_label, data_label, guard_label, body_label.
+  repeat split; nia.
+Qed.
+
+Theorem wrapper_labels_distinct : forall dispatch input side data guard body
+    data_count guard_count,
+  dispatch < 2 ->
+  input < 60 ->
+  side < 2 ->
+  label_count_b data_count = true ->
+  data < data_count ->
+  label_count_b guard_count = true ->
+  guard < guard_count ->
+  NoDup [dispatch_label dispatch; check_label input side; data_label data;
+    guard_label guard; body_label body].
+Proof.
+  intros dispatch input side data guard body data_count guard_count
+    dispatch_ok input_ok side_ok data_ok data_present guard_ok guard_present.
+  pose proof
+    (wrapper_label_order dispatch input side data guard body data_count
+      guard_count dispatch_ok input_ok side_ok data_ok data_present guard_ok
+      guard_present) as order.
+  destruct order as [dispatch_check [check_data [data_guard guard_body]]].
+  repeat constructor; simpl; lia.
+Qed.
+
+Theorem body_target_exact : forall count index,
+  index < count ->
+  body_target count (body_label index) = Some index.
+Proof.
+  intros count index present.
+  unfold body_target, body_label.
+  assert (base : Nat.leb (10 * label_limit + 0)
+      (10 * label_limit + index) = true).
+  { apply Nat.leb_le.
+    lia. }
+  rewrite base.
+  replace (10 * label_limit + index - (10 * label_limit + 0))
+    with index by lia.
+  apply Nat.ltb_lt in present.
+  rewrite present.
+  reflexivity.
+Qed.
+
+Theorem body_target_sound : forall count target index,
+  body_target count target = Some index ->
+  target = body_label index /\ index < count.
+Proof.
+  intros count target index accepted.
+  unfold body_target in accepted.
+  destruct (Nat.leb (body_label 0) target) eqn:base; try discriminate.
+  destruct (Nat.ltb (target - body_label 0) count) eqn:inside;
+    try discriminate.
+  inversion accepted; subst index.
+  apply Nat.leb_le in base.
+  apply Nat.ltb_lt in inside.
+  split.
+  - unfold body_label in *.
+    lia.
+  - exact inside.
+Qed.
+
+Theorem body_target_unique : forall count target left right,
+  body_target count target = Some left ->
+  body_target count target = Some right ->
+  left = right.
+Proof.
+  intros count target left right lhs rhs.
+  rewrite lhs in rhs.
+  inversion rhs.
+  reflexivity.
+Qed.
+
+Definition regs_disjoint (left right : list nat) : Prop :=
+  forall value, In value left -> ~ In value right.
+
+Lemma below_service_disjoint : forall values,
+  (forall value, In value values -> value < 61) ->
+  regs_disjoint values service_regs.
+Proof.
+  intros values below value present service.
+  specialize (below value present).
+  unfold service_regs in service.
+  simpl in service.
+  lia.
+Qed.
+
+Theorem open_regs_safe : forall inputs results,
+  inputs_b inputs = true ->
+  result_regs_b results = true ->
+  exists width regs,
+    input_width inputs = Some width /\
+    input_regs inputs = Some regs /\
+    regs = List.seq 1 width /\
+    NoDup regs /\
+    NoDup results /\
+    regs_disjoint regs service_regs /\
+    regs_disjoint results service_regs.
+Proof.
+  intros inputs results input_ok result_ok.
+  destruct (input_regs_safe inputs input_ok)
+    as [width [regs [measured [built [exact [input_unique input_range]]]]]].
+  destruct (result_regs_safe results result_ok)
+    as [result_unique result_range].
+  exists width, regs.
+  repeat split; try assumption.
+  - apply below_service_disjoint.
+    intros value present.
+    destruct (input_range value present) as [_ below].
+    exact below.
+  - apply below_service_disjoint.
+    exact result_range.
+Qed.
 
 Definition image_open_code (image : Comp.image) : option open_artifact :=
   if inputs_b (Comp.iins image) then
     match Comp.irow image with
     | [] =>
-        match build (Comp.iins image) (Comp.iterm image) Done with
-        | Some value =>
-            match shape_one value with
-            | Some ShAtom => Some (OpenArtifact (Comp.iins image) value)
-            | Some _ | None => None
+        match type_b (Comp.ityp image),
+          build (Comp.iins image) (Comp.iterm image) Done with
+        | true, Some value =>
+            match shape_one value, shape_of (Comp.ityp image) with
+            | Some actual, Some expected =>
+                match input_cells (Comp.iins image) with
+                | Some cells =>
+                    if shape_eqb actual expected &&
+                        (Nat.leb (cells + shape_cells expected) 4096 &&
+                          Nat.leb
+                            (input_nodes (Comp.iins image)
+                              + type_nodes (Comp.ityp image)) 4096)
+                    then Some (OpenArtifact (Comp.iins image) (Comp.ityp image) value)
+                    else None
+                | None => None
+                end
+            | _, _ => None
             end
-        | None => None
+        | _, _ => None
         end
     | _ => None
     end
@@ -1802,6 +2737,14 @@ Proof.
       * split.
         -- apply closed_code_replay_plan.
         -- right. reflexivity.
+    + destruct (plan_eqb plan []) eqn:no_plan; try discriminate.
+      apply plan_eqb_eq in no_plan. subst plan.
+      inversion accepted; subst value.
+      split.
+      * apply closed_code_shape.
+      * split.
+        -- apply closed_code_replay_plan.
+        -- right. reflexivity.
   - destruct (plan_eqb plan []) eqn:no_plan; try discriminate.
     apply plan_eqb_eq in no_plan. subst plan.
     inversion accepted; subst value.
@@ -1938,6 +2881,12 @@ Proof.
       * split.
         -- apply closed_code_replay.
         -- right. reflexivity.
+    + inversion accepted; subst value.
+      split.
+      * apply closed_code_shape.
+      * split.
+        -- apply closed_code_replay.
+        -- right. reflexivity.
   - inversion accepted; subst value.
     split.
     + apply closed_code_shape.
@@ -2028,21 +2977,43 @@ Theorem image_open_code_sound : forall image out,
   image_open_code image = Some out ->
   inputs_b (Comp.iins image) = true /\
   Comp.irow image = [] /\
+  type_b (Comp.ityp image) = true /\
   oinputs out = Comp.iins image /\
+  ooutput out = Comp.ityp image /\
   build (Comp.iins image) (Comp.iterm image) Done = Some (ocode out) /\
-  shape_one (ocode out) = Some ShAtom.
+  exists form,
+    shape_of (Comp.ityp image) = Some form /\
+    shape_one (ocode out) = Some form.
 Proof.
   intros image out accepted.
   unfold image_open_code in accepted.
   destruct (inputs_b (Comp.iins image)) eqn:inputs; try discriminate.
   destruct (Comp.irow image) as [|action row] eqn:no_effects;
     try discriminate.
+  destruct (type_b (Comp.ityp image)) eqn:output_type; try discriminate.
   destruct (build (Comp.iins image) (Comp.iterm image) Done)
     as [value |] eqn:built; try discriminate.
-  destruct (shape_one value) as [form |] eqn:formed; try discriminate.
-  destruct form; try discriminate.
+  destruct (shape_one value) as [actual |] eqn:formed; try discriminate.
+  destruct (shape_of (Comp.ityp image)) as [expected |] eqn:output;
+    try discriminate.
+  destruct (input_cells (Comp.iins image)) as [cells |] eqn:measured;
+    try discriminate.
+  destruct (shape_eqb actual expected &&
+    (Nat.leb (cells + shape_cells expected) 4096 &&
+      Nat.leb
+        (input_nodes (Comp.iins image) + type_nodes (Comp.ityp image)) 4096))
+    eqn:gate;
+  try discriminate.
+  apply andb_true_iff in gate.
+  destruct gate as [same limits].
+  apply shape_eqb_eq in same.
+  subst expected.
   inversion accepted; subst out.
   repeat split; try assumption; try reflexivity.
+  exists actual.
+  split.
+  - reflexivity.
+  - exact formed.
 Qed.
 
 Theorem image_open_code_unique : forall image left right,
@@ -2094,6 +3065,31 @@ Proof.
   exact ended.
 Qed.
 
+Theorem source_open_value_sound : forall source out inputs result,
+  source_open_code source = Some out ->
+  map fst inputs = oinputs out ->
+  replay_value_in (ocode out) inputs (ooutput out) = Some result ->
+  exists image rho final plan item,
+    Src.compile source = Some image /\
+    image_open_code image = Some out /\
+    open_inputs [] inputs = Some rho /\
+    exec (S (size (ocode out))) (ocode out) rho [] [] =
+      Some ([item], final, plan) /\
+    terminal (oinputs out) final = true /\
+    Emit.rep (ooutput out) (core_value item) result.
+Proof.
+  intros source out inputs result compiled same ran.
+  pose proof (source_open_code_sound source out compiled)
+    as [image [source_ok image_ok]].
+  pose proof
+    (replay_value_in_sound (ocode out) inputs (ooutput out) result ran)
+    as [rho [final [plan [item [opened [executed [ended represented]]]]]]].
+  exists image, rho, final, plan, item.
+  repeat split; try assumption.
+  rewrite <- same.
+  exact ended.
+Qed.
+
 Theorem source_open_safe : forall source out inputs core,
   source_open_code source = Some out ->
   map fst inputs = oinputs out ->
@@ -2115,7 +3111,7 @@ Proof.
   destruct (source_open_code_sound source out accepted)
     as [image [compiled image_ok]].
   destruct (image_open_code_sound image out image_ok)
-    as [_ [no_effects [same_inputs [_ _]]]].
+    as [_ [no_effects [_ [same_inputs [_ [_ _]]]]]].
   destruct (Src.compile_checked source image compiled)
     as [_ [_ [_ [_ [gamma [next [context_open [checked done]]]]]]]].
   rewrite no_effects in checked.

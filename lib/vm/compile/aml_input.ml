@@ -9,7 +9,8 @@ type error =
   | Type of int * string
 
 type core_value = {
-  vm : Contract_vm.v;
+  vms : Contract_vm.v list;
+  lits : C_emit.lit list;
   lit : C_emit.lit;
   value : C_eval.value;
 }
@@ -93,34 +94,96 @@ let tagged value =
     | "addr" -> Some (Contract_vm.VAddr body)
     | _ -> None
 
-let core_value index typ vm =
+let tag value =
+  match String.index_opt value ':' with
+  | None -> false
+  | Some at ->
+    match String.sub value 0 at with
+    | "int" | "bool" | "text" | "bytes" | "bytes32"
+    | "u64" | "u128" | "u256" | "addr" -> true
+    | _ -> false
+
+let detached value =
+  match tagged value with
+  | Some parsed -> Some parsed
+  | None when tag value -> None
+  | None ->
+    match integer value with
+    | Some parsed -> Some (Contract_vm.VInt parsed)
+    | None when String.equal value "true" -> Some (Contract_vm.VBool true)
+    | None when String.equal value "false" -> Some (Contract_vm.VBool false)
+    | None when String.starts_with ~prefix:"0x" value ->
+      Option.map (fun raw -> Contract_vm.VBytes raw) (hex value)
+    | None -> None
+
+let vm = function
+  | C_emit.Int value -> Some (Contract_vm.VInt value)
+  | C_emit.Bool value -> Some (Contract_vm.VBool value)
+  | C_emit.Bytes value -> Some (Contract_vm.VBytes value)
+  | C_emit.Cap (kind, id) ->
+    Some (Contract_vm.VCap {
+      scope = String.make 32 '\000';
+      kind = C_nat.to_int kind;
+      id = C_nat.to_int id;
+      rev = 0;
+    })
+  | C_emit.Data _ -> None
+
+let rec native out = function
+  | [] -> Some (List.rev out)
+  | value :: rest ->
+    begin
+      match vm value with
+      | Some value -> native (value :: out) rest
+      | None -> None
+    end
+
+let core_eval index typ value =
   let bad () = Error (Value (index, C_type.text typ)) in
-  match typ, vm with
-  | C_type.Int, Contract_vm.VInt value ->
-    Ok { vm; lit = C_emit.Int value; value = C_eval.Int value }
-  | C_type.Bool, Contract_vm.VBool value ->
-    Ok { vm; lit = C_emit.Bool value; value = C_eval.Bool value }
-  | C_type.Bytes len, Contract_vm.VBytes value
-      when C_nat.to_int len = String.length value ->
-    Ok { vm; lit = C_emit.Bytes value; value = C_eval.Bytes value }
-  | (C_type.Int | C_type.Bool | C_type.Bytes _), _ -> bad ()
-  | (C_type.Unit | C_type.Vec _ | C_type.Cap _ | C_type.Enc _
-    | C_type.Pair _ | C_type.Sum _), _ ->
-    Error (Type (index, C_type.text typ))
+  match C_mach.shape_of typ, C_mach.atoms typ value, C_mach.literal typ value with
+  | Some _, Some lits, Some lit ->
+    begin
+      match native [] lits with
+      | Some vms -> Ok { vms; lits; lit; value }
+      | None -> bad ()
+    end
+  | _, _, _ -> Error (Type (index, C_type.text typ))
+
+let core_value index typ vm =
+  let value =
+    match typ, vm with
+    | (C_type.Int | C_type.Num _), Contract_vm.VInt value ->
+      Some (C_eval.Int value)
+    | C_type.Bool, Contract_vm.VBool value -> Some (C_eval.Bool value)
+    | C_type.Bytes len, Contract_vm.VBytes value
+        when C_nat.to_int len = String.length value ->
+      Some (C_eval.Bytes value)
+    | _ -> None
+  in
+  match value with
+  | Some value -> core_eval index typ value
+  | None -> Error (Value (index, C_type.text typ))
 
 let core_source index typ raw =
-  let vm =
+  let scalar =
     match typ with
-    | C_type.Int -> Option.map (fun value -> Contract_vm.VInt value) (integer raw)
+    | C_type.Int | C_type.Num _ ->
+      Option.map (fun value -> Contract_vm.VInt value) (integer raw)
     | C_type.Bool when String.equal raw "true" -> Some (Contract_vm.VBool true)
     | C_type.Bool when String.equal raw "false" -> Some (Contract_vm.VBool false)
     | C_type.Bytes _ -> Option.map (fun value -> Contract_vm.VBytes value) (hex raw)
-    | C_type.Unit | C_type.Bool | C_type.Vec _ | C_type.Cap _ | C_type.Enc _
-    | C_type.Pair _ | C_type.Sum _ -> None
+    | C_type.Unit | C_type.Bool | C_type.Vec _ | C_type.Seq _ | C_type.Cap _
+    | C_type.Enc _ | C_type.Pair _ | C_type.Sum _ -> None
   in
-  match vm with
+  match scalar with
   | Some value -> core_value index typ value
-  | None -> Error (Value (index, C_type.text typ))
+  | None ->
+    begin
+      match C_mach.shape_of typ, C_feed.parse_value typ raw with
+      | Some _, Ok value -> core_eval index typ value
+      | Some _, Error _ -> Error (Value (index, C_type.text typ))
+      | None, _ -> Error (Type (index, C_type.text typ))
+    end
 
 let core inputs values =
   let expected = List.length inputs in
@@ -151,13 +214,25 @@ let core_octb types values =
       | raw :: rest ->
         begin
           match tagged raw with
-          | Some vm ->
+          | Some value ->
             begin
-              match core_value index types.(index) vm with
+              match core_value index types.(index) value with
               | Ok value -> loop (index + 1) rest (value :: out)
               | Error error -> Error error
             end
-          | None -> Error (Value (index, C_type.text types.(index)))
+          | None ->
+            begin
+              let typ = types.(index) in
+              match C_mach.shape_of typ, C_feed.parse_value typ raw with
+              | Some _, Ok value ->
+                begin
+                  match core_eval index typ value with
+                  | Ok value -> loop (index + 1) rest (value :: out)
+                  | Error error -> Error error
+                end
+              | Some _, Error _ -> Error (Value (index, C_type.text typ))
+              | None, _ -> Error (Type (index, C_type.text typ))
+            end
         end
     in
     loop 0 values []

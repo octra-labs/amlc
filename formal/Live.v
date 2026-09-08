@@ -296,7 +296,8 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Plus rest | Mach.Minus rest | Mach.Times rest
   | Mach.Quot rest | Mach.Rem rest
-  | Mach.Same rest | Mach.Order _ rest | Mach.Join rest =>
+  | Mach.Same rest | Mach.Different rest | Mach.Order _ rest
+  | Mach.Join rest =>
       match depth with
       | S (S tail) =>
           match scan rest (S tail) env with
@@ -354,6 +355,16 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       match depth with
       | S tail =>
           match scan rest (S tail) env with
+          | Some (next_depth, next_env, rows) =>
+              Some (next_depth, next_env, cell_row env :: rows)
+          | None => None
+          end
+      | 0 => None
+      end
+  | Mach.CloseCap _ rest =>
+      match depth with
+      | S tail =>
+          match scan rest tail env with
           | Some (next_depth, next_env, rows) =>
               Some (next_depth, next_env, cell_row env :: rows)
           | None => None
@@ -684,7 +695,8 @@ Fixpoint event_path (value : Mach.code) : list live_event :=
       LUse id :: repeat LEmit (Mach.shape_width form) ++ event_path rest
   | Mach.Plus rest | Mach.Minus rest | Mach.Times rest
   | Mach.Quot rest | Mach.Rem rest | Mach.Negate rest | Mach.Absolute rest
-  | Mach.Same rest | Mach.Order _ rest | Mach.Join rest =>
+  | Mach.Same rest | Mach.Different rest | Mach.Order _ rest
+  | Mach.Join rest =>
       LEmit :: event_path rest
   | Mach.Clip _ rest => LEmit :: LEmit :: LEmit :: event_path rest
   | Mach.Skip _ rest =>
@@ -692,6 +704,7 @@ Fixpoint event_path (value : Mach.code) : list live_event :=
   | Mach.Duo rest | Mach.First rest | Mach.Second rest | Mach.Cons rest
   | Mach.Append rest | Mach.Pick _ rest | Mach.Unhead rest => event_path rest
   | Mach.Left rest | Mach.Right rest => LEmit :: event_path rest
+  | Mach.CloseCap _ rest => LEmit :: event_path rest
   | Mach.Effect _ body rest =>
       LEmit :: event_path body ++ event_path rest
   | Mach.Scope binder body rest =>

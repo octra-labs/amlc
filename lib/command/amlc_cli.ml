@@ -77,23 +77,8 @@ type source_form =
   | Program_source
   | Contract_source
 
-let source_offset raw line col =
-  let rec walk index row =
-    if index = String.length raw || row = line then index + max 0 (col - 1)
-    else if raw.[index] = '\n' then walk (index + 1) (row + 1)
-    else walk (index + 1) row
-  in
-  min (String.length raw) (walk 0 1)
-
 let source_form_raw raw =
-  match Octra_vm.C_parse.parse raw, Contract_cli.probe_source raw with
-  | Ok _, Contract_cli.Refuse _ -> Program_source
-  | Error _, Contract_cli.Accept -> Contract_source
-  | Ok _, Contract_cli.Accept -> fail "source" "source grammar is ambiguous"
-  | Error current, Contract_cli.Refuse (line, col) ->
-    if source_offset raw line col > current.span.first.off then
-      Contract_source
-    else Program_source
+  if Contract_cli.owns_source raw then Contract_source else Program_source
 
 let source_form path = source_form_raw (source path)
 
@@ -348,7 +333,8 @@ let test_part command input (folio : Folio.t) wanted method_name values =
     if not (String.equal left_method right_method)
         || not (Octra_vm.C_mach.equal left_result right_result)
         || left.effort <> right.effort || left.steps <> right.steps
-        || left.storage <> right.storage || left.events <> right.events then
+        || left.storage <> right.storage || left.events <> right.events
+        || left.closes <> right.closes then
       fail command "repeated execution differs";
     Printf.printf
       "status = pass command = %s input = %s root = %s emission = %s repeats = 2 method = %s result = %s effort = %d steps = %d sha256 = %s veil = %s\n"
@@ -511,6 +497,7 @@ let feed path args =
 let usage () =
   Printf.eprintf
     "usage = amlc version | feed SOURCE VALUES [--out AF1] | check SOURCE [OPTIONS] | compile SOURCE [OPTIONS] | test SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | run SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | debug SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | check PROJECT [--epoch N] | compile PROJECT [--epoch N] [--out PATH] | test PROJECT [--root NAME] [--method NAME] [--arg VALUE] [--epoch N] | run PROJECT [--root NAME] [--method NAME] [--arg VALUE] [--epoch N] | debug PROJECT [--root NAME] [OPTIONS] | dump OCTB [--format text|events|dot]\n";
+  Printf.eprintf "execution = local_current epoch = local_context network_replay = false\n";
   exit 2
 
 let main argv =

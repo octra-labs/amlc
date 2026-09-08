@@ -1,0 +1,68 @@
+program Quadratic {
+  state { runs: int }
+  event Solved(left: int, right: int)
+  form narrow [] (many frame: int * int) ->[many] int * int marks {} =
+    split frame as many value: int, many guess: int in
+    let many safe: int =
+      if equal[int](guess, 0) then guess + 1 else guess + 0 in
+    let many next: int = (safe + value / safe) / 2 in
+    (value, next)
+  form root [] (many value: int) ->[many] int marks {} =
+    split orbit[64] from (value, value + 1) with
+      once frame: int * int => narrow(frame)
+      as many kept: int, many found: int in
+    if equal[int](kept, 0) then kept + 0 else found + 0
+  form pair [many a: int, many b: int] (many c: int) ->[many] int * int marks {} =
+    let many disc: int = b * b - 4 * a * c in
+    let many rad: int = if disc < 0 then 0 else disc in
+    let many found: int = root(rad) in
+    let many den: int = if equal[int](a, 0) then 1 else 2 * a in
+    ((0 - b - found) / den, (0 - b + found) / den)
+  private pure fn old_root(value: int): int {
+    let low = 0
+    let high = 2147483648
+    for i in 0..32 {
+      let mid = (low + high) / 2
+      if mid * mid <= value {
+        low = mid
+      } else {
+        high = mid
+      }
+    }
+    return low
+  }
+  public pure fn classic(a: int, b: int, c: int): string {
+    require(a != 0, "leading coefficient is zero")
+    let disc = b * b - 4 * a * c
+    require(disc >= 0, "roots are not real")
+    require(disc < 4611686018427387904, "discriminant must be below 2^62")
+    let found = old_root(disc)
+    require(found * found == disc, "roots are irrational")
+    let den = 2 * a
+    require((0 - b - found) % den == 0, "left root is not integral")
+    require((0 - b + found) % den == 0, "right root is not integral")
+    return to_string((0 - b - found) / den) + "|" + to_string((0 - b + found) / den)
+  }
+  public pure fn checked(a: int, b: int, c: int): string {
+    require(a != 0, "leading coefficient is zero")
+    let disc = b * b - 4 * a * c
+    require(disc >= 0, "roots are not real")
+    require(disc < 4611686018427387904, "discriminant must be below 2^62")
+    let (left, right) = pair(a, b, c)
+    require(a * left * left + b * left + c == 0, "left root is not integral")
+    require(a * right * right + b * right + c == 0, "right root is not integral")
+    return to_string(left) + "|" + to_string(right)
+  }
+  public fn solve(a: int, b: int, c: int): int {
+    require(a != 0, "leading coefficient is zero")
+    let disc = b * b - 4 * a * c
+    require(disc >= 0, "roots are not real")
+    require(disc < 4611686018427387904, "discriminant must be below 2^62")
+    let (left, right) = pair(a, b, c)
+    require(a * left * left + b * left + c == 0, "left root is not integral")
+    require(a * right * right + b * right + c == 0, "right root is not integral")
+    self.runs += 1
+    emit Solved(left, right)
+    return self.runs
+  }
+}

@@ -9,6 +9,7 @@ type t = {
   mutable steps : int;
   mutable work : Z.t;
   mutable halted : bool;
+  mutable closes : (C_nat.t * C_nat.t) list;
 }
 
 type error =
@@ -19,6 +20,8 @@ type error =
   | Integer_range of int
   | Divide_zero of int
   | Modulo_zero of int
+  | Capability_kind of int
+  | Capability_replay of int
 
 let make ?(cap = 1_000_000) ?(activate = None) ?(epoch = Z.zero) () =
   if cap < 1 then invalid_arg "VM work cap is invalid";
@@ -30,6 +33,7 @@ let make ?(cap = 1_000_000) ?(activate = None) ?(epoch = Z.zero) () =
     steps = 0;
     work = Z.zero;
     halted = false;
+    closes = [];
   }
 
 let make_in ?cap ?activate ?epoch values =
@@ -46,15 +50,18 @@ let work state = state.work
 let halted state = state.halted
 let value state reg = state.regs.(reg)
 let result state = value state 0
+let closes state = List.rev state.closes
 
 let fixed = function
   | C_octb.Load _ | C_octb.Move _ | C_octb.Jump _ | C_octb.Mark _
   | C_octb.Noop | C_octb.Stop -> 1
-  | C_octb.Same _ | C_octb.Less _ | C_octb.Greater _ -> 2
+  | C_octb.Same _ | C_octb.Different _ | C_octb.Less _
+  | C_octb.Greater _ -> 2
   | C_octb.Plus _ | C_octb.Times _ | C_octb.Join _ | C_octb.Minus _
   | C_octb.Size _ -> 3
   | C_octb.Quotient _ | C_octb.Remainder _ | C_octb.Negate _
   | C_octb.Absolute _ | C_octb.Jump_if _ | C_octb.Slice _ -> 5
+  | C_octb.Cap_close _ -> 50
 
 let int_value state reg =
   match value state reg with
@@ -134,6 +141,11 @@ let exec state at = function
   | C_octb.Same (dst, left, right) ->
     set state dst (C_emit.Bool (C_mach.equal (value state left) (value state right)));
     Ok true
+  | C_octb.Different (dst, left, right) ->
+    let* lhs = int state at left in
+    let* rhs = int state at right in
+    set state dst (C_emit.Bool (not (Z.equal lhs rhs)));
+    Ok true
   | C_octb.Less (dst, left, right) ->
     let* lhs = int state at left in
     let* rhs = int state at right in
@@ -198,6 +210,21 @@ let exec state at = function
     in
     set state dst (C_emit.Bytes out);
     Ok true
+  | C_octb.Cap_close (kind, reg) ->
+    begin
+      match value state reg with
+      | C_emit.Cap (found, id) when C_nat.equal kind found ->
+        if List.exists
+            (fun (prior, item) ->
+              C_nat.equal prior kind && C_nat.equal item id)
+            state.closes
+        then Error (Capability_replay at)
+        else begin
+          state.closes <- (kind, id) :: state.closes;
+          Ok true
+        end
+      | _ -> Error (Capability_kind at)
+    end
   | C_octb.Jump target ->
     state.pc <- target;
     Ok true
@@ -245,3 +272,7 @@ let text = function
     Printf.sprintf "VM integer division rejected pc = %d" value
   | Modulo_zero value ->
     Printf.sprintf "VM integer remainder rejected pc = %d" value
+  | Capability_kind value ->
+    Printf.sprintf "VM capability kind differs pc = %d" value
+  | Capability_replay value ->
+    Printf.sprintf "VM capability repeats pc = %d" value

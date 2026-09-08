@@ -46,8 +46,11 @@ type token =
   | Unit
   | Bool
   | Int
+  | Sint
+  | Uint
   | Bytes
   | Vec
+  | Seq
   | Cap
   | Result
   | Res
@@ -67,6 +70,9 @@ type token =
   | Fst
   | Snd
   | Equal
+  | Fit
+  | Wide
+  | Length
   | Read
   | Write
   | Emit
@@ -103,6 +109,8 @@ type token =
   | Colon
   | Comma
   | Eq
+  | EqEq
+  | Ne
   | Lt
   | Le
   | Gt
@@ -147,8 +155,11 @@ type form =
   | F_unit
   | F_bool
   | F_int
+  | F_sint
+  | F_uint
   | F_bytes
   | F_vec
+  | F_seq
   | F_cap
   | F_result
   | F_res
@@ -168,6 +179,9 @@ type form =
   | F_fst
   | F_snd
   | F_equal
+  | F_fit
+  | F_wide
+  | F_length
   | F_read
   | F_write
   | F_emit
@@ -204,6 +218,8 @@ type form =
   | F_colon
   | F_comma
   | F_eq
+  | F_eqeq
+  | F_ne
   | F_lt
   | F_le
   | F_gt
@@ -326,8 +342,11 @@ let keyword = function
   | "unit" -> Unit
   | "bool" -> Bool
   | "int" -> Int
+  | "sint" -> Sint
+  | "uint" -> Uint
   | "bytes" -> Bytes
   | "vec" -> Vec
+  | "seq" -> Seq
   | "cap" -> Cap
   | "result" -> Result
   | "res" -> Res
@@ -347,6 +366,9 @@ let keyword = function
   | "fst" -> Fst
   | "snd" -> Snd
   | "equal" -> Equal
+  | "fit" -> Fit
+  | "wide" -> Wide
+  | "length" -> Length
   | "read" -> Read
   | "write" -> Write
   | "emit" -> Emit
@@ -416,8 +438,11 @@ let form = function
   | Unit -> F_unit
   | Bool -> F_bool
   | Int -> F_int
+  | Sint -> F_sint
+  | Uint -> F_uint
   | Bytes -> F_bytes
   | Vec -> F_vec
+  | Seq -> F_seq
   | Cap -> F_cap
   | Result -> F_result
   | Res -> F_res
@@ -437,6 +462,9 @@ let form = function
   | Fst -> F_fst
   | Snd -> F_snd
   | Equal -> F_equal
+  | Fit -> F_fit
+  | Wide -> F_wide
+  | Length -> F_length
   | Read -> F_read
   | Write -> F_write
   | Emit -> F_emit
@@ -473,6 +501,8 @@ let form = function
   | Colon -> F_colon
   | Comma -> F_comma
   | Eq -> F_eq
+  | EqEq -> F_eqeq
+  | Ne -> F_ne
   | Lt -> F_lt
   | Le -> F_le
   | Gt -> F_gt
@@ -517,8 +547,11 @@ let form_text = function
   | F_unit -> "unit"
   | F_bool -> "bool"
   | F_int -> "int"
+  | F_sint -> "sint"
+  | F_uint -> "uint"
   | F_bytes -> "bytes"
   | F_vec -> "vec"
+  | F_seq -> "seq"
   | F_cap -> "cap"
   | F_result -> "result"
   | F_res -> "res"
@@ -538,6 +571,9 @@ let form_text = function
   | F_fst -> "fst"
   | F_snd -> "snd"
   | F_equal -> "equal"
+  | F_fit -> "fit"
+  | F_wide -> "wide"
+  | F_length -> "length"
   | F_read -> "read"
   | F_write -> "write"
   | F_emit -> "emit"
@@ -574,6 +610,8 @@ let form_text = function
   | F_colon -> ":"
   | F_comma -> ","
   | F_eq -> "="
+  | F_eqeq -> "=="
+  | F_ne -> "!="
   | F_lt -> "<"
   | F_le -> "<="
   | F_gt -> ">"
@@ -675,6 +713,8 @@ let punct state =
   | Some '*' -> Ok (next state, first, Star, 0)
   | Some '/' -> Ok (next state, first, Slash, 0)
   | Some '%' -> Ok (next state, first, Percent, 0)
+  | Some '!' when char_at state 1 = Some '=' ->
+      Ok (next (next state), first, Ne, 0)
   | Some '<' when char_at state 1 = Some '=' ->
       Ok (next (next state), first, Le, 0)
   | Some '<' -> Ok (next state, first, Lt, 0)
@@ -683,6 +723,8 @@ let punct state =
   | Some '>' -> Ok (next state, first, Gt, 0)
   | Some '=' when char_at state 1 = Some '>' ->
       Ok (next (next state), first, Arrow, 0)
+  | Some '=' when char_at state 1 = Some '=' ->
+      Ok (next (next state), first, EqEq, 0)
   | Some '=' -> Ok (next state, first, Eq, 0)
   | Some char ->
       Error { cause = Char (Char.code char); span = span first (next state).pos }

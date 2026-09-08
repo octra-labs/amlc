@@ -1,0 +1,20 @@
+program Sort4 {
+  input many a: int
+  input many b: int
+  input many c: int
+  input many d: int
+  form order [many x: int] (many y: int) ->[many] int * int marks {} =
+    if x <= y then (x, y) else (y, x)
+  term
+    let many p: int * int = order(a, b) in
+    split p as many p0: int, many p1: int in
+    let many q: int * int = order(c, d) in
+    split q as many p2: int, many p3: int in
+    let many r: int * int = order(p0, p2) in
+    split r as many q0: int, many q2: int in
+    let many s: int * int = order(p1, p3) in
+    split s as many q1: int, many q3: int in
+    let many t: int * int = order(q2, q1) in
+    split t as many r1: int, many r2: int in
+      vec[int](q0, r1, r2, q3)
+}

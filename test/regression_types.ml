@@ -64,6 +64,26 @@ contract OpaqueZero {
 }
 |}
 
+let uint_name = {|
+program UIntName {
+  public pure fn keep(value: uint): uint { return value }
+}
+|}
+
+let u256_name = {|
+program UIntName {
+  public pure fn keep(value: u256): u256 { return value }
+}
+|}
+
+let strict_type_names = {|
+program StrictTypeNames {
+  struct sint { value: int }
+  struct vec { value: int }
+  struct seq { value: int }
+}
+|}
+
 let run () =
   refuse "return type" "return type differs" wrong_return;
   refuse "missing return" "function return is not total" missing_return;
@@ -72,4 +92,15 @@ let run () =
   refuse "state type" "state assignment type differs" wrong_state;
   refuse "cyclic const" "constant dependency is cyclic" cyclic_const;
   refuse "operator type" "arithmetic operand type differs" wrong_operator;
-  ignore (compile "opaque zero" opaque_zero)
+  ignore (compile "opaque zero" opaque_zero);
+  let uint = compile "uint name" uint_name in
+  let u256 = compile "u256 name" u256_name in
+  if not (String.equal uint.octb u256.octb) then
+    fail "uint name" "OCTB differs";
+  let names =
+    Octra_vm.Oct_parse.parse strict_type_names
+    |> fun value -> value.Octra_vm.Oct_lang.structs
+    |> List.map (fun value -> value.Octra_vm.Oct_lang.sd_name)
+  in
+  if names <> ["sint"; "vec"; "seq"] then
+    fail "strict type names" "names differ"

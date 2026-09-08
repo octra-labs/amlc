@@ -1,0 +1,7 @@
+program Distinct {
+  form neq [many left: int] (many right: int) ->[many] bool marks {} =
+    left != right
+  public pure fn run(left: int, right: int): bool {
+    return neq(left, right)
+  }
+}

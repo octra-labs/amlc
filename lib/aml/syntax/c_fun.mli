@@ -47,6 +47,9 @@ val def : fn -> (unit, error) result
 val defs : fn list -> (unit, error) result
 val direct : fn -> bool
 val apply : fn -> C_syn.t list -> (C_syn.t, error) result
+val names :
+  C_syn.bind list -> fn list -> t ->
+  ((C_term.id * string) list, error) result
 val lower : C_syn.bind list -> fn list -> t -> (C_low.prog, error) result
 val check : C_syn.bind list -> fn list -> t -> (C_check.info, error) result
 val text : error -> string

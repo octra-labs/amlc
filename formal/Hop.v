@@ -466,3 +466,129 @@ Proof.
   intros profile env term left right lhs rhs.
   rewrite lhs in rhs. inversion rhs. reflexivity.
 Qed.
+
+Inductive hins : Type :=
+| HArgOp : nat -> enc -> hins
+| HTrimOp : nat -> enc -> hins
+| HAddOp : enc -> hins
+| HMulOp : enc -> hins
+| HReOp : enc -> hins.
+
+Fixpoint hemit (term : htm) : list hins :=
+  match term with
+  | HArg name typ => [HArgOp name typ]
+  | HTrim rem body typ => hemit body ++ [HTrimOp rem typ]
+  | HAdd lhs rhs typ => hemit lhs ++ hemit rhs ++ [HAddOp typ]
+  | HMul lhs rhs typ => hemit lhs ++ hemit rhs ++ [HMulOp typ]
+  | HRe body typ => hemit body ++ [HReOp typ]
+  end.
+
+Definition hstep (profile : fprofile) (env : fenv) (op : hins)
+    (stack : list enc) : option (list enc) :=
+  match op, stack with
+  | HArgOp name out, _ =>
+      match env_find name env with
+      | Some typ => if enc_eqb typ out then Some (out :: stack) else None
+      | None => None
+      end
+  | HTrimOp rem out, prior :: rest =>
+      match ht_trim profile rem prior with
+      | Some typ => if enc_eqb typ out then Some (out :: rest) else None
+      | None => None
+      end
+  | HAddOp out, rhs :: lhs :: rest =>
+      match ht_add profile lhs rhs with
+      | Some typ => if enc_eqb typ out then Some (out :: rest) else None
+      | None => None
+      end
+  | HMulOp out, rhs :: lhs :: rest =>
+      match ht_mul profile lhs rhs with
+      | Some typ => if enc_eqb typ out then Some (out :: rest) else None
+      | None => None
+      end
+  | HReOp out, prior :: rest =>
+      match ht_re profile prior with
+      | Some typ => if enc_eqb typ out then Some (out :: rest) else None
+      | None => None
+      end
+  | _, _ => None
+  end.
+
+Fixpoint hexec (profile : fprofile) (env : fenv) (code : list hins)
+    (stack : list enc) : option (list enc) :=
+  match code with
+  | [] => Some stack
+  | op :: rest =>
+      match hstep profile env op stack with
+      | Some next => hexec profile env rest next
+      | None => None
+      end
+  end.
+
+Lemma hexec_app : forall profile env left right stack,
+  hexec profile env (left ++ right) stack =
+    match hexec profile env left stack with
+    | Some next => hexec profile env right next
+    | None => None
+    end.
+Proof.
+  intros profile env left.
+  induction left as [|op rest IH]; intros right stack; simpl.
+  - reflexivity.
+  - destruct (hstep profile env op stack); simpl; auto.
+Qed.
+
+Lemma hemit_sound_stack : forall profile env term typ stack,
+  hval profile env term = Some typ ->
+  hexec profile env (hemit term) stack = Some (typ :: stack).
+Proof.
+  intros profile env term.
+  induction term as [name out | rem body IH out | lhs IHl rhs IHr out
+    | lhs IHl rhs IHr out | body IH out]; intros typ stack valid;
+      simpl in valid |- *.
+  - destruct (env_find name env) as [found |] eqn:lookup; try discriminate.
+    destruct (enc_eqb found out) eqn:same; inversion valid; subst.
+    reflexivity.
+  - destruct (hval profile env body) as [prior |] eqn:body_value;
+      try discriminate.
+    destruct (ht_trim profile rem prior) as [next |] eqn:step;
+      try discriminate.
+    destruct (enc_eqb next out) eqn:same; inversion valid; subst.
+    rewrite hexec_app, (IH prior stack eq_refl). simpl.
+    rewrite step, same. reflexivity.
+  - destruct (hval profile env lhs) as [left |] eqn:left_value;
+      try discriminate.
+    destruct (hval profile env rhs) as [right |] eqn:right_value;
+      try discriminate.
+    destruct (ht_add profile left right) as [next |] eqn:step;
+      try discriminate.
+    destruct (enc_eqb next out) eqn:same; inversion valid; subst.
+    rewrite hexec_app, (IHl left stack eq_refl).
+    rewrite hexec_app, (IHr right (left :: stack) eq_refl). simpl.
+    rewrite step, same. reflexivity.
+  - destruct (hval profile env lhs) as [left |] eqn:left_value;
+      try discriminate.
+    destruct (hval profile env rhs) as [right |] eqn:right_value;
+      try discriminate.
+    destruct (ht_mul profile left right) as [next |] eqn:step;
+      try discriminate.
+    destruct (enc_eqb next out) eqn:same; inversion valid; subst.
+    rewrite hexec_app, (IHl left stack eq_refl).
+    rewrite hexec_app, (IHr right (left :: stack) eq_refl). simpl.
+    rewrite step, same. reflexivity.
+  - destruct (hval profile env body) as [prior |] eqn:body_value;
+      try discriminate.
+    destruct (ht_re profile prior) as [next |] eqn:step;
+      try discriminate.
+    destruct (enc_eqb next out) eqn:same; inversion valid; subst.
+    rewrite hexec_app, (IH prior stack eq_refl). simpl.
+    rewrite step, same. reflexivity.
+Qed.
+
+Theorem fhe_emit_sound : forall profile env term,
+  hval profile env term = Some (hty term) ->
+  hexec profile env (hemit term) [] = Some [hty term].
+Proof.
+  intros profile env term valid.
+  eapply hemit_sound_stack. exact valid.
+Qed.

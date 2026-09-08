@@ -241,9 +241,10 @@ let rec event_type = function
       Option.map (fun tail -> C_type.Pair (head, tail)) (event_type rest))
 
 let rec fault_type = function
-  | C_type.Unit | C_type.Bool | C_type.Int | C_type.Bytes _ -> true
+  | C_type.Unit | C_type.Bool | C_type.Int | C_type.Num _ | C_type.Bytes _ -> true
   | C_type.Pair (left, right) -> fault_type left && fault_type right
-  | C_type.Vec _ | C_type.Sum _ | C_type.Cap _ | C_type.Enc _ -> false
+  | C_type.Vec _ | C_type.Seq _ | C_type.Sum _ | C_type.Cap _
+  | C_type.Enc _ -> false
 
 let site_origin site =
   match site.C_check.atom, site.origin with
@@ -376,11 +377,12 @@ let op_cost ops =
 
 let rec width = function
   | C_type.Unit -> Some 0
-  | C_type.Bool | C_type.Int | C_type.Bytes _ -> Some 1
+  | C_type.Bool | C_type.Int | C_type.Num _ | C_type.Bytes _ -> Some 1
   | C_type.Pair (left, right) ->
     Option.bind (width left) (fun first ->
       Option.map (fun second -> first + second) (width right))
-  | C_type.Vec _ | C_type.Sum _ | C_type.Cap _ | C_type.Enc _ -> None
+  | C_type.Vec _ | C_type.Seq _ | C_type.Sum _ | C_type.Cap _
+  | C_type.Enc _ -> None
 
 let register reg =
   if reg >= 0 && reg < Contract_vm.register_count then Ok ()

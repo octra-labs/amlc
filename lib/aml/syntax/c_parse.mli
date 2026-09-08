@@ -45,9 +45,10 @@ type cause =
   | Mark_nat of Z.t
   | Mark_dup of string
   | Under_nat of Z.t
+  | Empty
   | Perm of C_perm.error
   | Low of C_low.error
-  | Check of C_check.error
+  | Check of C_check.error * string option
   | Depth of int * int
   | Nodes of int * int
 

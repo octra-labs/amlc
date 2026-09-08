@@ -3,6 +3,13 @@
 
 type reg = int
 
+type cap = {
+  scope : string;
+  kind : int;
+  id : int;
+  rev : int;
+}
+
 type ('cipher, 'pubkey) value =
   | VInt of Z.t
   | VBool of bool
@@ -13,6 +20,7 @@ type ('cipher, 'pubkey) value =
   | VU128 of Z.t
   | VU256 of Z.t
   | VAddr of string
+  | VCap of cap
   | VCipher of 'cipher
   | VPubKey of 'pubkey
 
@@ -36,6 +44,8 @@ type ('cipher, 'pubkey) op =
   | SLOADK of reg * reg
   | SSTOREK of reg * reg
   | SDELK of reg
+  | CAP_CHECK of Z.t * reg
+  | CAP_CLOSE of Z.t * reg
   | MLOAD of reg * int
   | MSTORE of int * reg
   | JMP of int
@@ -80,6 +90,9 @@ type ('cipher, 'pubkey) op =
   | GROTH16_VERIFY_BN254 of reg * reg * reg * reg
   | FHE_COMMIT of reg * reg * reg
   | FHE_PEDERSEN of reg * reg * reg
+  | FHE_PEDERSEN_ADD of reg * reg * reg
+  | FHE_PEDERSEN_SUB of reg * reg * reg
+  | FHE_PEDERSEN_IDENTITY of reg
   | FHE_SER of reg * reg
   | FHE_DESER of reg * reg
   | FHE_SER_PK of reg * reg
@@ -165,6 +178,8 @@ module Verifier = struct
     | CodeTooLarge of int
     | EmptyCode
     | ReservedKey of int * string
+    | CapabilityLiteral of int
+    | CapabilityKind of int * Z.t
 
   let max_size = 33_554_432
 
@@ -179,6 +194,11 @@ module Verifier = struct
     else None
 
   let reserved key = String.length key > 0 && Char.code key.[0] = 0
+
+  let check_cap pc kind =
+    if Z.sign kind < 0 || Z.gt kind (Z.of_int 1_000_000) then
+      Some (CapabilityKind (pc, kind))
+    else None
 
   let verify (code : ('cipher, 'pubkey) op array) =
     if Array.length code = 0 then Error EmptyCode
@@ -222,6 +242,13 @@ module Verifier = struct
               | SPAWN (dst, src)
               | STRLEN (dst, src) -> check_regs pc [dst; src]
               | SDELK src -> check_reg pc src
+              | CAP_CHECK (kind, src) | CAP_CLOSE (kind, src) ->
+                begin
+                  match check_cap pc kind with
+                  | Some error -> Some error
+                  | None -> check_reg pc src
+                end
+              | LDI (_, VCap _) -> Some (CapabilityLiteral pc)
               | LDI (dst, _)
               | SLOAD (dst, _)
               | MLOAD (dst, _)
@@ -270,8 +297,12 @@ module Verifier = struct
               | FHE_VERIFY_BOUND (dst, pk, cipher, proof, commit) ->
                 check_regs pc [dst; pk; cipher; proof; commit]
               | FHE_COMMIT (dst, pk, cipher)
-              | FHE_PEDERSEN (dst, pk, cipher) ->
+              | FHE_PEDERSEN (dst, pk, cipher)
+              | FHE_PEDERSEN_ADD (dst, pk, cipher)
+              | FHE_PEDERSEN_SUB (dst, pk, cipher) ->
                 check_regs pc [dst; pk; cipher]
+              | FHE_PEDERSEN_IDENTITY dst ->
+                check_regs pc [dst]
               | FHE_LOAD_PK (dst, src)
               | FHE_SER (dst, src)
               | FHE_DESER (dst, src)

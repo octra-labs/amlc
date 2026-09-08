@@ -13,8 +13,10 @@ type typ =
   | TUnit
   | TBool
   | TInt
+  | TNum of C_type.sign * Z.t
   | TBytes of Z.t
   | TVec of Z.t * typ
+  | TSeq of Z.t * typ
   | TCap of Z.t
   | TPair of typ * typ
   | TSum of typ * typ
@@ -40,6 +42,7 @@ type t =
   | KInt of Z.t
   | KBytes of string
   | KVec of typ * t list
+  | KSeq of C_nat.t * typ * t list
   | Var of name
   | Let of bind * t * t
   | If of t * t * t
@@ -58,6 +61,9 @@ type t =
   | Mod of t * t
   | Neg of t
   | Abs of t
+  | Fit of typ * t
+  | Wide of t
+  | Length of t
   | Eq of typ * t * t
   | Cmp of rel * t * t
   | Cat of t * t

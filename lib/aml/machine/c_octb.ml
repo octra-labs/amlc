@@ -11,12 +11,14 @@ type op =
   | Negate of int * int
   | Absolute of int * int
   | Same of int * int * int
+  | Different of int * int * int
   | Less of int * int * int
   | Greater of int * int * int
   | Join of int * int * int
   | Minus of int * int * int
   | Size of int * int
   | Slice of int * int * int * int
+  | Cap_close of C_nat.t * int
   | Jump of int
   | Jump_if of int * int
   | Mark of int
@@ -36,6 +38,7 @@ type t = {
   code : op array;
   octb : string;
   typ : C_type.t;
+  results : int array;
   result : C_emit.lit option;
   emission : C_mach.emission;
   veils : int;
@@ -66,6 +69,7 @@ type decode_error =
   | Trailing_data of int
   | Empty_code
   | Result_header
+  | Schema_invalid
   | Emission_invalid
   | Emission_repeated
   | Veil_invalid
@@ -84,6 +88,7 @@ type error =
   | Lmap of C_live.error
   | Effect_map
   | Output of decode_error
+  | Result_register
   | Output_code
 
 type constant =
@@ -109,6 +114,9 @@ type code_cell = {
 type image = {
   inputs : C_type.t array;
   output : C_type.t option;
+  results : int array;
+  guarded : bool;
+  entry : int;
   emission : C_mach.emission option;
   veil : (int * C_nat.t) option;
   consts : const_row array;
@@ -144,6 +152,91 @@ let image_veil_depth image =
 
 let wire_veil count depth =
   { Bytecode.count = Z.of_int count; depth = C_nat.to_z depth }
+
+let schema_prefix = "\000OCTRA_AML_OPEN\000"
+let schema_bits = C_type.max_nodes * 128
+
+let chars values =
+  let out = Bytes.create (List.length values) in
+  let rec walk index = function
+    | [] -> Bytes.unsafe_to_string out
+    | value :: rest ->
+      Bytes.set out index (if value then '1' else '0');
+      walk (index + 1) rest
+  in
+  walk 0 values
+
+let bits value =
+  let rec walk index out =
+    if index = String.length value then Some (List.rev out)
+    else
+      match value.[index] with
+      | '0' -> walk (index + 1) (false :: out)
+      | '1' -> walk (index + 1) (true :: out)
+      | _ -> None
+  in
+  walk 0 []
+
+let schema_code inputs output results =
+  let reg value =
+    Option.bind (C_nat.of_int value) C_bin.num
+  in
+  Option.bind (C_bin.list_code C_bin.ty_code inputs) (fun inputs ->
+    Option.bind (C_bin.ty_code output) (fun output ->
+      Option.map
+        (fun results ->
+          C_bin.Tag (Z.zero,
+            C_bin.Cons (inputs,
+              C_bin.Cons (output, C_bin.Cons (results, C_bin.Nil)))))
+        (C_bin.list_code reg results)))
+
+let schema_nodes inputs output =
+  let add count typ =
+    match C_type.nodes typ with
+    | Some found when found <= C_type.max_nodes - count -> Some (count + found)
+    | Some _ | None -> None
+  in
+  let rec walk count = function
+    | [] -> add count output
+    | typ :: rest ->
+      Option.bind (add count typ) (fun count -> walk count rest)
+  in
+  walk 0 inputs
+
+let schema_text inputs output results =
+  Option.bind (schema_nodes inputs output) (fun _ ->
+    Option.bind (schema_code inputs output results) (fun code ->
+      Option.bind (C_bin.enc_code code) (fun body ->
+        if List.length body > schema_bits then None
+        else Some (schema_prefix ^ chars body))))
+
+let schema_get = function
+  | C_bin.Tag (tag,
+      C_bin.Cons (inputs,
+        C_bin.Cons (output, C_bin.Cons (results, C_bin.Nil))))
+      when Z.equal tag Z.zero ->
+    Option.bind (C_bin.list_get C_bin.ty_get inputs) (fun inputs ->
+      Option.bind (C_bin.ty_get output) (fun output ->
+        Option.map
+          (fun results -> inputs, output, List.map C_nat.to_int results)
+          (C_bin.list_get C_bin.get_num results)))
+  | _ -> None
+
+let schema_read raw =
+  let size = String.length schema_prefix in
+  let raw_size = String.length raw in
+  if raw_size <= size
+      || raw_size > size + schema_bits
+      || not (String.equal (String.sub raw 0 size) schema_prefix) then None
+  else
+    let body = String.sub raw size (raw_size - size) in
+    Option.bind (bits body) (fun bits ->
+      Option.bind (C_bin.dec_code bits) (fun code ->
+        Option.bind (schema_get code) (fun (inputs, output, results) ->
+          match schema_text inputs output results with
+          | Some exact when String.equal exact raw ->
+            Some (inputs, output, results)
+          | Some _ | None -> None)))
 
 let local_veil value =
   match C_nat.make value.Bytecode.count, C_nat.make value.depth with
@@ -224,6 +317,15 @@ let order env at rel left right =
 
 let input_limit = Contract_vm.input_limit
 
+let result_regs values =
+  let rec walk = function
+    | [] -> true
+    | value :: rest ->
+      value >= 0 && value <= input_limit && not (List.mem value rest)
+      && walk rest
+  in
+  walk values
+
 let fresh_reg state =
   match state.free with
   | reg :: free -> Ok (reg, { state with free })
@@ -283,7 +385,8 @@ and same_layouts left right =
 
 let rec fits form value =
   match form, value with
-  | C_mach.SUnit, Unit | C_mach.SAtom, Atom _ -> true
+  | C_mach.SUnit, Unit | C_mach.SAtom, Atom _
+  | C_mach.SCap _, Atom _ -> true
   | C_mach.SPair (lf, rf), Pair (lhs, rhs) ->
     fits lf lhs && fits rf rhs
   | C_mach.SVec (len, elem), Vec (found, values) ->
@@ -297,6 +400,9 @@ let rec alloc form state =
   match form with
   | C_mach.SUnit -> Ok (Unit, state)
   | C_mach.SAtom ->
+    let* reg, state = fresh_reg state in
+    Ok (Atom reg, state)
+  | C_mach.SCap _ ->
     let* reg, state = fresh_reg state in
     Ok (Atom reg, state)
   | C_mach.SPair (lhs, rhs) ->
@@ -317,6 +423,43 @@ and alloc_vec count elem state =
     let* first, state = alloc elem state in
     let* rest, state = alloc_vec (count - 1) elem state in
     Ok (first :: rest, state)
+
+let registers ~first form =
+  if first < 0 || first > 64 then Error Register
+  else
+    let state = { next = first; free = []; label = 0 } in
+    let* layout, state = alloc form state in
+    Ok (layout_regs layout [], state.next)
+
+let rec load_regs env at regs lits =
+  match regs, lits with
+  | [], [] -> Ok empty
+  | reg :: reg_rest, lit :: lit_rest ->
+    let* rest = load_regs env at reg_rest lit_rest in
+    Ok (cat (one env at (Op (Load (reg, lit)))) rest)
+  | _ -> Error Stack
+
+let load_value env at typ value state =
+  match C_mach.shape_of typ, C_mach.atoms typ value with
+  | Some form, Some lits ->
+    let* layout, state = alloc form state in
+    let* seq = load_regs env at (layout_regs layout []) lits in
+    Ok (layout, state, seq)
+  | _ -> Error Stack
+
+let load_zeros env at count typ state =
+  let* zero =
+    match C_eval.zero typ with
+    | Some value -> Ok value
+    | None -> Error Stack
+  in
+  let rec walk count state values seq =
+    if count = 0 then Ok (List.rev values, state, seq)
+    else
+      let* value, state, next = load_value env at typ zero state in
+      walk (count - 1) state (value :: values) (cat seq next)
+  in
+  walk count state [] empty
 
 let rec clone env at value state =
   match value with
@@ -409,6 +552,17 @@ let rec take id left = function
     end
   | item :: right -> take id (item :: left) right
 
+let rec move_seq id = function
+  | [] -> false
+  | item :: _ when C_nat.equal id item.bind.C_term.id ->
+    item.bind.mul = C_type.One
+    && begin
+      match item.bind.typ with
+      | C_type.Seq _ -> true
+      | _ -> false
+    end
+  | _ :: rest -> move_seq id rest
+
 let open_cell bind layout env =
   if has bind.C_term.id env then None
   else
@@ -449,8 +603,18 @@ let rec same_env left right =
 let regs env =
   List.fold_right (fun item out -> layout_regs item.layout out) env []
 
+let live_regs env =
+  List.fold_right
+    (fun item out ->
+      if item.live then layout_regs item.layout out else out)
+    env []
+
 let exact tail = function
   | value :: rest when rest = tail -> Some value
+  | _ -> None
+
+let num_range = function
+  | C_type.Num (sign, bits) -> C_type.range sign bits
   | _ -> None
 
 let rec lower env state stack code loc =
@@ -484,13 +648,15 @@ let rec lower env state stack code loc =
     end
   | C_mach.Get (id, form, rest), C_mach.LGet (at, lrest) ->
     begin
+      let move = move_seq id env in
       match take id [] env with
       | None -> Error Slot
       | Some (src, used) when fits form src ->
-        let* dst, state, moves = clone used at src state in
-        let* next = lower used state (dst :: stack) rest lrest in
-        Ok { next with
-          seq = cat moves next.seq }
+        if move then lower used state (src :: stack) rest lrest
+        else
+          let* dst, state, moves = clone used at src state in
+          let* next = lower used state (dst :: stack) rest lrest in
+          Ok { next with seq = cat moves next.seq }
       | Some _ -> Error Stack
     end
   | C_mach.Plus rest, C_mach.LPlus (at, lrest) ->
@@ -569,6 +735,16 @@ let rec lower env state stack code loc =
         let* next = lower env state (Atom left :: tail) rest lrest in
         Ok { next with
           seq = cat (one env at (Op (Same (left, left, right)))) next.seq }
+      | _ -> Error Stack
+    end
+  | C_mach.Different rest, C_mach.LDifferent (at, lrest) ->
+    begin
+      match stack with
+      | Atom right :: Atom left :: tail ->
+        let state = release right state in
+        let* next = lower env state (Atom left :: tail) rest lrest in
+        Ok { next with
+          seq = cat (one env at (Op (Different (left, left, right)))) next.seq }
       | _ -> Error Stack
     end
   | C_mach.Order (rel, rest), C_mach.LOrder (found, at, lrest)
@@ -706,6 +882,76 @@ let rec lower env state stack code loc =
           seq = cat (one env at (Op (Load (tag, C_emit.Bool false)))) next.seq }
       | [] -> Error Stack
     end
+  | C_mach.Pack (cap, typ, rest), C_mach.LPack (at, lrest) ->
+    begin
+      match stack, C_mach.shape_of typ with
+      | Vec (form, values) :: tail, Some expected
+          when List.length values <= C_nat.to_int cap
+            && C_mach.same_shape form expected ->
+        let count = List.length values in
+        let* len_reg, state = fresh_reg state in
+        let* pad, state, loads =
+          load_zeros env at (C_nat.to_int cap - count) typ state
+        in
+        let packed =
+          Pair (Atom len_reg, Vec (form, values @ pad))
+        in
+        let* next = lower env state (packed :: tail) rest lrest in
+        let len = one env at (Op (Load (len_reg, C_emit.Int (Z.of_int count)))) in
+        Ok { next with seq = cat len (cat loads next.seq) }
+      | _ -> Error Stack
+    end
+  | C_mach.Fit (typ, rest), C_mach.LFit (at, lrest) ->
+    begin
+      match stack, num_range typ with
+      | Atom value :: tail, Some (low, high) ->
+        let* tag, state = fresh_reg state in
+        let* scratch, state = fresh_reg state in
+        let low_at, state = fresh_label state in
+        let bad_at, state = fresh_label state in
+        let done_at, state = fresh_label state in
+        let state = release scratch state in
+        let* next = lower env state (Sum (tag, Atom value) :: tail) rest lrest in
+        let rec noops count tail =
+          if count = 0 then tail
+          else one env at (Op Noop) (noops (count - 1) tail)
+        in
+        let code tail =
+          one env at (Op (Load (scratch, C_emit.Int low)))
+            (one env at (Op (Less (tag, value, scratch)))
+              (one env at (Branch (tag, low_at))
+                (one env at (Op (Load (scratch, C_emit.Int high)))
+                  (one env at (Op (Greater (tag, value, scratch)))
+                    (one env at (Branch (tag, bad_at))
+                      (one env at (Op (Load (tag, C_emit.Bool true)))
+                        (one env at (Goto done_at)
+                          (one env at (Place low_at)
+                            (noops 7
+                              (one env at (Place bad_at)
+                                (one env at (Op (Load (tag, C_emit.Bool false)))
+                                  (one env at (Place done_at) tail))))))))))))
+        in
+        Ok { next with seq = cat code next.seq }
+      | _ -> Error Stack
+    end
+  | C_mach.Wide rest, C_mach.LWide (at, lrest) ->
+    begin
+      match stack with
+      | Atom _ :: _ ->
+        let* next = lower env state stack rest lrest in
+        Ok { next with seq = cat (one env at (Op Noop)) next.seq }
+      | _ -> Error Stack
+    end
+  | C_mach.Close (kind, rest), C_mach.LClose (at, lrest) ->
+    begin
+      match stack with
+      | Atom reg :: tail ->
+        let state = release reg state in
+        let* next = lower env state (Unit :: tail) rest lrest in
+        Ok { next with
+          seq = cat (one env at (Op (Cap_close (kind, reg)))) next.seq }
+      | _ -> Error Stack
+    end
   | C_mach.Scope (bind, body, rest), C_mach.LScope (_, lbody, lrest) ->
     begin
       match stack with
@@ -820,6 +1066,97 @@ let rec lower env state stack code loc =
             end
         in
         loop env state state_value empty values
+      | _ -> Error Stack
+    end
+  | C_mach.Iter_seq (cap, item_bind, state_bind, body, rest),
+      C_mach.LIter (at, lbody, lrest) ->
+    begin
+      match item_bind.C_term.mul, state_bind.C_term.mul, stack,
+          C_mach.shape_of item_bind.C_term.typ,
+          C_mach.shape_of state_bind.C_term.typ with
+      | C_type.Zero, _, _, _, _ | _, C_type.Zero, _, _, _ -> Error Slot
+      | _, _, state_value :: Pair (Atom len_reg, Vec (elem, values)) :: tail,
+          Some item_shape, Some state_shape
+          when List.length values = C_nat.to_int cap
+            && C_mach.same_shape item_shape elem
+            && fits state_shape state_value
+            && List.for_all (fits elem) values ->
+        let rec loop index env state state_value seq = function
+          | [] ->
+            let state = release len_reg state in
+            let* next = lower env state (state_value :: tail) rest lrest in
+            Ok { next with seq = cat seq next.seq }
+          | item_value :: values ->
+            let* dst, state = alloc state_shape state in
+            let* guard, state = fresh_reg state in
+            let* index_reg, state = fresh_reg state in
+            let yes_at, state = fresh_label state in
+            let done_at, state = fresh_label state in
+            let body_state = release index_reg (release guard state) in
+            let* first =
+              match open_cell item_bind item_value env with
+              | Some value -> Ok value
+              | None -> Error Slot
+            in
+            let* opened =
+              match open_cell state_bind state_value first with
+              | Some value -> Ok value
+              | None -> Error Slot
+            in
+            let* body_out = lower opened body_state tail body lbody in
+            let* next_state =
+              match exact tail body_out.stack with
+              | Some value -> Ok value
+              | None -> Error Stack
+            in
+            let* last =
+              match close_cell state_bind body_out.env with
+              | Some value -> Ok value
+              | None -> Error Slot
+            in
+            let* closed =
+              match close_cell item_bind last with
+              | Some value -> Ok value
+              | None -> Error Slot
+            in
+            if not (same_env env closed) then Error Slot
+            else
+              let* no_move =
+                match copy env at state_value dst with
+                | Some value -> Ok value
+                | None -> Error Stack
+              in
+              let* yes_move =
+                match copy closed at next_state dst with
+                | Some value -> Ok value
+                | None -> Error Stack
+              in
+              let next_reg = body_out.gen.next in
+              let live =
+                len_reg :: layout_regs dst
+                  (List.fold_right layout_regs values
+                    (List.fold_right layout_regs tail (live_regs env)))
+              in
+              let state = {
+                next = next_reg;
+                free = avail next_reg live;
+                label = body_out.gen.label;
+              }
+              in
+              let branch =
+                cat (one env at (Op (Load (index_reg, C_emit.Int (Z.of_int index)))))
+                  (cat (one env at (Op (Less (guard, index_reg, len_reg))))
+                    (cat (one env at (Branch (guard, yes_at)))
+                      (cat no_move
+                        (cat (one env at (Goto done_at))
+                          (cat (one env at (Place yes_at))
+                            (cat body_out.seq
+                              (cat yes_move
+                                (one env at (Place done_at)))))))))
+              in
+              loop (index + 1) env state dst (cat seq branch) values
+        in
+        loop 0 env state state_value empty values
       | _ -> Error Stack
     end
   | C_mach.Choice (left_bind, yes, right_bind, no, form, rest),
@@ -1018,45 +1355,58 @@ let final_env inputs env =
   && List.for_all (final_cell inputs) env
 
 let seed inputs =
-  if List.length inputs > input_limit then Error Register
-  else
-    let rec walk index env free = function
-      | [] -> Ok (List.rev env, List.rev free)
-      | bind :: rest ->
-        let reg = index + 1 in
-        begin
-          match bind.C_term.mul with
-          | C_type.Zero -> walk (index + 1) env (reg :: free) rest
-          | C_type.One | C_type.Many ->
-            let cell = { bind; layout = Atom reg; live = true } in
-            walk (index + 1) (cell :: env) free rest
-        end
-    in
-    walk 0 [] [] inputs
+  let rec walk state env free layouts = function
+    | [] -> Ok (List.rev env, List.rev free, state.next, List.rev layouts)
+    | bind :: rest ->
+      begin
+        match C_mach.shape_of bind.C_term.typ with
+        | None -> Error Register
+        | Some form ->
+          let* layout, state = alloc form { state with free = [] } in
+          if state.next - 1 > input_limit then Error Register
+          else
+            match bind.C_term.mul with
+            | C_type.Zero ->
+              let free = List.rev_append (layout_regs layout []) free in
+              walk state env free (layout :: layouts) rest
+            | C_type.One | C_type.Many ->
+              let cell = { bind; layout; live = true } in
+              walk state (cell :: env) free (layout :: layouts) rest
+      end
+  in
+  walk { next = 1; free = []; label = 0 } [] [] [] inputs
 
 let lower_plan inputs plan loc at =
-  let* env, free = seed inputs in
+  let* env, free, next, input_layouts = seed inputs in
   let state = {
-    next = List.length inputs + 1;
+    next;
     free;
     label = 0;
   }
   in
   let* out = lower env state [] plan loc in
   match out.stack with
-  | [Atom result] when final_env inputs out.env ->
-    let suffix =
-      if result = 0 then one out.env at (Op Stop)
-      else
-        cat
-          (one out.env at (Op (Move (0, result))))
-          (one out.env at (Op Stop))
+  | [result] when final_env inputs out.env ->
+    let results, suffix =
+      match result with
+      | Atom reg ->
+        [0],
+        if reg = 0 then one out.env at (Op Stop)
+        else
+          cat
+            (one out.env at (Op (Move (0, reg))))
+            (one out.env at (Op Stop))
+      | Unit -> [], one out.env at (Op Stop)
+      | Pair _ | Vec _ | Sum _ ->
+        layout_regs result [], one out.env at (Op Stop)
     in
     let* code, map, live, effects = resolve (out.seq (suffix [])) in
-    Ok (code, map, live, effects,
-      Array.init (List.length inputs) (fun index -> index + 1))
-  | [Atom _] -> Error Slot
-  | [_] -> Error Stack
+    let inputs =
+      List.concat_map (fun layout -> layout_regs layout []) input_layouts
+      |> Array.of_list
+    in
+    Ok (code, map, live, effects, inputs, Array.of_list results)
+  | [_] -> Error Slot
   | _ -> Error Stack
 
 let effect_count info =
@@ -1090,9 +1440,9 @@ let effect_layouts program =
   let pos = { C_lex.off = 0; line = 1; col = 1 } in
   let at = { C_lex.first = pos; last = pos } in
   let loc = C_mach.locate at plan in
-  let* env, free = seed program.inputs in
+  let* env, free, next, _ = seed program.inputs in
   let state = {
-    next = List.length program.inputs + 1;
+    next;
     free;
     label = 0;
   }
@@ -1132,6 +1482,7 @@ let const_data = function
   | C_emit.Int value -> 0, Z.to_string value
   | C_emit.Bytes value -> 3, value
   | C_emit.Data value -> 2, C_rval.encode value
+  | C_emit.Cap _ -> invalid_arg "capability cannot be a constant"
 
 module Lit_ord = struct
   type t = int * string
@@ -1161,6 +1512,7 @@ let vm_lit = function
   | C_emit.Int value -> Contract_vm.VInt value
   | C_emit.Bytes value -> Contract_vm.VBytes value
   | C_emit.Data value -> Contract_vm.VString (C_rval.encode value)
+  | C_emit.Cap _ -> invalid_arg "capability cannot be a constant"
 
 let vm_op = function
   | Load (dst, value) -> Contract_vm.LDI (dst, vm_lit value)
@@ -1172,6 +1524,7 @@ let vm_op = function
   | Negate (dst, src) -> Contract_vm.NEG (dst, src)
   | Absolute (dst, src) -> Contract_vm.ABS (dst, src)
   | Same (dst, left, right) -> Contract_vm.EQ (dst, left, right)
+  | Different (dst, left, right) -> Contract_vm.NEQ (dst, left, right)
   | Less (dst, left, right) -> Contract_vm.LT (dst, left, right)
   | Greater (dst, left, right) -> Contract_vm.GT (dst, left, right)
   | Join (dst, left, right) -> Contract_vm.CONCAT (dst, left, right)
@@ -1179,6 +1532,8 @@ let vm_op = function
   | Size (dst, src) -> Contract_vm.STRLEN (dst, src)
   | Slice (dst, src, first, count) ->
     Contract_vm.SUBSTR (dst, src, first, count)
+  | Cap_close (kind, reg) ->
+    Contract_vm.CAP_CLOSE (C_nat.to_z kind, reg)
   | Jump at -> Contract_vm.JMP at
   | Jump_if (reg, at) -> Contract_vm.JIF (reg, at)
   | Mark at -> Contract_vm.JDEST at
@@ -1293,9 +1648,9 @@ let emit_effects program blocks =
   let pos = { C_lex.off = 0; line = 1; col = 1 } in
   let at = { C_lex.first = pos; last = pos } in
   let loc = C_mach.locate at plan in
-  let* env, free = seed program.inputs in
+  let* env, free, next, _ = seed program.inputs in
   let state = {
-    next = List.length program.inputs + 1;
+    next;
     free;
     label = 0;
   }
@@ -1326,7 +1681,18 @@ let encode_raw ?emission ?veil code =
   if count > 32768 then Error (Constants count)
   else Ok (Bytecode.encode ?emission ?veil (Array.map vm_op code))
 
-let body_label at = 10_000_000 + at
+let label_limit = 1_000_000
+let dispatch_label index = 100 + (index * 100)
+let check_label index side = 1000 + (index * 2) + side
+let data_label index = label_limit + index
+let guard_label index = (2 * label_limit) + index
+let body_label index = (10 * label_limit) + index
+let label_count count = count >= 0 && count <= label_limit
+
+let body_target count target =
+  let base = body_label 0 in
+  let index = target - base in
+  if count < 0 || target < base || index >= count then None else Some index
 
 let open_vm_op = function
   | Jump at -> Contract_vm.JMP (body_label at)
@@ -1334,7 +1700,8 @@ let open_vm_op = function
   | Mark at -> Contract_vm.JDEST (body_label at)
   | value -> vm_op value
 
-let check_label index = 1000 + index
+let check_yes index = check_label index 0
+let check_done index = check_label index 1
 
 let input_code index reg typ =
   let load = Contract_vm.MLOAD (reg, 1001 + index) in
@@ -1345,15 +1712,19 @@ let input_code index reg typ =
       Contract_vm.SUB (reg, reg, 61);
     ]
   | C_type.Bool ->
-    let label = check_label index in
+    let yes = check_yes index in
+    let done_at = check_done index in
     [
       load;
-      Contract_vm.JIF (reg, label);
-      Contract_vm.JMP label;
-      Contract_vm.JDEST label;
+      Contract_vm.JIF (reg, yes);
+      Contract_vm.NOP;
+      Contract_vm.JMP done_at;
+      Contract_vm.JDEST yes;
+      Contract_vm.JMP done_at;
+      Contract_vm.JDEST done_at;
     ]
   | C_type.Bytes len ->
-    let label = check_label index in
+    let label = check_yes index in
     [
       load;
       Contract_vm.LDI (61, Contract_vm.VBytes "");
@@ -1367,8 +1738,9 @@ let input_code index reg typ =
       Contract_vm.LDI (61, Contract_vm.VInt Z.zero);
       Contract_vm.SUBSTR (reg, reg, 61, 62);
     ]
-  | C_type.Unit | C_type.Vec _ | C_type.Cap _ | C_type.Enc _
-  | C_type.Pair _ | C_type.Sum _ -> invalid_arg "machine input is not scalar"
+  | C_type.Unit | C_type.Num _ | C_type.Vec _ | C_type.Seq _ | C_type.Cap _
+  | C_type.Enc _ | C_type.Pair _ | C_type.Sum _ ->
+    invalid_arg "machine input is not scalar"
 
 let result_code typ code =
   let count = Array.length code in
@@ -1384,8 +1756,17 @@ let result_code typ code =
           Stop;
         |]
       | C_type.Bool ->
-        let mark = first + 2 in
-        [|Jump_if (0, mark); Jump mark; Mark mark; Stop|]
+        let yes = first + 3 in
+        let done_at = first + 5 in
+        [|
+          Jump_if (0, yes);
+          Noop;
+          Jump done_at;
+          Mark yes;
+          Jump done_at;
+          Mark done_at;
+          Stop;
+        |]
       | C_type.Bytes len ->
         let mark = first + 9 in
         [|
@@ -1401,12 +1782,12 @@ let result_code typ code =
           Mark mark;
           Stop;
         |]
-      | C_type.Unit | C_type.Vec _ | C_type.Cap _ | C_type.Enc _
-      | C_type.Pair _ | C_type.Sum _ -> [||]
+      | C_type.Unit | C_type.Num _ | C_type.Vec _ | C_type.Seq _
+      | C_type.Cap _ | C_type.Enc _ | C_type.Pair _ | C_type.Sum _ -> [||]
     in
     if Array.length tail = 0 then None else Some (Array.append body tail)
 
-let encode_open emission veil inputs regs typ code =
+let encode_scalar emission veil inputs regs typ code =
   let* code =
     match result_code typ code with
     | Some value -> Ok value
@@ -1416,13 +1797,13 @@ let encode_open emission veil inputs regs typ code =
   if count > 32768 then Error (Constants count)
   else
     let head = [
-      Contract_vm.JDEST 100;
+      Contract_vm.JDEST (dispatch_label 0);
       Contract_vm.MLOAD (61, 1000);
       Contract_vm.LDI (62, Contract_vm.VString "main");
       Contract_vm.EQ (63, 61, 62);
-      Contract_vm.JIF (63, 200);
+      Contract_vm.JIF (63, dispatch_label 1);
       Contract_vm.REVERT;
-      Contract_vm.JDEST 200;
+      Contract_vm.JDEST (dispatch_label 1);
     ]
     in
     let args =
@@ -1435,6 +1816,357 @@ let encode_open emission veil inputs regs typ code =
     Ok
       (Bytecode.encode ~emission:(wire_emission emission) ~veil
         (Array.of_list (head @ args @ [Contract_vm.NOP] @ body)))
+
+let scalar_type = function
+  | C_type.Bool | C_type.Int | C_type.Bytes _ -> true
+  | C_type.Unit | C_type.Num _ | C_type.Vec _ | C_type.Seq _ | C_type.Cap _
+  | C_type.Enc _ | C_type.Pair _ | C_type.Sum _ -> false
+
+let range_code label_of reg low high label =
+  let bad = label_of label in
+  let done_at = label_of (label + 1) in
+  let code tail =
+    Contract_vm.LDI (61, Contract_vm.VInt low)
+    :: Contract_vm.LT (63, reg, 61)
+    :: Contract_vm.JIF (63, bad)
+    :: Contract_vm.LDI (62, Contract_vm.VInt high)
+    :: Contract_vm.GT (63, reg, 62)
+    :: Contract_vm.JIF (63, bad)
+    :: Contract_vm.JMP done_at
+    :: Contract_vm.JDEST bad
+    :: Contract_vm.REVERT
+    :: Contract_vm.JDEST done_at
+    :: tail
+  in
+  code, label + 2
+
+let zero_lits typ =
+  Option.bind (C_eval.zero typ) (C_mach.atoms typ)
+
+let rec vm_noops count tail =
+  if count = 0 then tail
+  else Contract_vm.NOP :: vm_noops (count - 1) tail
+
+let rec exact_code label_of regs lits label =
+  match regs, lits with
+  | [], [] -> Some ((fun tail -> tail), label)
+  | reg :: reg_rest, lit :: lit_rest ->
+    let yes = label_of label in
+    Option.map
+      (fun (rest, label) ->
+        ((fun tail ->
+          Contract_vm.LDI (61, vm_lit lit)
+          :: Contract_vm.EQ (63, reg, 61)
+          :: Contract_vm.JIF (63, yes)
+          :: Contract_vm.REVERT
+          :: Contract_vm.JDEST yes
+          :: rest tail), label))
+      (exact_code label_of reg_rest lit_rest (label + 1))
+  | _ -> None
+
+let zero_code label_of len_reg index regs lits label =
+  let active = label_of label in
+  let done_at = label_of (label + 1) in
+  Option.map
+    (fun (checks, label) ->
+      let work = 9 * List.length lits in
+      let code tail =
+        Contract_vm.LDI (61, Contract_vm.VInt (Z.of_int index))
+        :: Contract_vm.LT (63, 61, len_reg)
+        :: Contract_vm.JIF (63, active)
+        :: checks
+          (Contract_vm.JMP done_at
+          :: Contract_vm.JDEST active
+          :: vm_noops work (Contract_vm.JDEST done_at :: tail))
+      in
+      code, label)
+    (exact_code label_of regs lits (label + 2))
+
+let rec split_regs count out regs =
+  if count = 0 then Some (List.rev out, regs)
+  else
+    match regs with
+    | reg :: rest -> split_regs (count - 1) (reg :: out) rest
+    | [] -> None
+
+let rec data_check typ at label =
+  let reg = at + 1 in
+  match typ with
+  | C_type.Unit -> Ok ((fun tail -> tail), at, label)
+  | C_type.Int ->
+    Ok ((fun tail ->
+      Contract_vm.LDI (61, Contract_vm.VInt Z.zero)
+      :: Contract_vm.SUB (reg, reg, 61)
+      :: tail), at + 1, label)
+  | C_type.Num _ ->
+    begin
+      match num_range typ with
+      | Some (low, high) ->
+        let code, label = range_code data_label reg low high label in
+        Ok (code, at + 1, label)
+      | None -> Error Output_code
+    end
+  | C_type.Bool ->
+    let yes = data_label label in
+    let done_at = data_label (label + 1) in
+    Ok ((fun tail ->
+      Contract_vm.JIF (reg, yes)
+      :: Contract_vm.NOP
+      :: Contract_vm.JMP done_at
+      :: Contract_vm.JDEST yes
+      :: Contract_vm.JMP done_at
+      :: Contract_vm.JDEST done_at
+      :: tail), at + 1, label + 2)
+  | C_type.Bytes len ->
+    let next = data_label label in
+    Ok ((fun tail ->
+      Contract_vm.LDI (61, Contract_vm.VBytes "")
+      :: Contract_vm.EQ (63, reg, 61)
+      :: Contract_vm.STRLEN (61, reg)
+      :: Contract_vm.LDI (62, Contract_vm.VInt (C_nat.to_z len))
+      :: Contract_vm.EQ (63, 61, 62)
+      :: Contract_vm.JIF (63, next)
+      :: Contract_vm.REVERT
+      :: Contract_vm.JDEST next
+      :: Contract_vm.LDI (61, Contract_vm.VInt Z.zero)
+      :: Contract_vm.SUBSTR (reg, reg, 61, 62)
+      :: tail), at + 1, label + 1)
+  | C_type.Cap kind ->
+    Ok ((fun tail ->
+      Contract_vm.CAP_CHECK (C_nat.to_z kind, reg) :: tail), at + 1, label)
+  | C_type.Vec (len, elem) ->
+    data_checks (C_nat.to_int len) elem at label
+  | C_type.Seq (cap, elem) ->
+    data_seq (C_nat.to_int cap) elem at label
+  | C_type.Pair (lhs, rhs) ->
+    let* first, at, label = data_check lhs at label in
+    let* second, at, label = data_check rhs at label in
+    Ok ((fun tail -> first (second tail)), at, label)
+  | C_type.Sum (lhs, rhs) ->
+    let yes = data_label label in
+    let done_at = data_label (label + 1) in
+    let* right, right_at, label = data_check rhs (at + 1) (label + 2) in
+    let* left, left_at, label = data_check lhs (at + 1) label in
+    if left_at <> right_at then Error Output_code
+    else
+      Ok ((fun tail ->
+        Contract_vm.JIF (reg, yes)
+        :: right
+          (Contract_vm.JMP done_at
+          :: Contract_vm.JDEST yes
+          :: left (Contract_vm.JDEST done_at :: tail))), left_at, label)
+  | C_type.Enc _ -> Error Output_code
+
+and data_seq count elem at label =
+  let len_reg = at + 1 in
+  let range, label =
+    range_code data_label len_reg Z.zero (Z.of_int count) label
+  in
+  let rec walk index at label =
+    if index = count then Ok ((fun tail -> tail), at, label)
+    else
+      let start = at in
+      let* check, at, label = data_check elem at label in
+      let* lits =
+        match zero_lits elem with
+        | Some value -> Ok value
+        | None -> Error Output_code
+      in
+      let* regs =
+        match split_regs (List.length lits) []
+            (List.init (at - start) (fun offset -> start + offset + 1))
+        with
+        | Some (value, []) -> Ok value
+        | Some _ | None -> Error Output_code
+      in
+      let* zero, label =
+        match zero_code data_label len_reg index regs lits label with
+        | Some value -> Ok value
+        | None -> Error Output_code
+      in
+      let* rest, at, label = walk (index + 1) at label in
+      Ok ((fun tail -> check (zero (rest tail))), at, label)
+  in
+  let* items, at, label = walk 0 (at + 1) label in
+  Ok ((fun tail -> range (items tail)), at, label)
+
+and data_checks count typ at label =
+  if count = 0 then Ok ((fun tail -> tail), at, label)
+  else
+    let* first, at, label = data_check typ at label in
+    let* rest, at, label = data_checks (count - 1) typ at label in
+    Ok ((fun tail -> first (rest tail)), at, label)
+
+let data_input_code inputs =
+  let rec walk at label build = function
+    | [] ->
+      if label_count label then Ok (build [], at) else Error Output_code
+    | typ :: rest ->
+      let* code, at, label = data_check typ at label in
+      walk at label (fun tail -> build (code tail)) rest
+  in
+  walk 0 0 (fun tail -> tail) inputs
+
+let rec data_guard typ regs label =
+  match typ, regs with
+  | C_type.Unit, _ -> Ok ((fun tail -> tail), regs, label)
+  | C_type.Int, reg :: rest ->
+    Ok ((fun tail ->
+      Contract_vm.LDI (61, Contract_vm.VInt Z.zero)
+      :: Contract_vm.SUB (reg, reg, 61)
+      :: tail), rest, label)
+  | (C_type.Num _ as typ), reg :: rest ->
+    begin
+      match num_range typ with
+      | Some (low, high) ->
+        let code, label = range_code guard_label reg low high label in
+        Ok (code, rest, label)
+      | None -> Error Output_code
+    end
+  | C_type.Bool, reg :: rest ->
+    let yes = guard_label label in
+    let done_at = guard_label (label + 1) in
+    Ok ((fun tail ->
+      Contract_vm.JIF (reg, yes)
+      :: Contract_vm.NOP
+      :: Contract_vm.JMP done_at
+      :: Contract_vm.JDEST yes
+      :: Contract_vm.JMP done_at
+      :: Contract_vm.JDEST done_at
+      :: tail), rest, label + 2)
+  | C_type.Bytes len, reg :: rest ->
+    let next = guard_label label in
+    Ok ((fun tail ->
+      Contract_vm.LDI (61, Contract_vm.VBytes "")
+      :: Contract_vm.EQ (63, reg, 61)
+      :: Contract_vm.STRLEN (61, reg)
+      :: Contract_vm.LDI (62, Contract_vm.VInt (C_nat.to_z len))
+      :: Contract_vm.EQ (63, 61, 62)
+      :: Contract_vm.JIF (63, next)
+      :: Contract_vm.REVERT
+      :: Contract_vm.JDEST next
+      :: Contract_vm.LDI (61, Contract_vm.VInt Z.zero)
+      :: Contract_vm.SUBSTR (reg, reg, 61, 62)
+      :: tail), rest, label + 1)
+  | C_type.Vec (len, elem), _ ->
+    data_guards (C_nat.to_int len) elem regs label
+  | C_type.Seq (cap, elem), _ ->
+    data_seq_guard (C_nat.to_int cap) elem regs label
+  | C_type.Pair (lhs, rhs), _ ->
+    let* first, regs, label = data_guard lhs regs label in
+    let* second, regs, label = data_guard rhs regs label in
+    Ok ((fun tail -> first (second tail)), regs, label)
+  | C_type.Sum (lhs, rhs), reg :: rest ->
+    let yes = guard_label label in
+    let done_at = guard_label (label + 1) in
+    let* right, right_rest, label = data_guard rhs rest (label + 2) in
+    let* left, left_rest, label = data_guard lhs rest label in
+    if left_rest <> right_rest then Error Output_code
+    else
+      Ok ((fun tail ->
+        Contract_vm.JIF (reg, yes)
+        :: right
+          (Contract_vm.JMP done_at
+          :: Contract_vm.JDEST yes
+          :: left (Contract_vm.JDEST done_at :: tail))), left_rest, label)
+  | (C_type.Int | C_type.Num _ | C_type.Bool | C_type.Bytes _
+    | C_type.Sum _), []
+  | (C_type.Cap _ | C_type.Enc _), _ -> Error Output_code
+
+and data_seq_guard count elem regs label =
+  match regs with
+  | [] -> Error Output_code
+  | len_reg :: values ->
+    let range, label =
+      range_code guard_label len_reg Z.zero (Z.of_int count) label
+    in
+    let rec walk index regs label =
+      if index = count then Ok ((fun tail -> tail), regs, label)
+      else
+        let* lits =
+          match zero_lits elem with
+          | Some value -> Ok value
+          | None -> Error Output_code
+        in
+        let* item_regs, rest =
+          match split_regs (List.length lits) [] regs with
+          | Some value -> Ok value
+          | None -> Error Output_code
+        in
+        let* check, found, label = data_guard elem regs label in
+        if found <> rest then Error Output_code
+        else
+          let* zero, label =
+            match zero_code guard_label len_reg index item_regs lits label with
+            | Some value -> Ok value
+            | None -> Error Output_code
+          in
+          let* tail, rest, label = walk (index + 1) rest label in
+          Ok ((fun out -> check (zero (tail out))), rest, label)
+    in
+    let* items, rest, label = walk 0 values label in
+    Ok ((fun tail -> range (items tail)), rest, label)
+
+and data_guards count typ regs label =
+  if count = 0 then Ok ((fun tail -> tail), regs, label)
+  else
+    let* first, regs, label = data_guard typ regs label in
+    let* rest, regs, label = data_guards (count - 1) typ regs label in
+    Ok ((fun tail -> first (rest tail)), regs, label)
+
+let guard_code typ regs =
+  let* build, rest, label = data_guard typ regs 0 in
+  if rest = [] && label_count label then Ok (build []) else Error Output_code
+
+let encode_data emission veil inputs regs typ results code =
+  let input_types = List.map (fun bind -> bind.C_term.typ) inputs in
+  let* checks, count = data_input_code input_types in
+  if count <> Array.length regs
+      || not (Array.for_all2 Int.equal regs (Array.init count (fun i -> i + 1)))
+  then Error Output_code
+  else if not (result_regs (Array.to_list results)) then Error Result_register
+  else
+  let* schema =
+    match schema_text input_types typ (Array.to_list results) with
+    | Some value -> Ok value
+    | None -> Error Output_code
+  in
+  let* guard = guard_code typ (Array.to_list results) in
+  let count = Array.length code in
+  if count = 0 || code.(count - 1) <> Stop then Error Output_code
+  else
+  let head = [
+    Contract_vm.JDEST (dispatch_label 0);
+    Contract_vm.MLOAD (61, 1000);
+    Contract_vm.LDI (62, Contract_vm.VString "main");
+    Contract_vm.EQ (63, 61, 62);
+    Contract_vm.JIF (63, dispatch_label 1);
+    Contract_vm.REVERT;
+    Contract_vm.JDEST (dispatch_label 1);
+    Contract_vm.LDI (61, Contract_vm.VString schema);
+  ]
+  in
+  let args =
+    Array.to_list regs
+    |> List.mapi (fun index reg -> Contract_vm.MLOAD (reg, 1001 + index))
+  in
+  let body =
+    Array.sub code 0 (count - 1)
+    |> Array.map open_vm_op
+    |> Array.to_list
+  in
+  let stop = Contract_vm.JDEST (body_label (count - 1)) in
+  Ok
+    (Bytecode.encode ~emission:(wire_emission emission) ~veil
+      (Array.of_list
+        (head @ args @ checks @ [Contract_vm.NOP] @ body
+          @ (stop :: guard) @ [Contract_vm.STOP])))
+
+let encode_open emission veil inputs regs typ results code =
+  if List.for_all (fun bind -> scalar_type bind.C_term.typ) inputs
+      && scalar_type typ then
+    encode_scalar emission veil inputs regs typ code
+  else encode_data emission veil inputs regs typ results code
 
 type reader = {
   raw : string;
@@ -1528,6 +2260,7 @@ let vm_value pc = function
       | Ok data when String.equal (C_rval.encode data) value -> C_emit.Data data
       | Ok _ | Error _ -> refuse (Instruction_data pc)
     end
+  | Contract_vm.VCap _ -> refuse (Instruction_data pc)
   | Contract_vm.VBytes32 _
   | Contract_vm.VU64 _
   | Contract_vm.VU128 _
@@ -1551,6 +2284,7 @@ let profile_op pc value =
   | Contract_vm.NEG (dst, src) -> Negate (r dst, r src)
   | Contract_vm.ABS (dst, src) -> Absolute (r dst, r src)
   | Contract_vm.EQ (dst, left, right) -> Same (r dst, r left, r right)
+  | Contract_vm.NEQ (dst, left, right) -> Different (r dst, r left, r right)
   | Contract_vm.LT (dst, left, right) -> Less (r dst, r left, r right)
   | Contract_vm.GT (dst, left, right) -> Greater (r dst, r left, r right)
   | Contract_vm.CONCAT (dst, left, right) ->
@@ -1558,6 +2292,12 @@ let profile_op pc value =
   | Contract_vm.STRLEN (dst, src) -> Size (r dst, r src)
   | Contract_vm.SUBSTR (dst, src, first, count) ->
     Slice (r dst, r src, r first, r count)
+  | Contract_vm.CAP_CLOSE (kind, src) ->
+    begin
+      match C_nat.make kind with
+      | Some kind -> Cap_close (kind, r src)
+      | None -> refuse (Instruction_data pc)
+    end
   | Contract_vm.JMP at -> Jump at
   | Contract_vm.JIF (guard, at) -> Jump_if (r guard, at)
   | Contract_vm.JDEST at -> Mark at
@@ -1635,17 +2375,30 @@ let verify code =
       | _ -> ())
     code
 
+let verify_forward code =
+  verify code;
+  Array.iteri
+    (fun pc -> function
+      | Jump target | Jump_if (_, target) when target <= pc ->
+        refuse (Jump_ref (pc, target))
+      | _ -> ())
+    code
+
 let open_header code =
   Array.length code >= 8
   && match code.(0), code.(1), code.(2), code.(3), code.(4), code.(5),
       code.(6) with
-    | Contract_vm.JDEST 100,
+    | Contract_vm.JDEST start,
         Contract_vm.MLOAD (61, 1000),
         Contract_vm.LDI (62, Contract_vm.VString name),
         Contract_vm.EQ (63, 61, 62),
-        Contract_vm.JIF (63, 200),
+        Contract_vm.JIF (63, entry),
         Contract_vm.REVERT,
-        Contract_vm.JDEST 200 -> String.equal name "main"
+        Contract_vm.JDEST mark ->
+      start = dispatch_label 0
+      && entry = dispatch_label 1
+      && mark = dispatch_label 1
+      && String.equal name "main"
     | _ -> false
 
 let claims_open raw =
@@ -1668,7 +2421,7 @@ let claims_open raw =
           let wide wanted =
             Int64.equal (read_u32 input Header) (Int64.of_int wanted)
           in
-          if not (byte 0x16 && wide 100) then false
+          if not (byte 0x16 && wide (dispatch_label 0)) then false
           else if not (byte 0x12 && byte 61 && word 1000) then false
           else if not (byte 0x0B && byte 62) then false
           else
@@ -1681,16 +2434,17 @@ let claims_open raw =
             in
             main
             && byte 0x07 && byte 63 && byte 61 && byte 62
-            && byte 0x15 && byte 63 && wide 200
+            && byte 0x15 && byte 63 && wide (dispatch_label 1)
             && byte 0x18
-            && byte 0x16 && wide 200
+            && byte 0x16 && wide (dispatch_label 1)
   with Read_error _ -> false
 
 let input_type code pc index =
   let count = Array.length code in
   let reg = index + 1 in
   let address = 1001 + index in
-  let label = check_label index in
+  let check = check_yes index in
+  let done_at = check_done index in
   if pc + 2 < count then
     match code.(pc), code.(pc + 1), code.(pc + 2) with
     | Contract_vm.MLOAD (dst, at),
@@ -1699,15 +2453,21 @@ let input_type code pc index =
         when dst = reg && at = address && out = reg && source = reg
           && Z.equal zero Z.zero -> Some (C_type.Int, pc + 3)
     | _ ->
-      if pc + 3 < count then
-        match code.(pc), code.(pc + 1), code.(pc + 2), code.(pc + 3) with
+      if pc + 6 < count then
+        match code.(pc), code.(pc + 1), code.(pc + 2), code.(pc + 3),
+            code.(pc + 4), code.(pc + 5), code.(pc + 6) with
         | Contract_vm.MLOAD (dst, at),
-            Contract_vm.JIF (guard, yes),
-            Contract_vm.JMP no,
-            Contract_vm.JDEST mark
+            Contract_vm.JIF (guard, yes_at),
+            Contract_vm.NOP,
+            Contract_vm.JMP done_jump,
+            Contract_vm.JDEST yes_mark,
+            Contract_vm.JMP done_jump_two,
+            Contract_vm.JDEST done_mark
             when dst = reg && at = address && guard = reg
-              && yes = label && no = label && mark = label ->
-          Some (C_type.Bool, pc + 4)
+              && yes_at = check && yes_mark = check
+              && done_jump = done_at && done_jump_two = done_at
+              && done_mark = done_at ->
+          Some (C_type.Bool, pc + 7)
         | _ ->
           if pc + 10 < count then
             match code.(pc), code.(pc + 1), code.(pc + 2), code.(pc + 3),
@@ -1719,7 +2479,7 @@ let input_type code pc index =
                 Contract_vm.STRLEN (size, text),
                 Contract_vm.LDI (62, Contract_vm.VInt raw_len),
                 Contract_vm.EQ (same, found, 62),
-                Contract_vm.JIF (guard, yes),
+                Contract_vm.JIF (guard, jump),
                 Contract_vm.REVERT,
                 Contract_vm.JDEST mark,
                 Contract_vm.LDI (61, Contract_vm.VInt zero),
@@ -1727,7 +2487,7 @@ let input_type code pc index =
                 when dst = reg && at = address && String.equal empty ""
                   && kind = 63 && left = reg && size = 61 && text = reg
                   && same = 63 && found = 61 && guard = 63
-                  && yes = label && mark = label && Z.equal zero Z.zero
+                  && jump = check && mark = check && Z.equal zero Z.zero
                   && out = reg && source = reg && first = 61 && length = 62 ->
               Option.map
                 (fun len -> C_type.Bytes len, pc + 11)
@@ -1738,9 +2498,9 @@ let input_type code pc index =
   else None
 
 let open_target pc count target =
-  let local = target - body_label 0 in
-  if local < 0 || local >= count then refuse (Jump_ref (pc, target));
-  local
+  match body_target count target with
+  | Some index -> index
+  | None -> refuse (Jump_ref (pc, target))
 
 let open_code native at =
   let count = Array.length native - at in
@@ -1756,7 +2516,46 @@ let open_code native at =
         else refuse (Jump_ref (at + pc, target))
       | value -> profile_op (at + pc) value)
   in
-  verify code;
+  verify_forward code;
+  code
+
+let data_code native at typ results =
+  let guard =
+    match guard_code typ results with
+    | Ok value -> value
+    | Error _ -> refuse Schema_invalid
+  in
+  let suffix = guard @ [Contract_vm.STOP] in
+  let count = Array.length native - at - List.length suffix in
+  if count < 1 then refuse Result_header;
+  let rec exact pc = function
+    | [] -> if pc <> Array.length native then refuse Result_header
+    | op :: rest ->
+      if pc >= Array.length native || native.(pc) <> op then
+        refuse (Opcode (pc, if pc < Array.length native
+          then Bytecode.op_tag native.(pc) else -1));
+      exact (pc + 1) rest
+  in
+  exact (at + count) suffix;
+  let code =
+    Array.init count (fun pc ->
+      let absolute = at + pc in
+      if pc = count - 1 then
+        match native.(absolute) with
+        | Contract_vm.JDEST target when target = body_label pc -> Stop
+        | value -> refuse (Opcode (absolute, Bytecode.op_tag value))
+      else
+        match native.(absolute) with
+        | Contract_vm.JMP target -> Jump (open_target absolute count target)
+        | Contract_vm.JIF (guard, target) ->
+          Jump_if (reg absolute guard, open_target absolute count target)
+        | Contract_vm.JDEST target ->
+          if target = body_label pc then Mark pc
+          else refuse (Jump_ref (absolute, target))
+        | Contract_vm.STOP -> refuse Result_header
+        | value -> profile_op absolute value)
+  in
+  verify_forward code;
   code
 
 let result_type code =
@@ -1767,11 +2566,15 @@ let result_type code =
     | Load (61, C_emit.Int zero), Minus (0, 0, 61), Stop
         when Z.equal zero Z.zero -> Some (C_type.Int, at 3)
     | _ ->
-      if count >= 4 then
-        match code.(at 4), code.(at 3), code.(at 2), code.(at 1) with
-        | Jump_if (0, yes), Jump no, Mark mark, Stop
-            when yes = at 2 && no = at 2 && mark = at 2 ->
-          Some (C_type.Bool, at 4)
+      if count >= 7 then
+        match code.(at 7), code.(at 6), code.(at 5), code.(at 4),
+            code.(at 3), code.(at 2), code.(at 1) with
+        | Jump_if (0, yes), Noop, Jump done_jump, Mark yes_mark,
+            Jump done_jump_two, Mark done_mark, Stop
+            when yes = at 4 && yes_mark = at 4
+              && done_jump = at 2 && done_jump_two = at 2
+              && done_mark = at 2 ->
+          Some (C_type.Bool, at 7)
         | _ ->
           if count >= 11 then
             match code.(at 11), code.(at 10), code.(at 9), code.(at 8),
@@ -1800,36 +2603,106 @@ let verify_result code first =
       | _ -> ())
     code
 
-let open_profile native =
+let layout typ =
+  match C_mach.shape_of typ with
+  | Some form ->
+    Some (C_mach.shape_width form, C_mach.shape_cells form)
+  | None -> None
+
+let data_claim native =
+  if Array.length native <= 8 then None
+  else
+    match native.(7) with
+    | Contract_vm.LDI (61, Contract_vm.VString raw) ->
+      begin
+        match schema_read raw with
+        | None -> refuse Schema_invalid
+        | Some (inputs, output, results) ->
+          if inputs = [] then refuse Schema_invalid;
+          let rec measure width cells = function
+            | [] -> width, cells
+            | typ :: rest ->
+              begin
+                match layout typ with
+                | Some (next_width, next_cells) ->
+                  measure
+                    (Z.add width next_width)
+                    (Z.add cells next_cells)
+                    rest
+                | None -> refuse Schema_invalid
+              end
+          in
+          let count, cells = measure Z.zero Z.zero inputs in
+          if Z.gt count (Z.of_int input_limit) then refuse Schema_invalid;
+          let result_width, result_cells =
+            match layout output with
+            | Some value -> value
+            | None -> refuse Schema_invalid
+          in
+          if Z.gt (Z.add cells result_cells) (Z.of_int C_check.max_inputs) then
+            refuse Schema_invalid;
+          let count = Z.to_int count in
+          let checks =
+            match data_input_code inputs with
+            | Ok (code, found) when found = count -> code
+            | Ok _ | Error _ -> refuse Schema_invalid
+          in
+          let expected =
+            List.init count (fun index ->
+              Contract_vm.MLOAD (index + 1, 1001 + index))
+            @ checks
+          in
+          let rec prefix pc = function
+            | [] -> pc
+            | _ when pc >= Array.length native -> refuse Empty_code
+            | op :: rest when native.(pc) = op -> prefix (pc + 1) rest
+            | _ :: _ -> refuse (Opcode (pc, Bytecode.op_tag native.(pc)))
+          in
+          let at = prefix 8 expected in
+          if at >= Array.length native || native.(at) <> Contract_vm.NOP then
+            refuse Result_header;
+          if not (Z.equal result_width (Z.of_int (List.length results)))
+              || not (result_regs results) then refuse Schema_invalid;
+          let code = data_code native (at + 1) output results in
+          Some
+            (Array.of_list inputs, output, Array.of_list results, at + 1, code,
+              true)
+      end
+    | _ -> None
+
+let open_claim native =
   if not (open_header native) then None
   else
-    let rec inputs pc index out =
-      if pc >= Array.length native then refuse Empty_code
-      else
-        match native.(pc) with
-        | Contract_vm.NOP ->
-          if index = 0 then refuse Empty_code;
-          Some (Array.of_list (List.rev out), pc + 1)
-        | _ when index >= input_limit ->
-          refuse (Register_ref (pc, index + 1))
-        | _ ->
-          begin
-            match input_type native pc index with
-            | Some (typ, next) -> inputs next (index + 1) (typ :: out)
-            | None -> refuse (Opcode (pc, Bytecode.op_tag native.(pc)))
-          end
-    in
-    match inputs 7 0 [] with
-    | Some (types, at) ->
-      let code = open_code native at in
-      begin
-        match result_type code with
-        | Some (output, first) ->
-          verify_result code first;
-          Some (types, output, at, code)
-        | None -> refuse Result_header
-      end
-    | None -> None
+    match data_claim native with
+    | Some value -> Some value
+    | None ->
+      let rec inputs pc index out =
+        if pc >= Array.length native then refuse Empty_code
+        else
+          match native.(pc) with
+          | Contract_vm.NOP ->
+            if index = 0 then refuse Empty_code;
+            Some (Array.of_list (List.rev out), pc + 1)
+          | _ when index >= input_limit ->
+            refuse (Register_ref (pc, index + 1))
+          | _ ->
+            begin
+              match input_type native pc index with
+              | Some (typ, next) -> inputs next (index + 1) (typ :: out)
+              | None -> refuse (Opcode (pc, Bytecode.op_tag native.(pc)))
+            end
+      in
+      match inputs 7 0 [] with
+      | Some (types, at) ->
+        let code = open_code native at in
+        begin
+          match result_type code with
+          | Some (output, first) ->
+            verify_result code first;
+            Some (types, output, [|0|], at, code, false)
+          | None -> refuse Result_header
+        end
+      | None -> None
 
 let decode raw =
   try
@@ -1871,19 +2744,33 @@ let decode raw =
           | None -> refuse Veil_invalid
         end
     in
-    let inputs, output, code_at, code =
-      match open_profile native.code with
-      | Some (inputs, output, at, code) ->
-        inputs, Some output, at, code
-      | None -> [||], None, 0, Array.mapi profile_op native.code
+    let inputs, output, results, code_at, code, guarded =
+      match open_claim native.code with
+      | Some (inputs, output, results, at, code, guarded) ->
+        inputs, Some output, results, at, code, guarded
+      | None -> [||], None, [||], 0, Array.mapi profile_op native.code, false
     in
     let cells =
       Array.init (Array.length code) (fun pc ->
         let cell = native.cells.(code_at + pc) in
         { pc; at = cell.at; size = cell.size })
     in
-    verify code;
-    Ok { inputs; output; emission; veil; consts; cells; text_at; code }
+    if Option.is_some output || Option.is_some emission || Option.is_some veil then
+      verify_forward code
+    else verify code;
+    Ok {
+      inputs;
+      output;
+      results;
+      guarded;
+      entry = code_at;
+      emission;
+      veil;
+      consts;
+      cells;
+      text_at;
+      code;
+    }
   with Read_error error -> Error error
 
 let encode code =
@@ -1900,6 +2787,8 @@ let lit_text = function
   | C_emit.Int value -> "int:" ^ Z.to_string value
   | C_emit.Bytes value -> Printf.sprintf "bytes[%d]" (String.length value)
   | C_emit.Data value -> "data[" ^ C_type.text (C_rval.typ value) ^ "]"
+  | C_emit.Cap (kind, id) ->
+    "cap[" ^ C_nat.text kind ^ "]#" ^ C_nat.text id
 
 let op_text = function
   | Load (dst, value) -> Printf.sprintf "ldi(r%d,%s)" dst (lit_text value)
@@ -1916,6 +2805,8 @@ let op_text = function
   | Absolute (dst, src) -> Printf.sprintf "abs(r%d,r%d)" dst src
   | Same (dst, left, right) ->
     Printf.sprintf "eq(r%d,r%d,r%d)" dst left right
+  | Different (dst, left, right) ->
+    Printf.sprintf "neq(r%d,r%d,r%d)" dst left right
   | Less (dst, left, right) ->
     Printf.sprintf "lt(r%d,r%d,r%d)" dst left right
   | Greater (dst, left, right) ->
@@ -1927,6 +2818,8 @@ let op_text = function
   | Size (dst, src) -> Printf.sprintf "strlen(r%d,r%d)" dst src
   | Slice (dst, src, first, count) ->
     Printf.sprintf "substr(r%d,r%d,r%d,r%d)" dst src first count
+  | Cap_close (kind, reg) ->
+    Printf.sprintf "cap_close(%s,r%d)" (C_nat.text kind) reg
   | Jump at -> Printf.sprintf "jmp(%d)" at
   | Jump_if (reg, at) -> Printf.sprintf "jif(r%d,%d)" reg at
   | Mark at -> Printf.sprintf "jdest(%d)" at
@@ -1971,6 +2864,7 @@ let decode_text = function
   | Trailing_data value -> Printf.sprintf "OCTB trailing bytes = %d" value
   | Empty_code -> "OCTB instruction stream is empty"
   | Result_header -> "OCTB result header is invalid"
+  | Schema_invalid -> "OCTB AML schema is invalid"
   | Emission_invalid -> "OCTB AML emission is invalid"
   | Emission_repeated -> "OCTB AML emission is repeated"
   | Veil_invalid -> "OCTB AML veil is invalid"
@@ -1980,10 +2874,12 @@ let decode_text = function
 let finish (image : C_mach.t) =
   let* () =
     match C_mach.effects image.code with
-    | [] -> Ok ()
+    | effects when List.for_all
+        (function C_eff.Close _ -> true | _ -> false)
+        effects -> Ok ()
     | effects -> Error (Mach (C_mach.Effects effects))
   in
-  let* code, raw_map, raw_live, _, regs =
+  let* code, raw_map, raw_live, _, regs, results =
     lower_plan image.inputs image.code image.loc image.span
   in
   let* map =
@@ -2001,15 +2897,24 @@ let finish (image : C_mach.t) =
     match image.inputs with
     | [] -> encode_raw ~emission:(wire_emission image.emission) ~veil code
     | inputs ->
-      let* raw = encode_open image.emission veil inputs regs image.typ code in
-      let expected = result_code image.typ code in
+      let* raw =
+        encode_open image.emission veil inputs regs image.typ results code
+      in
+      let scalar =
+        List.for_all (fun bind -> scalar_type bind.C_term.typ) inputs
+        && scalar_type image.typ
+      in
+      let expected = if scalar then result_code image.typ code else Some code in
+      let guarded = not scalar in
       begin
         match decode raw with
         | Ok decoded
             when Some decoded.code = expected
+              && Bool.equal decoded.guarded guarded
               && Array.to_list decoded.inputs
                 = List.map (fun bind -> bind.C_term.typ) inputs
               && decoded.output = Some image.typ
+              && decoded.results = results
               && decoded.emission = Some image.emission
               && decoded.veil = Some (image.veils, image.veil_depth) -> Ok raw
         | Ok _ -> Error Output_code
@@ -2022,6 +2927,7 @@ let finish (image : C_mach.t) =
     code;
     octb;
     typ = image.typ;
+    results;
     result = image.result;
     emission = image.emission;
     veils = image.veils;
@@ -2058,4 +2964,5 @@ let text = function
   | Lmap error -> C_live.text error
   | Effect_map -> "OCTB effect register map differs from static sites"
   | Output error -> "OCTB output refusal reason = " ^ decode_text error
+  | Result_register -> "OCTB result registers must be distinct and below 61"
   | Output_code -> "OCTB output differs after decoding"

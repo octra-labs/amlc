@@ -11,12 +11,14 @@ type op =
   | Negate of int * int
   | Absolute of int * int
   | Same of int * int * int
+  | Different of int * int * int
   | Less of int * int * int
   | Greater of int * int * int
   | Join of int * int * int
   | Minus of int * int * int
   | Size of int * int
   | Slice of int * int * int * int
+  | Cap_close of C_nat.t * int
   | Jump of int
   | Jump_if of int * int
   | Mark of int
@@ -36,6 +38,7 @@ type t = private {
   code : op array;
   octb : string;
   typ : C_type.t;
+  results : int array;
   result : C_emit.lit option;
   emission : C_mach.emission;
   veils : int;
@@ -66,6 +69,7 @@ type decode_error =
   | Trailing_data of int
   | Empty_code
   | Result_header
+  | Schema_invalid
   | Emission_invalid
   | Emission_repeated
   | Veil_invalid
@@ -84,6 +88,7 @@ type error =
   | Lmap of C_live.error
   | Effect_map
   | Output of decode_error
+  | Result_register
   | Output_code
 
 type constant =
@@ -109,6 +114,9 @@ type code_cell = private {
 type image = private {
   inputs : C_type.t array;
   output : C_type.t option;
+  results : int array;
+  guarded : bool;
+  entry : int;
   emission : C_mach.emission option;
   veil : (int * C_nat.t) option;
   consts : const_row array;
@@ -118,6 +126,16 @@ type image = private {
 }
 
 val input_limit : int
+val registers : first:int -> C_mach.shape -> (int list * int, error) result
+val result_regs : int list -> bool
+val label_limit : int
+val dispatch_label : int -> int
+val check_label : int -> int -> int
+val data_label : int -> int
+val guard_label : int -> int
+val body_label : int -> int
+val label_count : int -> bool
+val body_target : int -> int -> int option
 val compile : string -> (t, error) result
 val compile_feed : string -> C_feed.t -> (t, error) result
 val effect_layouts : C_low.prog -> (effect_layout list, error) result

@@ -23,15 +23,16 @@ let value item = item.value
 let encode item = item.raw
 
 let rec plain = function
-  | C_type.Unit | C_type.Bool | C_type.Int | C_type.Bytes _ -> true
-  | C_type.Vec (_, elem) -> plain elem
+  | C_type.Unit | C_type.Bool | C_type.Int | C_type.Num _ | C_type.Bytes _ -> true
+  | C_type.Vec (_, elem) | C_type.Seq (_, elem) -> plain elem
   | C_type.Pair (lhs, rhs) | C_type.Sum (lhs, rhs) ->
     plain lhs && plain rhs
   | C_type.Cap _ | C_type.Enc _ -> false
 
 let root = function
-  | C_type.Unit | C_type.Vec _ | C_type.Pair _ | C_type.Sum _ -> true
-  | C_type.Bool | C_type.Int | C_type.Bytes _ | C_type.Cap _ | C_type.Enc _ ->
+  | C_type.Unit | C_type.Vec _ | C_type.Seq _ | C_type.Pair _ | C_type.Sum _ -> true
+  | C_type.Bool | C_type.Int | C_type.Num _ | C_type.Bytes _
+  | C_type.Cap _ | C_type.Enc _ ->
     false
 
 let bits raw =

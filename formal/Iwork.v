@@ -4,6 +4,7 @@
 From Stdlib Require Import Arith.
 From Stdlib Require Import Bool.
 From Stdlib Require Import Lia.
+From Stdlib Require Import Lists.List.
 From Stdlib Require Import ZArith.ZArith.
 
 Inductive iop : Type :=
@@ -20,6 +21,8 @@ Inductive mode : Type := Prior | Active.
 Inductive answer : Type :=
 | Value : Z -> answer
 | Reject : answer.
+
+Definition item_cap : nat := 1000000.
 
 Fixpoint pbits (value : positive) : nat :=
   match value with
@@ -53,6 +56,13 @@ Definition cost (selected : mode) (op : iop) (left right : Z) : nat :=
   match selected with
   | Prior => fixed op
   | Active => fixed op + variable op left right
+  end.
+
+Fixpoint work_sum (op : iop) (values : list (Z * Z)) : nat :=
+  match values with
+  | nil => 0
+  | (first, second) :: rest =>
+      variable op first second + work_sum op rest
   end.
 
 Definition select (activate : option Z) (epoch : Z) : mode :=
@@ -96,6 +106,23 @@ Qed.
 Lemma fixed_positive : forall op, 0 < fixed op.
 Proof.
   intros []; simpl; lia.
+Qed.
+
+Lemma variable_positive : forall op left right,
+  0 < variable op left right.
+Proof.
+  intros [] left right; unfold variable.
+  - pose proof (cells_positive left).
+    pose proof (Nat.le_max_l (cells left) (cells right)).
+    lia.
+  - pose proof (cells_positive left).
+    pose proof (Nat.le_max_l (cells left) (cells right)).
+    lia.
+  - apply Nat.mul_pos_pos; apply cells_positive.
+  - apply Nat.mul_pos_pos; apply cells_positive.
+  - apply Nat.mul_pos_pos; apply cells_positive.
+  - apply cells_positive.
+  - apply cells_positive.
 Qed.
 
 Theorem cost_at_least_fixed : forall selected op left right,
@@ -206,6 +233,31 @@ Proof.
   - change (3 + cells left * cells right = 3 + cells right * cells left).
     rewrite Nat.mul_comm.
     reflexivity.
+Qed.
+
+Theorem prior_mul_cost : forall left right,
+  cost Prior IMul left right = 3.
+Proof.
+  reflexivity.
+Qed.
+
+Theorem active_mul_covers_cells : forall left right,
+  cells left * cells right < cost Active IMul left right.
+Proof.
+  intros left right.
+  simpl.
+  lia.
+Qed.
+
+Theorem work_sum_covers_count : forall op values,
+  length values <= work_sum op values.
+Proof.
+  intros op values.
+  induction values as [|[first second] rest step].
+  - reflexivity.
+  - simpl.
+    pose proof (variable_positive op first second) as item_positive.
+    lia.
 Qed.
 
 Theorem div_zero : forall left,

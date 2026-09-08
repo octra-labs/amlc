@@ -120,8 +120,7 @@ let resolve_func root value =
   { value with fn_body = block (add_many names root) value.fn_body }
 
 let resolve_form root value =
-  let params = value.fm_caps @ [value.fm_arg] in
-  let names = List.map (fun param -> param.fp_name) params in
+  let names = List.map (fun param -> param.fp_name) value.fm_params in
   { value with fm_body = expr (add_many names root) value.fm_body }
 
 let resolve program =

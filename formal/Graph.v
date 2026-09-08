@@ -4,6 +4,7 @@
 From Stdlib Require Import List.
 From Stdlib Require Import Arith.
 From Stdlib Require Import Bool.
+From Stdlib Require Import Lia.
 From Stdlib Require Import ZArith.
 
 Require Import Lim.
@@ -101,6 +102,127 @@ Definition graph_b (config : cfg) (value : graph) : bool :=
   cfg_b config
     && layers_b_at 0 (glayers value)
     && edges_b config (length (glayers value)) (gedges value).
+
+Definition depth_step (prior : list nat) (value : layer) : nat :=
+  match lrule value with
+  | Base => 0
+  | Prod lhs rhs => S (Nat.max (nth lhs prior 0) (nth rhs prior 0))
+  end.
+
+Fixpoint depth_run (prior : list nat) (peak : nat) (values : list layer)
+    : nat :=
+  match values with
+  | [] => peak
+  | value :: rest =>
+      let depth := depth_step prior value in
+      depth_run (prior ++ [depth]) (Nat.max peak depth) rest
+  end.
+
+Definition mul_depth (values : list layer) : option nat :=
+  if fit (length values) && layers_b_at 0 values
+  then Some (depth_run [] 0 values)
+  else None.
+
+Lemma nth_depth_fit : forall values peak index,
+  Forall (fun value => value <= peak) values -> nth index values 0 <= peak.
+Proof.
+  intros values peak index fit.
+  revert index.
+  induction fit as [|value rest head tail repeat]; intros [|index]; simpl.
+  - lia.
+  - lia.
+  - exact head.
+  - apply repeat.
+Qed.
+
+Lemma depth_step_fit : forall prior peak value,
+  Forall (fun item => item <= peak) prior ->
+  depth_step prior value <= S peak.
+Proof.
+  intros prior peak [tag [|lhs rhs]] fit.
+  - cbn [depth_step lrule].
+    apply Nat.le_0_l.
+  - cbn [depth_step lrule].
+    apply le_n_S.
+    apply Nat.max_lub; apply nth_depth_fit; exact fit.
+Qed.
+
+Lemma depth_extend : forall prior peak value,
+  Forall (fun item => item <= peak) prior ->
+  Forall
+    (fun item => item <= Nat.max peak (depth_step prior value))
+    (prior ++ [depth_step prior value]).
+Proof.
+  intros prior peak value fit.
+  apply Forall_app.
+  split.
+  - eapply Forall_impl.
+    + intros item within.
+      eapply Nat.le_trans.
+      * exact within.
+      * apply Nat.le_max_l.
+    + exact fit.
+  - constructor.
+    + apply Nat.le_max_r.
+    + constructor.
+Qed.
+
+Lemma depth_peak_fit : forall prior peak value,
+  Forall (fun item => item <= peak) prior ->
+  Nat.max peak (depth_step prior value) <= S peak.
+Proof.
+  intros prior peak value fit.
+  apply Nat.max_lub.
+  - apply Nat.le_succ_diag_r.
+  - apply depth_step_fit.
+    exact fit.
+Qed.
+
+Lemma depth_run_fit : forall values prior peak,
+  Forall (fun item => item <= peak) prior ->
+  depth_run prior peak values <= peak + length values.
+Proof.
+  intros values.
+  induction values as [|value rest repeat]; intros prior peak fit; simpl.
+  - lia.
+  - remember (depth_step prior value) as depth.
+    remember (Nat.max peak depth) as next.
+    eapply Nat.le_trans.
+    + apply repeat.
+      subst next depth.
+      apply depth_extend.
+      exact fit.
+    + assert (next <= S peak).
+      {
+        subst next depth.
+        apply depth_peak_fit.
+        exact fit.
+      }
+      lia.
+Qed.
+
+Theorem mul_depth_valid : forall values depth,
+  mul_depth values = Some depth ->
+  fit (length values) = true /\ layers_b_at 0 values = true.
+Proof.
+  intros values depth accepted.
+  unfold mul_depth in accepted.
+  destruct (fit (length values) && layers_b_at 0 values) eqn:valid;
+    try discriminate.
+  apply andb_true_iff in valid.
+  exact valid.
+Qed.
+
+Theorem mul_depth_limit : forall values depth,
+  mul_depth values = Some depth -> depth <= length values.
+Proof.
+  intros values depth accepted.
+  unfold mul_depth in accepted.
+  destruct (fit (length values) && layers_b_at 0 values); try discriminate.
+  inversion accepted; subst.
+  apply depth_run_fit.
+  constructor.
+Qed.
 
 Definition fadd (left right : Z) : Z := Z.modulo (Z.add left right) fprime.
 

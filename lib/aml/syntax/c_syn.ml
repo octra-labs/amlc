@@ -31,8 +31,10 @@ type typ =
   | TUnit
   | TBool
   | TInt
+  | TNum of C_type.sign * Z.t
   | TBytes of Z.t
   | TVec of Z.t * typ
+  | TSeq of Z.t * typ
   | TCap of Z.t
   | TPair of typ * typ
   | TSum of typ * typ
@@ -58,6 +60,7 @@ type t =
   | KInt of Z.t
   | KBytes of string
   | KVec of typ * t list
+  | KSeq of C_nat.t * typ * t list
   | Var of name
   | Let of bind * t * t
   | If of t * t * t
@@ -76,6 +79,9 @@ type t =
   | Mod of t * t
   | Neg of t
   | Abs of t
+  | Fit of typ * t
+  | Wide of t
+  | Length of t
   | Eq of typ * t * t
   | Cmp of rel * t * t
   | Cat of t * t
@@ -116,7 +122,7 @@ let has name term =
       let rest =
         match term with
         | KUnit | KBool _ | KInt _ | KBytes _ | Var _ -> rest
-        | KVec (_, values) -> push values rest
+        | KVec (_, values) | KSeq (_, _, values) -> push values rest
         | Let (_, value, body)
         | Pair (value, body)
         | Add (value, body)
@@ -132,7 +138,8 @@ let has name term =
         | If (guard, yes, no) -> guard :: yes :: no :: rest
         | Unpair (pair, _, _, body) -> pair :: body :: rest
         | Fst value | Snd value | Inl (value, _) | Inr (_, value)
-        | Act (_, value) | Neg value | Abs value | Take (_, value)
+        | Act (_, value) | Neg value | Abs value | Fit (_, value)
+        | Wide value | Length value | Take (_, value)
         | Drop (_, value) | At (_, value)
         | Uncons value | Close value -> value :: rest
         | Case (value, _, yes, _, no) -> value :: yes :: no :: rest

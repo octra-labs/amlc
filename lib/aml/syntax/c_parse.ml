@@ -116,9 +116,10 @@ type cause =
   | Mark_nat of Z.t
   | Mark_dup of string
   | Under_nat of Z.t
+  | Empty
   | Perm of C_perm.error
   | Low of C_low.error
-  | Check of C_check.error
+  | Check of C_check.error * string option
   | Depth of int * int
   | Nodes of int * int
 
@@ -174,7 +175,8 @@ let rec mark_term at term tail =
   match term with
   | C_syn.KUnit | C_syn.KBool _ | C_syn.KInt _ | C_syn.KBytes _
   | C_syn.Var _ -> at :: tail
-  | C_syn.KVec (_, values) -> mark_terms at values (at :: tail)
+  | C_syn.KVec (_, values) | C_syn.KSeq (_, _, values) ->
+      mark_terms at values (at :: tail)
   | C_syn.Let (_, value, body) | C_syn.Unpair (value, _, _, body) ->
       mark_term at value (mark_term at body (at :: tail))
   | C_syn.If (guard, yes, no) ->
@@ -189,7 +191,8 @@ let rec mark_term at term tail =
       mark_term at left (mark_term at right (at :: tail))
   | C_syn.Fst value | C_syn.Snd value | C_syn.Inl (value, _)
   | C_syn.Inr (_, value) | C_syn.Act (_, value) | C_syn.Neg value
-  | C_syn.Abs value | C_syn.Take (_, value)
+  | C_syn.Abs value | C_syn.Fit (_, value) | C_syn.Wide value
+  | C_syn.Length value | C_syn.Take (_, value)
   | C_syn.Drop (_, value) | C_syn.At (_, value) | C_syn.Uncons value
   | C_syn.Close value -> mark_term at value (at :: tail)
   | C_syn.Case (value, _, yes, _, no) ->
@@ -252,7 +255,8 @@ let rec trace_term parent term (marks, origins) =
     match term with
     | C_syn.KUnit | C_syn.KBool _ | C_syn.KInt _ | C_syn.KBytes _
     | C_syn.Var _ -> state
-    | C_syn.KVec (_, values) -> trace_terms at values state
+    | C_syn.KVec (_, values) | C_syn.KSeq (_, _, values) ->
+        trace_terms at values state
     | C_syn.Let (_, value, body) | C_syn.Unpair (value, _, _, body) ->
         trace_term at body (trace_term at value state)
     | C_syn.If (guard, yes, no) ->
@@ -266,7 +270,8 @@ let rec trace_term parent term (marks, origins) =
         trace_term at right (trace_term at left state)
     | C_syn.Fst value | C_syn.Snd value | C_syn.Inl (value, _)
     | C_syn.Inr (_, value) | C_syn.Act (_, value) | C_syn.Neg value
-    | C_syn.Abs value | C_syn.Take (_, value) | C_syn.Drop (_, value)
+    | C_syn.Abs value | C_syn.Fit (_, value) | C_syn.Wide value
+    | C_syn.Length value | C_syn.Take (_, value) | C_syn.Drop (_, value)
     | C_syn.At (_, value) | C_syn.Uncons value | C_syn.Close value ->
         trace_term at value state
     | C_syn.Case (value, _, yes, _, no) ->
@@ -537,6 +542,16 @@ and typ_atom state =
   | C_lex.Unit -> Ok (C_decl.Unit, next state)
   | C_lex.Bool -> Ok (C_decl.Bool, next state)
   | C_lex.Int -> Ok (C_decl.Int, next state)
+  | C_lex.Sint ->
+      let* state = take C_lex.F_lbrack (next state) in
+      let* bits, state = idx state in
+      let* state = take C_lex.F_rbrack state in
+      Ok (C_decl.Num (C_type.Signed, bits), state)
+  | C_lex.Uint ->
+      let* state = take C_lex.F_lbrack (next state) in
+      let* bits, state = idx state in
+      let* state = take C_lex.F_rbrack state in
+      Ok (C_decl.Num (C_type.Unsigned, bits), state)
   | C_lex.Bytes ->
       let* state = take C_lex.F_lbrack (next state) in
       let* len, state = idx state in
@@ -549,6 +564,13 @@ and typ_atom state =
       let* elem, state = typ state in
       let* state = take C_lex.F_rbrack state in
       Ok (C_decl.Vec (len, elem), state)
+  | C_lex.Seq ->
+      let* state = take C_lex.F_lbrack (next state) in
+      let* cap, state = idx state in
+      let* state = take C_lex.F_comma state in
+      let* elem, state = typ state in
+      let* state = take C_lex.F_rbrack state in
+      Ok (C_decl.Seq (cap, elem), state)
   | C_lex.Cap ->
       let* state = take C_lex.F_lbrack (next state) in
       let* kind, state = nat state in
@@ -586,8 +608,9 @@ and typ_atom state =
       let* state = take C_lex.F_rparen state in
       Ok (value, state)
   | _ ->
-      need [C_lex.F_unit; C_lex.F_bool; C_lex.F_int; C_lex.F_bytes;
-        C_lex.F_vec; C_lex.F_cap; C_lex.F_result; C_lex.F_ident;
+      need [C_lex.F_unit; C_lex.F_bool; C_lex.F_int; C_lex.F_sint;
+        C_lex.F_uint; C_lex.F_bytes; C_lex.F_vec; C_lex.F_seq;
+        C_lex.F_cap; C_lex.F_result; C_lex.F_ident;
         C_lex.F_lparen] state
 
 let bind state =
@@ -711,6 +734,33 @@ and vector depth state =
   in
   let* values, state = items [] state in
   put ~first state (C_raw.KVec (raw, values))
+
+and sequence depth state =
+  let first = span state in
+  let* state = take C_lex.F_lbrack (next state) in
+  let* cap, state = idx state in
+  let* state = take C_lex.F_comma state in
+  let* raw, state = typ state in
+  let* state = take C_lex.F_rbrack state in
+  let* state = take C_lex.F_lparen state in
+  let rec items out state =
+    match tok state with
+    | C_lex.Rparen -> Ok (List.rev out, next state)
+    | _ ->
+        let* value, state = raw_expr (depth + 1) state in
+        begin
+          match tok state with
+          | C_lex.Comma -> more (value :: out) (next state)
+          | C_lex.Rparen -> Ok (List.rev (value :: out), next state)
+          | _ -> need [C_lex.F_comma; C_lex.F_rparen] state
+        end
+  and more out state =
+    match tok state with
+    | C_lex.Rparen -> need [C_lex.F_nat; C_lex.F_ident; C_lex.F_lparen] state
+    | _ -> items out state
+  in
+  let* values, state = items [] state in
+  put ~first state (C_raw.KSeq (cap, raw, values))
 
 and let_term depth state =
   let first = span state in
@@ -1000,11 +1050,16 @@ and atom depth state =
             end
       end
   | C_lex.Vec -> vector depth state
+  | C_lex.Seq -> sequence depth state
   | C_lex.Make -> make_term depth state
   | C_lex.Fst -> unary depth (fun value -> C_raw.Fst value) state
   | C_lex.Snd -> unary depth (fun value -> C_raw.Snd value) state
   | C_lex.Uncons -> unary depth (fun value -> C_raw.Uncons value) state
   | C_lex.Abs -> unary depth (fun value -> C_raw.Abs value) state
+  | C_lex.Fit ->
+      typed_unary depth (fun typ value -> C_raw.Fit (typ, value)) state
+  | C_lex.Wide -> unary depth (fun value -> C_raw.Wide value) state
+  | C_lex.Length -> unary depth (fun value -> C_raw.Length value) state
   | C_lex.Cat -> binary depth (fun left right -> C_raw.Cat (left, right)) state
   | C_lex.Vcat -> binary depth (fun left right -> C_raw.Vcat (left, right)) state
   | C_lex.Step -> binary depth (fun cap value -> C_raw.Step (cap, value)) state
@@ -1028,12 +1083,13 @@ and atom depth state =
   | _ ->
       need [C_lex.F_nat; C_lex.F_hex; C_lex.F_true; C_lex.F_false;
         C_lex.F_unit; C_lex.F_ident; C_lex.F_lparen; C_lex.F_vec;
-        C_lex.F_make;
+        C_lex.F_seq; C_lex.F_make;
         C_lex.F_fst; C_lex.F_snd; C_lex.F_equal; C_lex.F_ok;
         C_lex.F_err; C_lex.F_read; C_lex.F_write; C_lex.F_emit;
         C_lex.F_fail; C_lex.F_cat; C_lex.F_take; C_lex.F_drop;
         C_lex.F_vcat; C_lex.F_at; C_lex.F_uncons; C_lex.F_step;
-        C_lex.F_close; C_lex.F_abs] state
+        C_lex.F_close; C_lex.F_abs; C_lex.F_fit; C_lex.F_wide;
+        C_lex.F_length] state
 
 and direct_call depth first name state =
   let* fn =
@@ -1137,15 +1193,26 @@ and order depth state =
   let* left, state = add depth state in
   let rel =
     match tok state with
-    | C_lex.Lt -> Some C_syn.Lt
-    | C_lex.Le -> Some C_syn.Le
-    | C_lex.Gt -> Some C_syn.Gt
-    | C_lex.Ge -> Some C_syn.Ge
+    | C_lex.EqEq -> Some `Eq
+    | C_lex.Ne -> Some `Ne
+    | C_lex.Lt -> Some (`Cmp C_syn.Lt)
+    | C_lex.Le -> Some (`Cmp C_syn.Le)
+    | C_lex.Gt -> Some (`Cmp C_syn.Gt)
+    | C_lex.Ge -> Some (`Cmp C_syn.Ge)
     | _ -> None
   in
   match rel with
   | None -> Ok (left, state)
-  | Some rel ->
+  | Some `Eq ->
+      let* right, state = add (depth + 1) (next state) in
+      put ~first state (C_raw.Eq (C_decl.Int, left, right))
+  | Some `Ne ->
+      let* right, state = add (depth + 1) (next state) in
+      let* same, state =
+        put ~first state (C_raw.Eq (C_decl.Int, left, right))
+      in
+      put ~first state (C_raw.Eq (C_decl.Bool, same, C_raw.KBool false))
+  | Some (`Cmp rel) ->
       let* right, state = add (depth + 1) (next state) in
       put ~first state (C_raw.Cmp (rel, left, right))
 
@@ -2134,6 +2201,11 @@ let parse src =
       let* state = take C_lex.F_program state in
       let* name, state = name (fun value -> Name value) state in
       let* state = take C_lex.F_lbrace state in
+      let* state =
+        match tok state with
+        | C_lex.Rbrace -> Error { cause = Empty; span = span state }
+        | _ -> Ok state
+      in
       let* sizes, inputs, state = heads state in
       let state = { state with sizes } in
       let* inputs, state = decls inputs state in
@@ -2217,9 +2289,10 @@ let lower_base (program : t) =
 
 let rec term_order term tail =
   match term with
-  | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Bytes _
+  | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Narrow _
+  | C_term.Bytes _
   | C_term.Var _ -> term :: tail
-  | C_term.Vec (_, values) ->
+  | C_term.Vec (_, values) | C_term.Seq (_, _, values) ->
     List.fold_left
       (fun out value -> term_order value out)
       (term :: tail) (List.rev values)
@@ -2242,7 +2315,8 @@ let rec term_order term tail =
       (term_order yes (term_order no (term :: tail)))
   | C_term.Fst value | C_term.Snd value | C_term.Inl (value, _)
   | C_term.Inr (_, value) | C_term.Act (_, value) | C_term.Neg value
-  | C_term.Abs value | C_term.Take (_, value) | C_term.Drop (_, value)
+  | C_term.Abs value | C_term.Fit (_, value) | C_term.Wide value
+  | C_term.Length value | C_term.Take (_, value) | C_term.Drop (_, value)
   | C_term.At (_, value) | C_term.Uncons value | C_term.Close value ->
     term_order value (term :: tail)
   | C_term.Case (value, _, yes, _, no) ->
@@ -2272,6 +2346,21 @@ let form_mark program name =
   | Some marks -> marks
   | None -> { seq = []; root = Some program.body_span }
 
+let find_name id names =
+  List.find_map
+    (fun (key, name) -> if C_nat.equal id key then Some name else None)
+    names
+
+let check_cause names error =
+  match error with
+  | C_check.Used id | C_check.Unused id ->
+    Check (error, find_name id names)
+  | _ -> Check (error, None)
+
+let form_names fn =
+  let inputs = fn.C_fun.arr.caps @ [fn.arr.arg] in
+  Option.value ~default:[] (C_low.names inputs fn.body)
+
 let form_error_span program fn error =
   let marks = form_mark program fn.C_fun.name in
   let root = Option.value ~default:program.body_span marks.root in
@@ -2298,8 +2387,13 @@ let rec locate_form_error program prior = function
       match C_fun.def fn with
       | Ok () -> locate_form_error program prior rest
       | Error error ->
+        let cause =
+          match error with
+          | C_fun.Check error -> check_cause (form_names fn) error
+          | _ -> Fun error
+        in
         Error {
-          cause = Fun error;
+          cause;
           span = form_error_span program fn error;
         }
     end
@@ -2312,10 +2406,20 @@ let lower program =
 
 let compile (program : t) =
   let* program_low = lower program in
+  let names =
+    match binds program with
+    | Error _ -> []
+    | Ok inputs ->
+      begin
+        match C_fun.names inputs program.fns program.body with
+        | Ok values -> values
+        | Error _ -> []
+      end
+  in
   match C_check.check_in_located program_low.inputs program_low.term with
   | Error failure ->
     Error {
-      cause = Check failure.error;
+      cause = check_cause names failure.error;
       span = failure_span program program_low.term failure;
     }
   | Ok info ->
@@ -2323,7 +2427,7 @@ let compile (program : t) =
       match C_perm.check_info program.perms info with
       | Ok info -> Ok (program_low, { info with res = res program info.res })
       | Error (C_perm.Check error) ->
-        Error { cause = Check error; span = program.body_span }
+        Error { cause = check_cause names error; span = program.body_span }
       | Error error -> Error { cause = Perm error; span = program.body_span }
     end
 
@@ -2386,9 +2490,11 @@ let text error =
         | Mark_dup value -> "duplicate function mark = " ^ value
         | Under_nat value ->
             "function under outside profile = " ^ Z.to_string value
+        | Empty -> "program body is empty"
         | Perm error -> C_perm.text error
         | Low error -> C_low.text error
-        | Check error -> C_check.text error
+        | Check (error, name) ->
+            C_check.text_named (fun _ -> name) error
         | Depth (limit, actual) ->
             Printf.sprintf "syntax depth limit = %d actual = %d" limit actual
         | Nodes (limit, actual) ->

@@ -60,6 +60,7 @@ let const_of_v = function
   | Contract_vm.VU128 z -> CInt (Z.to_string z)
   | Contract_vm.VU256 z -> CInt (Z.to_string z)
   | Contract_vm.VAddr a -> CAddr a
+  | Contract_vm.VCap _ -> invalid_arg "capability cannot be a constant"
   | Contract_vm.VCipher ct -> CBytes (Bytes.to_string (Pvac_ffi.serialize_cipher ct))
   | Contract_vm.VPubKey pk -> CBytes (Bytes.to_string (Pvac_ffi.serialize_pubkey pk))
 
@@ -355,31 +356,50 @@ let image_veil consts =
   | _ -> failwith "OCTB AML veil is repeated"
 
 let op_tag = function
-  | Contract_vm.ADD _ -> 0x00  | Contract_vm.SUB _ -> 0x01
-  | Contract_vm.MUL _ -> 0x02  | Contract_vm.DIV _ -> 0x03
-  | Contract_vm.MOD _ -> 0x04  | Contract_vm.NEG _ -> 0x05
-  | Contract_vm.ABS _ -> 0x06  | Contract_vm.EQ _ -> 0x07
-  | Contract_vm.LT _ -> 0x08   | Contract_vm.GT _ -> 0x09
-  | Contract_vm.NEQ _ -> 0x0A  | Contract_vm.LDI _ -> 0x0B
-  | Contract_vm.MOV _ -> 0x0C  | Contract_vm.SLOAD _ -> 0x0D
+  | Contract_vm.ADD _ -> 0x00
+  | Contract_vm.SUB _ -> 0x01
+  | Contract_vm.MUL _ -> 0x02
+  | Contract_vm.DIV _ -> 0x03
+  | Contract_vm.MOD _ -> 0x04
+  | Contract_vm.NEG _ -> 0x05
+  | Contract_vm.ABS _ -> 0x06
+  | Contract_vm.EQ _ -> 0x07
+  | Contract_vm.LT _ -> 0x08
+  | Contract_vm.GT _ -> 0x09
+  | Contract_vm.NEQ _ -> 0x0A
+  | Contract_vm.LDI _ -> 0x0B
+  | Contract_vm.MOV _ -> 0x0C
+  | Contract_vm.SLOAD _ -> 0x0D
   | Contract_vm.SSTORE _ -> 0x0E | Contract_vm.SDEL _ -> 0x0F
   | Contract_vm.SLOADK _ -> 0x10 | Contract_vm.SSTOREK _ -> 0x11
   | Contract_vm.SDELK _ -> 0x54
-  | Contract_vm.MLOAD _ -> 0x12  | Contract_vm.MSTORE _ -> 0x13
-  | Contract_vm.JMP _ -> 0x14    | Contract_vm.JIF _ -> 0x15
-  | Contract_vm.JDEST _ -> 0x16  | Contract_vm.STOP -> 0x17
-  | Contract_vm.REVERT -> 0x18   | Contract_vm.CALLER _ -> 0x19
+  | Contract_vm.CAP_CHECK _ -> 0x89
+  | Contract_vm.CAP_CLOSE _ -> 0x8A
+  | Contract_vm.MLOAD _ -> 0x12
+  | Contract_vm.MSTORE _ -> 0x13
+  | Contract_vm.JMP _ -> 0x14
+  | Contract_vm.JIF _ -> 0x15
+  | Contract_vm.JDEST _ -> 0x16
+  | Contract_vm.STOP -> 0x17
+  | Contract_vm.REVERT -> 0x18
+  | Contract_vm.CALLER _ -> 0x19
   | Contract_vm.ORIGIN _ -> 0x1A | Contract_vm.SELF _ -> 0x1B
-  | Contract_vm.EPOCH _ -> 0x1C  | Contract_vm.VALUE _ -> 0x1D
+  | Contract_vm.EPOCH _ -> 0x1C
+  | Contract_vm.VALUE _ -> 0x1D
   | Contract_vm.EPOCH_TIME _ -> 0x7B
   | Contract_vm.BALANCE _ -> 0x1E | Contract_vm.TREEHASH _ -> 0x1F
-  | Contract_vm.NODEID _ -> 0x20  | Contract_vm.XCALL _ -> 0x21
+  | Contract_vm.NODEID _ -> 0x20
+  | Contract_vm.XCALL _ -> 0x21
   | Contract_vm.TXHASH _ -> 0x7A
-  | Contract_vm.SPAWN _ -> 0x22   | Contract_vm.TRANSFER _ -> 0x23
+  | Contract_vm.SPAWN _ -> 0x22
+  | Contract_vm.TRANSFER _ -> 0x23
   | Contract_vm.CHECKPOINT -> 0x24 | Contract_vm.ROLLBACK -> 0x25
-  | Contract_vm.COMMIT -> 0x26    | Contract_vm.EMIT _ -> 0x27
-  | Contract_vm.CONCAT _ -> 0x28  | Contract_vm.ASSERT _ -> 0x29
-  | Contract_vm.EFFORT _ -> 0x2A  | Contract_vm.NOP -> 0x2B
+  | Contract_vm.COMMIT -> 0x26
+  | Contract_vm.EMIT _ -> 0x27
+  | Contract_vm.CONCAT _ -> 0x28
+  | Contract_vm.ASSERT _ -> 0x29
+  | Contract_vm.EFFORT _ -> 0x2A
+  | Contract_vm.NOP -> 0x2B
   | Contract_vm.STRLEN _ -> 0x2C
   | Contract_vm.CALL_INT _ -> 0x2D
   | Contract_vm.MLOADR _ -> 0x2E
@@ -410,17 +430,24 @@ let op_tag = function
   | Contract_vm.SSTOREN _ -> 0x4E
   | Contract_vm.FSTORE _ -> 0x4F
   | Contract_vm.FLOAD _ -> 0x50
-  | Contract_vm.FHE_LOAD_PK _ -> 0x30 | Contract_vm.FHE_ADD _ -> 0x31
-  | Contract_vm.FHE_SUB _ -> 0x32     | Contract_vm.FHE_SCALE _ -> 0x33
+  | Contract_vm.FHE_LOAD_PK _ -> 0x30
+  | Contract_vm.FHE_ADD _ -> 0x31
+  | Contract_vm.FHE_SUB _ -> 0x32
+  | Contract_vm.FHE_SCALE _ -> 0x33
   | Contract_vm.FHE_ADD_CONST _ -> 0x34 | Contract_vm.FHE_SUB_CONST _ -> 0x35
   | Contract_vm.FHE_VERIFY_ZERO _ -> 0x36 | Contract_vm.FHE_VERIFY_RANGE _ -> 0x37
   | Contract_vm.FHE_VERIFY_BOUND _ -> 0x38 | Contract_vm.FHE_COMMIT _ -> 0x39
-  | Contract_vm.FHE_PEDERSEN _ -> 0x3A | Contract_vm.FHE_SER _ -> 0x3B
-  | Contract_vm.FHE_DESER _ -> 0x3C   | Contract_vm.FHE_SER_PK _ -> 0x3D
+  | Contract_vm.FHE_PEDERSEN _ -> 0x3A
+  | Contract_vm.FHE_SER _ -> 0x3B
+  | Contract_vm.FHE_DESER _ -> 0x3C
+  | Contract_vm.FHE_SER_PK _ -> 0x3D
   | Contract_vm.FHE_DESER_PK _ -> 0x3E
   | Contract_vm.GROTH16_VERIFY_BN254 _ -> 0x3F
   | Contract_vm.FHE_MUL _ -> 0x5B
   | Contract_vm.FHE_DIV_CONST _ -> 0x5C
+  | Contract_vm.FHE_PEDERSEN_ADD _ -> 0x5D
+  | Contract_vm.FHE_PEDERSEN_SUB _ -> 0x5E
+  | Contract_vm.FHE_PEDERSEN_IDENTITY _ -> 0x5F
   | Contract_vm.MATMUL _ -> 0x60
   | Contract_vm.VECDOT _ -> 0x61
   | Contract_vm.EXP_LUT _ -> 0x62
@@ -496,6 +523,10 @@ let encode_instr buf pool instr =
     put_u16le buf (Pool.intern pool (CStr k))
   | Contract_vm.SDELK r ->
     put_u8 buf r
+  | Contract_vm.CAP_CHECK (kind, reg)
+  | Contract_vm.CAP_CLOSE (kind, reg) ->
+    put_u16le buf (Pool.intern pool (CInt (Z.to_string kind)));
+    put_u8 buf reg
   | Contract_vm.MLOAD (d,idx) ->
     put_u8 buf d; put_u16le buf idx
   | Contract_vm.MSTORE (idx,s) ->
@@ -525,8 +556,13 @@ let encode_instr buf pool instr =
     put_u8 buf d; put_u8 buf pk; put_u8 buf a; put_u8 buf b
   | Contract_vm.FHE_VERIFY_BOUND (d,pk,ct,pf,cm) ->
     put_u8 buf d; put_u8 buf pk; put_u8 buf ct; put_u8 buf pf; put_u8 buf cm
-  | Contract_vm.FHE_COMMIT (d,pk,ct) | Contract_vm.FHE_PEDERSEN (d,pk,ct) ->
+  | Contract_vm.FHE_COMMIT (d,pk,ct)
+  | Contract_vm.FHE_PEDERSEN (d,pk,ct)
+  | Contract_vm.FHE_PEDERSEN_ADD (d,pk,ct)
+  | Contract_vm.FHE_PEDERSEN_SUB (d,pk,ct) ->
     put_u8 buf d; put_u8 buf pk; put_u8 buf ct
+  | Contract_vm.FHE_PEDERSEN_IDENTITY d ->
+    put_u8 buf d
   | Contract_vm.FHE_LOAD_PK (d,s) | Contract_vm.FHE_SER (d,s)
   | Contract_vm.FHE_DESER (d,s) | Contract_vm.FHE_SER_PK (d,s)
   | Contract_vm.FHE_DESER_PK (d,s) ->
@@ -651,7 +687,7 @@ let encode_instr buf pool instr =
   | Contract_vm.CHECKPOINT | Contract_vm.ROLLBACK
   | Contract_vm.COMMIT | Contract_vm.NOP -> ()
 
-let encode ?state ?proof ?emission ?veil instrs =
+let encode ?(active = true) ?state ?proof ?emission ?veil instrs =
   let pool = Pool.create () in
   Option.iter
     (fun rows -> ignore (Pool.intern pool (CStr (state_encode rows))))
@@ -668,7 +704,7 @@ let encode ?state ?proof ?emission ?veil instrs =
   let instr_buf = Buffer.create 1024 in
   Array.iter (encode_instr instr_buf pool) instrs;
   let consts = Pool.to_list pool in
-  if List.length consts > max_consts then
+  if active && List.length consts > max_consts then
     invalid_arg "constant count exceeds capacity";
   let buf = Buffer.create 2048 in
   Buffer.add_string buf magic;
@@ -740,6 +776,16 @@ let decode_instr s pos consts pc =
   | 0x10 -> (Contract_vm.SLOADK (get_u8 s p, get_u8 s (p+1)), p+2)
   | 0x11 -> (Contract_vm.SSTOREK (get_u8 s p, get_u8 s (p+1)), p+2)
   | 0x54 -> (Contract_vm.SDELK (get_u8 s p), p+1)
+  | 0x89 | 0x8A ->
+    let ci = get_u16le s p in
+    let kind =
+      match v_of_const (const_at pc consts ci) with
+      | Contract_vm.VInt value -> value
+      | _ -> Z.minus_one
+    in
+    let reg = get_u8 s (p+2) in
+    if tag = 0x89 then Contract_vm.CAP_CHECK (kind, reg), p+3
+    else Contract_vm.CAP_CLOSE (kind, reg), p+3
   | 0x12 -> (Contract_vm.MLOAD (get_u8 s p, get_u16le s (p+1)), p+3)
   | 0x13 -> (Contract_vm.MSTORE (get_u16le s p, get_u8 s (p+2)), p+3)
   | 0x14 -> (Contract_vm.JMP (get_u32le s p), p+4)
@@ -795,6 +841,9 @@ let decode_instr s pos consts pc =
   | 0x3F -> (Contract_vm.GROTH16_VERIFY_BN254 (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2), get_u8 s (p+3)), p+4)
   | 0x5B -> (Contract_vm.FHE_MUL (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2), get_u8 s (p+3)), p+4)
   | 0x5C -> (Contract_vm.FHE_DIV_CONST (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2), get_u8 s (p+3)), p+4)
+  | 0x5D -> (Contract_vm.FHE_PEDERSEN_ADD (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2)), p+3)
+  | 0x5E -> (Contract_vm.FHE_PEDERSEN_SUB (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2)), p+3)
+  | 0x5F -> (Contract_vm.FHE_PEDERSEN_IDENTITY (get_u8 s p), p+1)
   | 0x40 -> (Contract_vm.PARSE_INTS (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2)), p+3)
   | 0x41 -> (Contract_vm.ISADDR (get_u8 s p, get_u8 s (p+1)), p+2)
   | 0x56 -> (Contract_vm.STATE_PATH_KEY (get_u8 s p, get_u8 s (p+1)), p+2)

@@ -65,12 +65,14 @@ let rec type_order left right =
     | C_type.Unit -> 0
     | C_type.Bool -> 1
     | C_type.Int -> 2
-    | C_type.Bytes _ -> 3
-    | C_type.Vec _ -> 4
-    | C_type.Cap _ -> 5
-    | C_type.Enc _ -> 6
-    | C_type.Pair _ -> 7
-    | C_type.Sum _ -> 8
+    | C_type.Num _ -> 3
+    | C_type.Bytes _ -> 4
+    | C_type.Vec _ -> 5
+    | C_type.Seq _ -> 6
+    | C_type.Cap _ -> 7
+    | C_type.Enc _ -> 8
+    | C_type.Pair _ -> 9
+    | C_type.Sum _ -> 10
   in
   let order = Int.compare (tag left) (tag right) in
   if order <> 0 then order
@@ -79,12 +81,18 @@ let rec type_order left right =
     | C_type.Unit, C_type.Unit
     | C_type.Bool, C_type.Bool
     | C_type.Int, C_type.Int -> 0
+    | C_type.Num (ls, lb), C_type.Num (rs, rb) ->
+        let order = compare ls rs in
+        if order = 0 then C_nat.compare lb rb else order
     | C_type.Bytes lhs, C_type.Bytes rhs
     | C_type.Cap lhs, C_type.Cap rhs -> C_nat.compare lhs rhs
     | C_type.Enc (lk, lr), C_type.Enc (rk, rr) ->
         let order = C_nat.compare lk rk in
         if order = 0 then C_nat.compare lr rr else order
     | C_type.Vec (ln, lhs), C_type.Vec (rn, rhs) ->
+        let order = C_nat.compare ln rn in
+        if order = 0 then type_order lhs rhs else order
+    | C_type.Seq (ln, lhs), C_type.Seq (rn, rhs) ->
         let order = C_nat.compare ln rn in
         if order = 0 then type_order lhs rhs else order
     | C_type.Pair (la, lb), C_type.Pair (ra, rb)
@@ -152,6 +160,9 @@ let rec typ env = function
   | C_decl.Vec (len, elem) ->
       let* elem = typ env elem in
       Ok (C_decl.Vec (len, elem))
+  | C_decl.Seq (cap, elem) ->
+      let* elem = typ env elem in
+      Ok (C_decl.Seq (cap, elem))
   | C_decl.Pair (left, right) ->
       let* left = typ env left in
       let* right = typ env right in
@@ -160,7 +171,7 @@ let rec typ env = function
       let* good = typ env good in
       let* bad = typ env bad in
       Ok (C_decl.Result (good, bad))
-  | (C_decl.Unit | C_decl.Bool | C_decl.Int | C_decl.Bytes _
+  | (C_decl.Unit | C_decl.Bool | C_decl.Int | C_decl.Num _ | C_decl.Bytes _
     | C_decl.Cap _ | C_decl.Exact _) as value -> Ok value
 
 let bind env (item : C_raw.bind) =
@@ -176,6 +187,10 @@ let rec term env = function
       let* raw = typ env raw in
       let* values = terms env [] values in
       Ok (C_raw.KVec (raw, values))
+  | C_raw.KSeq (cap, raw, values) ->
+      let* raw = typ env raw in
+      let* values = terms env [] values in
+      Ok (C_raw.KSeq (cap, raw, values))
   | C_raw.Var name -> Ok (C_raw.Var name)
   | C_raw.Let (item, value, body) ->
       let* item = bind env item in
@@ -247,6 +262,16 @@ let rec term env = function
   | C_raw.Abs value ->
       let* value = term env value in
       Ok (C_raw.Abs value)
+  | C_raw.Fit (raw, value) ->
+      let* raw = typ env raw in
+      let* value = term env value in
+      Ok (C_raw.Fit (raw, value))
+  | C_raw.Wide value ->
+      let* value = term env value in
+      Ok (C_raw.Wide value)
+  | C_raw.Length value ->
+      let* value = term env value in
+      Ok (C_raw.Length value)
   | C_raw.Eq (raw, left, right) ->
       let* raw = typ env raw in
       let* left = term env left in

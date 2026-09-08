@@ -26,12 +26,14 @@ Inductive kind : Type :=
 | KNegate
 | KAbsolute
 | KSame
+| KDifferent
 | KLess
 | KGreater
 | KJoin
 | KMinus
 | KSize
 | KSlice
+| KCapClose
 | KJump
 | KJumpIf
 | KMark
@@ -53,6 +55,7 @@ Fixpoint kinds (value : Mach.code) : list kind :=
   | Mach.Negate rest => KNegate :: kinds rest
   | Mach.Absolute rest => KAbsolute :: kinds rest
   | Mach.Same rest => KSame :: kinds rest
+  | Mach.Different rest => KDifferent :: kinds rest
   | Mach.Order RLt rest => KLess :: kinds rest
   | Mach.Order RLe rest => KGreater :: KLoad :: KSame :: kinds rest
   | Mach.Order RGt rest => KGreater :: kinds rest
@@ -63,6 +66,7 @@ Fixpoint kinds (value : Mach.code) : list kind :=
   | Mach.Duo rest | Mach.First rest | Mach.Second rest | Mach.Cons rest
   | Mach.Append rest | Mach.Pick _ rest | Mach.Unhead rest => kinds rest
   | Mach.Left rest | Mach.Right rest => KLoad :: kinds rest
+  | Mach.CloseCap _ rest => KCapClose :: kinds rest
   | Mach.Effect _ body rest => KNoop :: kinds body ++ kinds rest
   | Mach.Scope _ body rest => kinds body ++ kinds rest
   | Mach.Scope2 _ _ body rest => kinds body ++ kinds rest

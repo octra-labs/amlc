@@ -10,13 +10,14 @@ type core = {
   typ : C_syn.typ;
   nodes : int;
   depth : int;
+  calls : int;
 }
 
 type checked = {
   fn : C_fun.fn;
   nodes : int;
   arity : int;
-  depth : int;
+  calls : int;
   direct : bool;
 }
 
@@ -39,15 +40,38 @@ let located line column reason =
 let fn_error value reason =
   located (Oct_types.block_line value.fn_body) 1 reason
 
+let find_name names id =
+  List.find_map
+    (fun (key, name) -> if C_nat.equal id key then Some name else None)
+    names
+
+let check_text inputs term error =
+  let names = Option.value ~default:[] (C_low.names inputs term) in
+  C_check.text_named (find_name names) error
+
+let function_text fn = function
+  | C_fun.Check error ->
+    let inputs = fn.C_fun.arr.caps @ [fn.arr.arg] in
+    check_text inputs fn.body error
+  | error -> C_fun.text error
+
 let syn_name line column value =
   match C_syn.name value with
   | Some found -> Ok found
   | None -> Error (located line column ("name is invalid = " ^ value))
 
-let typ line column = function
+let rec typ line column = function
+  | TVoid -> Ok C_syn.TUnit
   | TInt -> Ok C_syn.TInt
   | TBool -> Ok C_syn.TBool
   | TBytes32 -> Ok (C_syn.TBytes (Z.of_int 32))
+  | TU64 -> Ok (C_syn.TNum (C_type.Unsigned, Z.of_int 64))
+  | TU128 -> Ok (C_syn.TNum (C_type.Unsigned, Z.of_int 128))
+  | TU256 -> Ok (C_syn.TNum (C_type.Unsigned, Z.of_int 256))
+  | TTuple [left; right] ->
+    let* left = typ line column left in
+    let* right = typ line column right in
+    Ok (C_syn.TPair (left, right))
   | value ->
     Error
       (located line column
@@ -74,11 +98,30 @@ let within_limit (value : core) =
       ("direct form node limit = " ^ string_of_int C_check.max_nodes
         ^ " actual = " ^ string_of_int value.nodes)
 
-let node term typ nodes depth = within_limit { term; typ; nodes; depth }
+let node term typ nodes depth calls =
+  within_limit { term; typ; nodes; depth; calls }
+
+let finite term typ calls =
+  match C_fin.stat term with
+  | Ok value ->
+    within_limit { term; typ; nodes = value.nodes; depth = value.depth; calls }
+  | Error (C_fin.Nodes actual) ->
+    Error
+      ("direct form node limit = " ^ string_of_int C_check.max_nodes
+        ^ " actual = " ^ Z.to_string actual)
+  | Error (C_fin.Depth actual) ->
+    Error
+      ("direct form depth limit = " ^ string_of_int C_check.max_depth
+        ^ " actual = " ^ string_of_int actual)
 
 let max_depth values =
   List.fold_left
     (fun depth (value : core) -> Int.max depth value.depth)
+    0 values
+
+let max_calls values =
+  List.fold_left
+    (fun calls (value : core) -> Int.max calls value.calls)
     0 values
 
 let find_local value env =
@@ -106,7 +149,7 @@ let find_entry program name =
       | None -> Error ("direct form function is absent = " ^ name)
     end
 
-let form_params value = value.fm_caps @ [value.fm_arg]
+let form_params value = value.fm_params
 
 let pure_params value =
   List.map
@@ -145,7 +188,7 @@ let rec build program trail cache name =
   else
     match List.assoc_opt name cache with
     | Some value ->
-      let actual = List.length trail + value.depth in
+      let actual = List.length trail + value.calls in
       if actual <= Contract_vm.call_depth_max then Ok (value, cache)
       else
         Error
@@ -203,13 +246,13 @@ let rec build program trail cache name =
     let* () =
       match C_fun.def fn with
       | Ok () -> Ok ()
-      | Error error -> Error (located line column (C_fun.text error))
+      | Error error -> Error (located line column (function_text fn error))
     in
     let item = {
       fn;
       nodes = body.nodes;
       arity = List.length params;
-      depth = body.depth + 1;
+      calls = body.calls + 1;
       direct = C_fun.direct fn;
     } in
     Ok (item, (name, item) :: cache)
@@ -242,6 +285,7 @@ and flow program trail cache env owner =
             node (C_syn.If (guard.term, yes.term, no.term)) yes.typ
               (guard.nodes + yes.nodes + no.nodes + 1)
               (max_depth [guard; yes; no])
+              (max_calls [guard; yes; no])
           in
           Ok (value, cache)
         | _ ->
@@ -275,6 +319,7 @@ and flow program trail cache env owner =
             node (C_syn.Let (bind, input.term, body.term)) body.typ
               (input.nodes + body.nodes + 1)
               (Int.max input.depth body.depth)
+              (Int.max input.calls body.calls)
           in
           Ok (value, cache)
         | SIf (guard, yes, None) ->
@@ -293,6 +338,7 @@ and flow program trail cache env owner =
             node (C_syn.If (guard.term, yes.term, no.term)) yes.typ
               (guard.nodes + yes.nodes + no.nodes + 1)
               (max_depth [guard; yes; no])
+              (max_calls [guard; yes; no])
           in
           Ok (value, cache)
         | _ ->
@@ -312,7 +358,7 @@ and expr program trail cache env value =
     let* input, cache = expr program trail cache env input in
     let* () = same expected input.typ result in
     let* value =
-      node (make input.term) expected (input.nodes + 1) input.depth
+      node (make input.term) expected (input.nodes + 1) input.depth input.calls
     in
     Ok (value, cache)
   in
@@ -324,6 +370,7 @@ and expr program trail cache env value =
     let* value =
       node (make left.term right.term) expected
         (left.nodes + right.nodes + 1) (Int.max left.depth right.depth)
+        (Int.max left.calls right.calls)
     in
     Ok (value, cache)
   in
@@ -336,6 +383,7 @@ and expr program trail cache env value =
     let* value =
       node (C_syn.Cmp (rel, left.term, right.term)) C_syn.TBool
         (left.nodes + right.nodes + 1) (Int.max left.depth right.depth)
+        (Int.max left.calls right.calls)
     in
     Ok (value, cache)
   in
@@ -347,14 +395,128 @@ and expr program trail cache env value =
   in
   match value with
   | EInt value ->
-    Ok ({ term = C_syn.KInt value; typ = C_syn.TInt; nodes = 1; depth = 0 }, cache)
+    Ok ({ term = C_syn.KInt value; typ = C_syn.TInt;
+      nodes = 1; depth = 0; calls = 0 }, cache)
   | EBool value ->
-    Ok ({ term = C_syn.KBool value; typ = C_syn.TBool; nodes = 1; depth = 0 }, cache)
+    Ok ({ term = C_syn.KBool value; typ = C_syn.TBool;
+      nodes = 1; depth = 0; calls = 0 }, cache)
+  | EString _ -> Error "direct form text requires finite bytes"
+  | ECaller -> Error "direct form context requires function wrapper = caller"
+  | EOrigin -> Error "direct form context requires function wrapper = origin"
+  | ESelfAddr ->
+    Error "direct form context requires function wrapper = self_addr"
+  | EEpoch -> Error "direct form context requires function wrapper = epoch"
+  | EEpochTime ->
+    Error "direct form context requires function wrapper = epoch_time"
+  | EValue -> Error "direct form context requires function wrapper = value"
+  | EBalance _ ->
+    Error "direct form context requires function wrapper = balance"
+  | ETreeHash ->
+    Error "direct form context requires function wrapper = tree_hash"
+  | ENodeId -> Error "direct form context requires function wrapper = node_id"
+  | ETxHash -> Error "direct form context requires function wrapper = tx_hash"
+  | EField _
+  | EIndex _
+  | EStoragePath _
+  | EFieldProp _
+  | EIndexField _ -> Error "direct form state requires a proved effect"
+  | EArray _ -> Error "direct form list requires a finite sequence"
+  | ETuple [left; right] ->
+    let* left, cache = expr program trail cache env left in
+    let* right, cache = expr program trail cache env right in
+    let typ = C_syn.TPair (left.typ, right.typ) in
+    let* value =
+      node (C_syn.Pair (left.term, right.term)) typ
+        (left.nodes + right.nodes + 1) (Int.max left.depth right.depth)
+        (Int.max left.calls right.calls)
+    in
+    Ok (value, cache)
+  | EEqual (declared, left, right) ->
+    let* declared = typ 0 1 declared in
+    let* left, cache = expr program trail cache env left in
+    let* right, cache = expr program trail cache env right in
+    let* () = same declared left.typ "direct form equality left type differs" in
+    let* () = same declared right.typ "direct form equality right type differs" in
+    let* value =
+      node (C_syn.Eq (declared, left.term, right.term)) C_syn.TBool
+        (left.nodes + right.nodes + 1) (Int.max left.depth right.depth)
+        (Int.max left.calls right.calls)
+    in
+    Ok (value, cache)
+  | ELet (name, mode, declared, input, body) ->
+    let* input, cache = expr program trail cache env input in
+    let* declared = typ 0 1 declared in
+    let* () =
+      same declared input.typ "direct form local type differs"
+    in
+    let* key = syn_name 0 1 name in
+    let bind = C_syn.bind key (mul mode) declared in
+    let* body, cache =
+      expr program trail cache ((name, key, declared) :: env) body
+    in
+    let term = C_syn.Let (bind, input.term, body.term) in
+    let* value = finite term body.typ (Int.max input.calls body.calls) in
+    Ok (value, cache)
+  | ESplit (pair, (left_name, left_mode, left_type),
+      (right_name, right_mode, right_type), body) ->
+    let* pair, cache = expr program trail cache env pair in
+    let* left_type = typ 0 1 left_type in
+    let* right_type = typ 0 1 right_type in
+    let* () =
+      same (C_syn.TPair (left_type, right_type)) pair.typ
+        "direct form split type differs"
+    in
+    let* left_key = syn_name 0 1 left_name in
+    let* right_key = syn_name 0 1 right_name in
+    let left = C_syn.bind left_key (mul left_mode) left_type in
+    let right = C_syn.bind right_key (mul right_mode) right_type in
+    let next =
+      (right_name, right_key, right_type)
+      :: (left_name, left_key, left_type)
+      :: env
+    in
+    let* body, cache = expr program trail cache next body in
+    let term = C_syn.Unpair (pair.term, left, right, body.term) in
+    let* value = finite term body.typ (Int.max pair.calls body.calls) in
+    Ok (value, cache)
+  | EOrbit (count, turns, seed, (name, mode, declared), body) ->
+    let* seed, cache = expr program trail cache env seed in
+    let* declared = typ 0 1 declared in
+    let* () = same declared seed.typ "direct form orbit seed type differs" in
+    let* key = syn_name 0 1 name in
+    let bind = C_syn.bind key (mul mode) declared in
+    let* body, cache =
+      expr program trail cache ((name, key, declared) :: env) body
+    in
+    let* term, count_value, cache =
+      match turns with
+      | None ->
+        begin
+          match C_orbit.make count seed.term bind body.term with
+          | Ok term -> Ok (term, None, cache)
+          | Error error -> Error (C_orbit.text error)
+        end
+      | Some turns ->
+        let* turns, cache = expr program trail cache env turns in
+        let* () = same C_syn.TInt turns.typ "direct form orbit count requires int" in
+        begin
+          match C_orbit.upto count turns.term seed.term bind body.term with
+          | Ok term -> Ok (term, Some turns, cache)
+          | Error error -> Error (C_orbit.text error)
+        end
+    in
+    let calls =
+      Option.fold ~none:(Int.max seed.calls body.calls)
+        ~some:(fun turns -> max_calls [turns; seed; body]) count_value
+    in
+    let* value = finite term declared calls in
+    Ok (value, cache)
   | EVar value ->
     begin
       match find_local value env with
       | Some (_, name, typ) ->
-        Ok ({ term = C_syn.Var name; typ; nodes = 1; depth = 0 }, cache)
+        Ok ({ term = C_syn.Var name; typ;
+          nodes = 1; depth = 0; calls = 0 }, cache)
       | None -> Error ("direct form variable is absent = " ^ value)
     end
   | EBinop (Add, left, right) ->
@@ -389,6 +551,7 @@ and expr program trail cache env value =
     let* value =
       node term C_syn.TBool (left.nodes + right.nodes + extra)
         (Int.max left.depth right.depth)
+        (Int.max left.calls right.calls)
     in
     Ok (value, cache)
   | EBinop (And, left, right) ->
@@ -401,6 +564,7 @@ and expr program trail cache env value =
     let* value =
       node term C_syn.TBool (left.nodes + right.nodes + 2)
         (Int.max left.depth right.depth)
+        (Int.max left.calls right.calls)
     in
     Ok (value, cache)
   | EBinop (Or, left, right) ->
@@ -413,6 +577,7 @@ and expr program trail cache env value =
     let* value =
       node term C_syn.TBool (left.nodes + right.nodes + 2)
         (Int.max left.depth right.depth)
+        (Int.max left.calls right.calls)
     in
     Ok (value, cache)
   | EUnop (Neg, input) ->
@@ -432,13 +597,14 @@ and expr program trail cache env value =
       node (C_syn.If (guard.term, yes.term, no.term)) yes.typ
         (guard.nodes + yes.nodes + no.nodes + 1)
         (max_depth [guard; yes; no])
+        (max_calls [guard; yes; no])
     in
     Ok (value, cache)
   | EAction (atom, input) ->
     let* input, cache = expr program trail cache env input in
     let* value =
       node (C_syn.Act (syn_atom atom, input.term)) input.typ
-        (input.nodes + 1) input.depth
+        (input.nodes + 1) input.depth input.calls
     in
     Ok (value, cache)
   | ECall ("abs", [input]) when not (declared program "abs") ->
@@ -465,7 +631,8 @@ and expr program trail cache env value =
     in
     let values =
       if target.arity = 0 then
-        [{ term = C_syn.KUnit; typ = C_syn.TUnit; nodes = 1; depth = 0 }]
+        [{ term = C_syn.KUnit; typ = C_syn.TUnit;
+          nodes = 1; depth = 0; calls = 0 }]
       else values
     in
     let nodes =
@@ -490,7 +657,8 @@ and expr program trail cache env value =
       term;
       typ = target.fn.C_fun.arr.out;
       nodes;
-      depth = Int.max target.depth (max_depth values);
+      depth = max_depth values;
+      calls = Int.max target.calls (max_calls values);
     }, cache)
   | EUse value ->
     let* () =
@@ -541,7 +709,8 @@ and expr program trail cache env value =
     in
     let* result =
       node (C_syn.Let (bind, used, body.term)) body.typ nodes
-        (Int.max target.depth (Int.max body.depth (max_depth values)))
+        (Int.max body.depth (max_depth values))
+        (Int.max target.calls (Int.max body.calls (max_calls values)))
     in
     Ok (result, cache)
   | _ -> Error "direct form expression is unsupported"
@@ -566,10 +735,19 @@ let strict program line column values term =
   let* value, _ = expr program [] [] env term in
   Ok (binds, value)
 
-let host_typ = function
+let rec host_typ = function
   | C_syn.TInt -> Some TInt
   | C_syn.TBool -> Some TBool
   | C_syn.TBytes size when Z.equal size (Z.of_int 32) -> Some TBytes32
+  | C_syn.TNum (C_type.Unsigned, bits) when Z.equal bits (Z.of_int 64) ->
+    Some TU64
+  | C_syn.TNum (C_type.Unsigned, bits) when Z.equal bits (Z.of_int 128) ->
+    Some TU128
+  | C_syn.TNum (C_type.Unsigned, bits) when Z.equal bits (Z.of_int 256) ->
+    Some TU256
+  | C_syn.TPair (left, right) ->
+    Option.bind (host_typ left) (fun left ->
+      Option.map (fun right -> TTuple [left; right]) (host_typ right))
   | _ -> None
 
 let rec host_infer program values = function
@@ -650,6 +828,34 @@ let rec host_infer program values = function
           (fun typ -> tuple (typ :: out) rest)
     in
     tuple [] items
+  | EEqual _ -> Some TBool
+  | ELet (name, _, declared, input, body) ->
+    begin
+      match host_infer program values input with
+      | Some actual when Oct_types.compatible declared actual ->
+        host_infer program ((name, declared) :: values) body
+      | Some _ | None -> None
+    end
+  | ESplit (_, (left, _, left_typ), (right, _, right_typ), body) ->
+    host_infer program
+      ((right, right_typ) :: (left, left_typ) :: values)
+      body
+  | EOrbit (_, turns, seed, (name, _, declared), body) ->
+    begin
+      let turns_ok =
+        Option.fold ~none:true
+          ~some:(fun value -> host_infer program values value = Some TInt)
+          turns
+      in
+      match host_infer program values seed with
+      | Some actual when turns_ok && Oct_types.compatible declared actual ->
+        begin
+          match host_infer program ((name, declared) :: values) body with
+          | Some actual when Oct_types.compatible declared actual -> Some declared
+          | Some _ | None -> None
+        end
+      | Some _ | None -> None
+    end
   | ETernary (_, yes, no) ->
     begin
       match host_infer program values yes, host_infer program values no with
@@ -671,7 +877,7 @@ let infer program line column values term =
   | Ok (_, value) -> host_typ value.typ
   | Error _ -> host_infer program values term
 
-let check_use program line column values term =
+let check_term program line column values term =
   let* binds, value = strict program line column values term in
   let* program =
     match C_low.prog binds value.term with
@@ -680,10 +886,12 @@ let check_use program line column values term =
   in
   match C_check.check_in program.inputs program.term with
   | Ok _ -> Ok ()
-  | Error error -> Error (located line column (C_check.text error))
+  | Error error ->
+    Error (located line column (check_text binds value.term error))
 
 let rec check_expr program line column values = function
-  | EUse _ as term -> check_use program line column values term
+  | (EUse _ | EEqual _ | ELet _ | ESplit _ | EOrbit _) as term ->
+    check_term program line column values term
   | EAction _ -> Error "effect atoms are available only in form bodies"
   | EIndex (_, keys)
   | ECall (_, keys)
@@ -817,20 +1025,23 @@ let check_func program value =
 let lower_param value =
   { p_name = value.fp_name; p_typ = value.fp_typ; p_refine = None }
 
-let view_atom = function
+let view_atom public = function
   | C_eff.Write _ | C_eff.Close _ -> false
-  | C_eff.Read _ | C_eff.Emit _ | C_eff.Fail _ -> true
+  | C_eff.Emit _ -> not public
+  | C_eff.Read _ | C_eff.Fail _ -> true
 
 let lower value =
   {
     fn_name = value.fm_name;
     fn_params = List.map lower_param (form_params value);
     fn_ret = value.fm_ret;
-    fn_view = List.for_all (fun item -> view_atom item.mk_atom) value.fm_marks;
+    fn_view =
+      List.for_all (fun item -> view_atom value.fm_public item.mk_atom)
+        value.fm_marks;
     fn_pure = value.fm_marks = [];
     fn_payable = false;
     fn_nonreentrant = false;
-    fn_vis = Internal;
+    fn_vis = if value.fm_public then Public else Internal;
     fn_body = [SLocated (value.fm_line, value.fm_column,
       SReturn (Some value.fm_body))];
   }
@@ -908,12 +1119,24 @@ let rec refs_expr program (forms, calls) = function
   | ETuple values
   | EStoragePath (_, values, _)
   | EIndexField (_, values, _) -> refs_exprs program (forms, calls) values
+  | EEqual (_, left, right)
   | EBinop (_, left, right) ->
     refs_expr program (refs_expr program (forms, calls) left) right
   | ETernary (guard, yes, no) ->
     let found = refs_expr program (forms, calls) guard in
     let found = refs_expr program found yes in
     refs_expr program found no
+  | ELet (_, _, _, value, body) ->
+    refs_expr program (refs_expr program (forms, calls) value) body
+  | ESplit (value, _, _, body) ->
+    refs_expr program (refs_expr program (forms, calls) value) body
+  | EOrbit (_, turns, seed, _, body) ->
+    let found =
+      Option.fold ~none:(forms, calls)
+        ~some:(refs_expr program (forms, calls)) turns
+    in
+    let found = refs_expr program found seed in
+    refs_expr program found body
   | EInt _
   | EBool _
   | EString _
@@ -1086,6 +1309,22 @@ let link program =
   else
     let forms = program.forms in
     let* () = unique program in
+    let marked_pair =
+      List.find_opt
+        (fun value ->
+          value.fm_public
+          && value.fm_marks <> []
+          && match value.fm_ret with TTuple _ -> true | _ -> false)
+        forms
+    in
+    let* () =
+      match marked_pair with
+      | Some value ->
+        Error
+          (located value.fm_line value.fm_column
+            "public main effect result has no proved ABI = tuple")
+      | None -> Ok ()
+    in
     let rec check cache = function
       | [] -> Ok cache
       | value :: rest ->

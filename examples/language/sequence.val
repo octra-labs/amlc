@@ -1,0 +1,1 @@
+feed { amounts = seq(1, 2, 3) }

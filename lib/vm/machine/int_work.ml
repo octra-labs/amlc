@@ -5,6 +5,9 @@ type op = Add | Sub | Mul | Div | Mod | Neg | Abs
 type mode = Prior | Active
 type answer = Value of Z.t | Reject
 
+let consensus_id = "cells_64_product_cap_1000000"
+let item_cap = 1_000_000
+
 let bits value = Int.max 1 (Z.numbits value)
 
 let cells value =
@@ -22,8 +25,8 @@ let variable op left right =
   | Mul | Div | Mod -> Z.mul left right
   | Neg | Abs -> left
 
-let cost mode op left right =
-  let base = Z.of_int (fixed op) in
+let cost ?base mode op left right =
+  let base = Option.value ~default:(fixed op) base |> Z.of_int in
   match mode with
   | Prior -> base
   | Active -> Z.add base (variable op left right)

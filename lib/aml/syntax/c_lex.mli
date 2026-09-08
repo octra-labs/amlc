@@ -46,8 +46,11 @@ type token =
   | Unit
   | Bool
   | Int
+  | Sint
+  | Uint
   | Bytes
   | Vec
+  | Seq
   | Cap
   | Result
   | Res
@@ -67,6 +70,9 @@ type token =
   | Fst
   | Snd
   | Equal
+  | Fit
+  | Wide
+  | Length
   | Read
   | Write
   | Emit
@@ -103,6 +109,8 @@ type token =
   | Colon
   | Comma
   | Eq
+  | EqEq
+  | Ne
   | Lt
   | Le
   | Gt
@@ -147,8 +155,11 @@ type form =
   | F_unit
   | F_bool
   | F_int
+  | F_sint
+  | F_uint
   | F_bytes
   | F_vec
+  | F_seq
   | F_cap
   | F_result
   | F_res
@@ -168,6 +179,9 @@ type form =
   | F_fst
   | F_snd
   | F_equal
+  | F_fit
+  | F_wide
+  | F_length
   | F_read
   | F_write
   | F_emit
@@ -204,6 +218,8 @@ type form =
   | F_colon
   | F_comma
   | F_eq
+  | F_eqeq
+  | F_ne
   | F_lt
   | F_le
   | F_gt

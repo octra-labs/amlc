@@ -1,0 +1,8 @@
+program Batch {
+  input once amounts: seq[32, uint[64]]
+  term
+    fold amounts from (0, 0) with
+      many amount: uint[64], once state: int * int =>
+        split state as once n: int, once sum: int in
+          (n + 1, wide(amount) + sum)
+}

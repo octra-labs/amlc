@@ -51,6 +51,7 @@ type error =
   | Need_bytes
   | Need_vec
   | Need_cap
+  | Need_seq
   | Byte_index of C_nat.t * C_nat.t
   | Vec_index of C_nat.t * C_nat.t
   | Input of C_term.id
@@ -107,15 +108,84 @@ let rec equal left right =
     equal left right
   | _ -> false
 
+let array_for_all test values =
+  let rec walk index =
+    index = Array.length values
+    || test index values.(index) && walk (index + 1)
+  in
+  walk 0
+
+let rec zero = function
+  | C_type.Unit -> Some Unit
+  | C_type.Bool -> Some (Bool false)
+  | C_type.Int | C_type.Num _ -> Some (Int Z.zero)
+  | C_type.Bytes len -> Some (Bytes (String.make (C_nat.to_int len) '\000'))
+  | C_type.Vec (len, elem) ->
+    Option.map
+      (fun value -> Vec (Array.make (C_nat.to_int len) value))
+      (zero elem)
+  | C_type.Seq (cap, elem) ->
+    Option.map
+      (fun value -> Pair (Int Z.zero, Vec (Array.make (C_nat.to_int cap) value)))
+      (zero elem)
+  | C_type.Pair (left, right) ->
+    Option.bind (zero left) (fun left ->
+      Option.map (fun right -> Pair (left, right)) (zero right))
+  | C_type.Sum (left, right) ->
+    begin
+      match zero left with
+      | Some value -> Some (Inl value)
+      | None -> Option.map (fun value -> Inr value) (zero right)
+    end
+  | C_type.Cap _ | C_type.Enc _ -> None
+
+let rec typed typ value =
+  match typ, value with
+  | C_type.Unit, Unit | C_type.Bool, Bool _ | C_type.Int, Int _ -> true
+  | C_type.Num _, Int value -> C_type.admits typ value
+  | C_type.Bytes len, Bytes value ->
+    C_nat.to_int len = String.length value
+  | C_type.Vec (len, elem), Vec values ->
+    C_nat.to_int len = Array.length values && Array.for_all (typed elem) values
+  | C_type.Seq (cap, elem), Pair (Int len, Vec values) ->
+    let count = Array.length values in
+    let high = C_nat.to_z cap in
+    if count <> C_nat.to_int cap || Z.sign len < 0 || Z.gt len high then false
+    else
+      begin
+        match zero elem with
+        | None -> false
+        | Some empty ->
+          let used = Z.to_int len in
+          array_for_all
+            (fun index value -> typed elem value && (index < used || equal value empty))
+            values
+      end
+  | C_type.Cap kind, Cap (actual, id) ->
+    C_nat.equal kind actual && C_nat.valid id
+  | C_type.Enc (key, rem), Enc (actual_key, actual_rem, _) ->
+    C_nat.equal key actual_key && C_nat.equal rem actual_rem
+  | C_type.Pair (left_type, right_type), Pair (left, right) ->
+    typed left_type left && typed right_type right
+  | C_type.Sum (left, _), Inl value -> typed left value
+  | C_type.Sum (_, right), Inr value -> typed right value
+  | _ -> false
+
 let rec value_work typ value =
   match typ, value with
   | C_type.Unit, Unit | C_type.Bool, Bool _ | C_type.Int, Int _
   | C_type.Cap _, Cap _ | C_type.Enc _, Enc _ -> Z.one
+  | C_type.Num _, Int _ -> Z.one
   | C_type.Bytes _, Bytes value -> Z.succ (Z.of_int (String.length value))
   | C_type.Vec (_, elem), Vec values ->
     Array.fold_left
       (fun work value -> Z.add work (value_work elem value))
       Z.one
+      values
+  | C_type.Seq (_, elem), Pair (Int _, Vec values) ->
+    Array.fold_left
+      (fun work value -> Z.add work (value_work elem value))
+      (Z.of_int 2)
       values
   | C_type.Pair (left_ty, right_ty), Pair (left, right) ->
     Z.succ (Z.add (value_work left_ty left) (value_work right_ty right))
@@ -218,6 +288,7 @@ let trace_list trace =
 
 let atoms actions = List.map (fun action -> action.atom) actions
 let direct atom payload = { atom; payload; origin = Direct }
+let held atom payload kind id = { atom; payload; origin = Held (kind, id) }
 
 let item value = { value; trace = Nil; steps = Z.one; work = Z.one }
 
@@ -296,6 +367,8 @@ let input_value (bind : C_term.bind) caps value =
         match typ, value with
         | C_type.Unit, Unit | C_type.Bool, Bool _ | C_type.Int, Int _ ->
           walk (nodes + 1) caps rest
+        | C_type.Num _, Int value when C_type.admits typ value ->
+          walk (nodes + 1) caps rest
         | C_type.Bytes len, Bytes value ->
           begin
             match C_nat.of_int (String.length value) with
@@ -314,6 +387,28 @@ let input_value (bind : C_term.bind) caps value =
                   rest
               in
               walk (nodes + 1) caps rest
+            | _ -> bad ()
+          end
+        | C_type.Seq (cap, elem), Pair (Int len, Vec values) ->
+          let count = Array.length values in
+          let high = C_nat.to_z cap in
+          begin
+            match zero elem with
+            | Some empty when count = C_nat.to_int cap
+                && Z.sign len >= 0 && Z.leq len high ->
+              let used = Z.to_int len in
+              if array_for_all
+                  (fun index value -> index < used || equal value empty)
+                  values
+              then
+                let rest =
+                  Array.fold_right
+                    (fun value rest -> (next, elem, value) :: rest)
+                    values
+                    rest
+                in
+                walk (nodes + 1) caps rest
+              else bad ()
             | _ -> bad ()
           end
         | C_type.Cap kind, Cap (actual, id)
@@ -343,8 +438,35 @@ let rec eval env term =
   | C_term.Unit -> Ok (item Unit)
   | C_term.Bool value -> Ok (item (Bool value))
   | C_term.Int value -> Ok (item (Int value))
+  | C_term.Narrow (typ, value) ->
+    if C_type.admits typ value then Ok (item (Int value))
+    else Error Need_int
   | C_term.Bytes value -> bytes value
   | C_term.Vec (_, values) -> eval_vec env values
+  | C_term.Seq (cap, elem, values) ->
+    let count = List.length values in
+    if count > C_nat.to_int cap then
+      begin
+        match C_nat.of_int count with
+        | Some actual -> Error (Vec_index (actual, cap))
+        | None -> Error Need_seq
+      end
+    else
+      let* active = eval_vec env values in
+      begin
+        match active.value, zero elem with
+        | Vec items, Some empty ->
+          let full = Array.make (C_nat.to_int cap) empty in
+          Array.blit items 0 full 0 count;
+          let extra = Z.of_int (C_nat.to_int cap - count + 1) in
+          Ok {
+            active with
+            value = Pair (Int (Z.of_int count), Vec full);
+            steps = Z.add active.steps extra;
+            work = Z.add active.work extra;
+          }
+        | _ -> Error Need_seq
+      end
   | C_term.Var id ->
     let* value = get id env in
     Ok (item value)
@@ -498,6 +620,36 @@ let rec eval env term =
           steps = Z.succ value.steps; work = Z.succ value.work }
       | _ -> Error Need_int
     end
+  | C_term.Fit (target, value) ->
+    let* value = eval env value in
+    begin
+      match value.value with
+      | Int number ->
+        let result =
+          if C_type.admits target number then Inl value.value else Inr value.value
+        in
+        Ok { value with value = result; steps = Z.succ value.steps;
+          work = Z.add value.work (Z.of_int 12) }
+      | _ -> Error Need_int
+    end
+  | C_term.Wide value ->
+    let* value = eval env value in
+    begin
+      match value.value with
+      | Int _ ->
+        Ok { value with steps = Z.succ value.steps; work = Z.succ value.work }
+      | _ -> Error Need_int
+    end
+  | C_term.Length value ->
+    let* value = eval env value in
+    begin
+      match value.value with
+      | Pair (Int len, Vec items)
+          when Z.sign len >= 0 && Z.leq len (Z.of_int (Array.length items)) ->
+        Ok { value with value = Int len; steps = Z.succ value.steps;
+          work = Z.succ value.work }
+      | _ -> Error Need_seq
+    end
   | C_term.Eq (typ, left, right) ->
     let* left = eval env left in
     let* right = eval env right in
@@ -610,6 +762,13 @@ let rec eval env term =
         let steps = Z.succ (Z.add vector.steps seed.steps) in
         let work = Z.succ (Z.add vector.work seed.work) in
         eval_fold env fold values 0 seed.value trace steps work
+      | Pair (Int len, Vec values)
+          when Z.sign len >= 0 && Z.leq len (Z.of_int (Array.length values)) ->
+        let trace = cat vector.trace seed.trace in
+        let steps = Z.succ (Z.add vector.steps seed.steps) in
+        let work = Z.succ (Z.add vector.work seed.work) in
+        eval_fold env fold (Array.sub values 0 (Z.to_int len)) 0 seed.value
+          trace steps work
       | _ -> Error Need_vec
     end
   | C_term.Step (cap, value) ->
@@ -754,6 +913,7 @@ let text = function
   | Need_bytes -> "value expected = bytes"
   | Need_vec -> "value expected = vec"
   | Need_cap -> "value expected = cap"
+  | Need_seq -> "value expected = sequence"
   | Byte_index (len, total) ->
     "byte index = " ^ C_nat.text len ^ " size = " ^ C_nat.text total
   | Vec_index (index, total) ->

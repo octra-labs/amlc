@@ -67,6 +67,17 @@ type host =
   | Hmul of host * host * enc
   | Hre of host * enc
 
+type ins =
+  | Load of C_syn.name * enc
+  | Narrow of C_nat.t * enc
+  | Add_cipher of enc
+  | Mul_cipher of enc
+  | Recrypt_cipher of enc
+
+type pending =
+  | Visit of host
+  | Emit of ins
+
 type trace =
   | Nil
   | Atom of op
@@ -462,6 +473,80 @@ let host_check profile env term =
   match host_eval profile env term with
   | Some typ -> same typ (host_type term)
   | None -> false
+
+let emit term =
+  let rec walk out = function
+    | [] -> List.rev out
+    | Emit op :: rest -> walk (op :: out) rest
+    | Visit (Harg (name, typ)) :: rest -> walk (Load (name, typ) :: out) rest
+    | Visit (Htrim (rem, body, typ)) :: rest ->
+        walk out (Visit body :: Emit (Narrow (rem, typ)) :: rest)
+    | Visit (Hadd (left, right, typ)) :: rest ->
+        walk out
+          (Visit left :: Visit right :: Emit (Add_cipher typ) :: rest)
+    | Visit (Hmul (left, right, typ)) :: rest ->
+        walk out
+          (Visit left :: Visit right :: Emit (Mul_cipher typ) :: rest)
+    | Visit (Hre (body, typ)) :: rest ->
+        walk out (Visit body :: Emit (Recrypt_cipher typ) :: rest)
+  in
+  walk [] [Visit term]
+
+let step profile env op stack =
+  match op, stack with
+  | Load (name, out), _ ->
+      begin
+        match Smap.find_opt (C_syn.name_text name) env with
+        | Some typ when same typ out -> Some (out :: stack)
+        | _ -> None
+      end
+  | Narrow (rem, out), prior :: rest when C_nat.le rem prior.rem ->
+      begin
+        match Pmap.find_opt prior.key profile with
+        | Some _ ->
+            let typ = { prior with rem } in
+            if same typ out then Some (out :: rest) else None
+        | None -> None
+      end
+  | Add_cipher out, right :: left :: rest when same left right ->
+      begin
+        match Pmap.find_opt left.key profile with
+        | Some _ when same left out -> Some (out :: rest)
+        | _ -> None
+      end
+  | Mul_cipher out, right :: left :: rest
+      when same left right && not (C_nat.equal left.rem C_nat.zero) ->
+      begin
+        match Pmap.find_opt left.key profile, C_nat.sub left.rem C_nat.one with
+        | Some _, Some rem ->
+            let typ = { left with rem } in
+            if same typ out then Some (out :: rest) else None
+        | _, _ -> None
+      end
+  | Recrypt_cipher out, prior :: rest when C_nat.equal prior.rem C_nat.zero ->
+      begin
+        match Pmap.find_opt prior.key profile with
+        | Some cfg ->
+            let typ = { prior with rem = cfg.full } in
+            if same typ out then Some (out :: rest) else None
+        | None -> None
+      end
+  | _, _ -> None
+
+let rec exec profile env code stack =
+  match code with
+  | [] -> Some stack
+  | op :: rest ->
+      begin
+        match step profile env op stack with
+        | Some next -> exec profile env rest next
+        | None -> None
+      end
+
+let emit_check profile env term =
+  match exec profile env (emit term) [] with
+  | Some [typ] -> same typ (host_type term)
+  | Some _ | None -> false
 
 let host profile env term =
   let* () = shape term in

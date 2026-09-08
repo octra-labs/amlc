@@ -5,9 +5,11 @@ type typ =
   | Unit
   | Bool
   | Int
+  | Num of C_type.sign * C_idx.t
   | Var of C_syn.name
   | Bytes of C_idx.t
   | Vec of C_idx.t * typ
+  | Seq of C_idx.t * typ
   | Cap of Z.t
   | Pair of typ * typ
   | Result of typ * typ
@@ -56,11 +58,13 @@ let shape typ =
         begin
           match typ with
           | Unit | Bool | Int | Var _ | Exact _ -> walk (nodes + 1) rest
+          | Num _ -> walk (nodes + 1) rest
           | Bytes _ -> walk (nodes + 1) rest
           | Cap kind ->
               let* _ = nat kind in
               walk (nodes + 1) rest
           | Vec (_, elem) -> walk (nodes + 1) ((next, elem) :: rest)
+          | Seq (_, elem) -> walk (nodes + 1) ((next, elem) :: rest)
           | Pair (left, right) | Result (left, right) ->
               walk (nodes + 1) ((next, left) :: (next, right) :: rest)
         end
@@ -71,6 +75,9 @@ let rec lower env = function
   | Unit -> Ok C_syn.TUnit
   | Bool -> Ok C_syn.TBool
   | Int -> Ok C_syn.TInt
+  | Num (sign, index) ->
+      let* bits = Result.map_error (fun error -> Idx error) (C_idx.eval env index) in
+      Ok (C_syn.TNum (sign, C_nat.to_z bits))
   | Var name -> Error (Name (C_syn.name_text name))
   | Bytes index ->
       let* len = Result.map_error (fun error -> Idx error) (C_idx.eval env index) in
@@ -79,6 +86,10 @@ let rec lower env = function
       let* len = Result.map_error (fun error -> Idx error) (C_idx.eval env index) in
       let* elem = lower env elem in
       Ok (C_syn.TVec (C_nat.to_z len, elem))
+  | Seq (index, elem) ->
+      let* cap = Result.map_error (fun error -> Idx error) (C_idx.eval env index) in
+      let* elem = lower env elem in
+      Ok (C_syn.TSeq (C_nat.to_z cap, elem))
   | Cap kind ->
       let* kind = nat kind in
       Ok (C_syn.TCap (C_nat.to_z kind))
@@ -104,10 +115,12 @@ let res typ =
   let rec walk = function
     | [] -> false
     | C_syn.TUnit :: rest | C_syn.TBool :: rest | C_syn.TInt :: rest
+    | C_syn.TNum _ :: rest
     | C_syn.TBytes _ :: rest -> walk rest
     | C_syn.TCap _ :: _ -> true
     | C_syn.TVec (len, _) :: rest when Z.equal len Z.zero -> walk rest
-    | C_syn.TVec (_, elem) :: rest -> walk (elem :: rest)
+    | C_syn.TVec (_, elem) :: rest | C_syn.TSeq (_, elem) :: rest ->
+        walk (elem :: rest)
     | C_syn.TPair (left, right) :: rest | C_syn.TSum (left, right) :: rest ->
         walk (left :: right :: rest)
   in

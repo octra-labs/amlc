@@ -57,8 +57,10 @@ let input index reg typ next =
       Contract_vm.JDEST label;
     ], next)
   | C_type.Unit
+  | C_type.Num _
   | C_type.Bytes _
   | C_type.Vec _
+  | C_type.Seq _
   | C_type.Pair _
   | C_type.Sum _
   | C_type.Cap _
@@ -90,8 +92,10 @@ let output typ next =
       Contract_vm.STOP;
     ], next)
   | C_type.Unit
+  | C_type.Num _
   | C_type.Bytes _
   | C_type.Vec _
+  | C_type.Seq _
   | C_type.Pair _
   | C_type.Sum _
   | C_type.Cap _

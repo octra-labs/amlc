@@ -55,5 +55,6 @@ val edge :
 
 val graph : layer list -> edge list -> graph
 val valid : cfg -> graph -> bool
+val mul_depth : graph -> (C_nat.t, error) result
 val norm : cfg -> graph -> (info, error) result
 val text : error -> string

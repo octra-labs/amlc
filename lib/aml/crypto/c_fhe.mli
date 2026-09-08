@@ -36,6 +36,13 @@ type host = private
   | Hmul of host * host * enc
   | Hre of host * enc
 
+type ins = private
+  | Load of C_syn.name * enc
+  | Narrow of C_nat.t * enc
+  | Add_cipher of enc
+  | Mul_cipher of enc
+  | Recrypt_cipher of enc
+
 type info = private {
   typ : enc;
   steps : C_nat.t;
@@ -100,6 +107,8 @@ val host : profile -> env -> t -> (host, error) result
 val host_type : host -> enc
 val host_term : host -> t
 val host_check : profile -> env -> host -> bool
+val emit : host -> ins list
+val emit_check : profile -> env -> host -> bool
 
 val check : profile -> env -> t -> (info, error) result
 val enc_text : enc -> string

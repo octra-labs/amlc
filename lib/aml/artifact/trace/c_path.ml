@@ -11,12 +11,14 @@ type kind =
   | Negate
   | Absolute
   | Same
+  | Different
   | Less
   | Greater
   | Join
   | Minus
   | Size
   | Slice
+  | Cap_close
   | Jump
   | Jump_if
   | Mark
@@ -65,12 +67,14 @@ let kind = function
   | C_octb.Negate _ -> Negate
   | C_octb.Absolute _ -> Absolute
   | C_octb.Same _ -> Same
+  | C_octb.Different _ -> Different
   | C_octb.Less _ -> Less
   | C_octb.Greater _ -> Greater
   | C_octb.Join _ -> Join
   | C_octb.Minus _ -> Minus
   | C_octb.Size _ -> Size
   | C_octb.Slice _ -> Slice
+  | C_octb.Cap_close _ -> Cap_close
   | C_octb.Jump _ -> Jump
   | C_octb.Jump_if _ -> Jump_if
   | C_octb.Mark _ -> Mark
@@ -92,9 +96,15 @@ let source source =
 
 let finish (info : C_check.info) (artifact : C_octb.t) (out : C_eval.out) =
   let* result =
-    match artifact.result with
+    match C_mach.literal info.typ out.value with
     | Some value -> Ok value
     | None -> Error Run
+  in
+  let* () =
+    match artifact.result with
+    | Some value when C_mach.equal value result -> Ok ()
+    | None -> Ok ()
+    | Some _ -> Error Run
   in
   let size = Array.length artifact.code in
   if C_smap.length artifact.map <> size then Error Map
@@ -146,6 +156,32 @@ let make_feed source_text feed =
   in
   let* out =
     match C_eval.run_in pairs lowered.term with
+    | Ok value -> Ok value
+    | Error _ -> Error Run
+  in
+  finish info artifact out
+
+let make_in source_text values =
+  let* lowered, info = source source_text in
+  let rec attach inputs values =
+    match inputs, values with
+    | [], [] -> Some []
+    | input :: inputs, value :: values ->
+      Option.map (fun rest -> (input, value) :: rest) (attach inputs values)
+    | [], _ :: _ | _ :: _, [] -> None
+  in
+  let* values =
+    match attach lowered.C_low.inputs values with
+    | Some value -> Ok value
+    | None -> Error Run
+  in
+  let* artifact =
+    match C_octb.compile source_text with
+    | Ok value -> Ok value
+    | Error _ -> Error Machine
+  in
+  let* out =
+    match C_eval.run_in values lowered.term with
     | Ok value -> Ok value
     | Error _ -> Error Run
   in

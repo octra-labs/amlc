@@ -22,10 +22,12 @@ type frame = {
 type outcome = {
   stop : stop;
   result : Contract_vm.v;
+  regs : Contract_vm.v array;
   effort : int;
   steps : int;
   storage : (string * string) list;
   events : Contract_vm.event_record list;
+  closes : Contract_vm.cap list;
   frames : frame list;
 }
 
@@ -34,10 +36,15 @@ type error =
   | Duplicate_storage of string
   | Invalid_step_cap
   | Program_counter of int
+  | Grant_count of int * int
+  | Grant_repeat
+  | Grant of Z.t * Z.t * Z.t
+  | Session of C_sess.error
 
 val config :
   ?storage:(string * string) list ->
   ?storage_kinds:(string * Contract_vm.storage_kind) list ->
+  ?strict_values:bool ->
   ?caller:string ->
   ?origin:string ->
   ?address:string ->
@@ -51,6 +58,7 @@ val config :
   ?tx_hash:string ->
   ?view:bool ->
   ?byte_result:Contract_vm.byte_result ->
+  ?grants:Contract_vm.cap list ->
   method_name:string ->
   args:Contract_vm.v list ->
   unit ->
@@ -68,6 +76,14 @@ val run_at :
   entry:int ->
   Contract_vm.instr array ->
   (outcome, error) result
+
+val grants : C_sess.state -> C_sess.token list -> Contract_vm.v list option
+val grant : C_sess.state -> C_sess.token -> Contract_vm.v option
+val settle :
+  C_sess.state ->
+  C_sess.token list ->
+  outcome ->
+  (C_sess.state * C_sess.token list, error) result
 
 val value_text : Contract_vm.v -> string
 val stop_text : stop -> string

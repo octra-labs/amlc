@@ -19,4 +19,6 @@ type prog = {
 val term : C_syn.t -> (C_term.t, error) result
 val typ : C_syn.typ -> (C_type.t, error) result
 val prog : C_syn.bind list -> C_syn.t -> (prog, error) result
+val names :
+  C_syn.bind list -> C_syn.t -> (C_term.id * string) list option
 val text : error -> string

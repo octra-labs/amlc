@@ -42,6 +42,94 @@ let active_work code cap =
 
 let same_work expected actual = Z.equal (Z.of_int expected) actual
 
+let square_code count =
+  Array.init
+    (count + 2)
+    (fun index ->
+      if index = 0 then Native.LDI (0, Native.VInt (Z.of_int 2))
+      else if index <= count then Native.MUL (0, 0, 0)
+      else Native.STOP)
+
+let math_state ctx code cap =
+  let state =
+    Native.create_state
+      ~ctx
+      ~limit:cap
+      ~strict_values:true
+      ~caller:"caller"
+      ~origin:"caller"
+      ~address:"program"
+      ~value:Z.zero
+      ~storage:(Hashtbl.create 1)
+      ()
+  in
+  Native.run state code, state
+
+let square_state ctx count cap =
+  math_state ctx (square_code count) cap
+
+let vector_square_code count =
+  Array.init
+    ((count * 2) + 6)
+    (fun index ->
+      if index = 0 then Native.LDI (0, Native.VInt (Z.of_int 2))
+      else if index = 1 then Native.MSTORE (0, 0)
+      else if index = 2 || index = 3 then
+        Native.LDI (index - 1, Native.VInt Z.zero)
+      else if index = 4 then Native.LDI (3, Native.VInt Z.one)
+      else if index = (count * 2) + 5 then Native.STOP
+      else if (index - 5) mod 2 = 0 then Native.VECDOT (0, 1, 2, 3)
+      else Native.MSTORE (0, 0))
+
+let vector_square_state ctx count cap =
+  math_state ctx (vector_square_code count) cap
+
+let matrix_cap_code = [|
+  Native.LDI (0, Native.VInt Z.zero);
+  Native.LDI (1, Native.VInt Z.zero);
+  Native.LDI (2, Native.VInt Z.zero);
+  Native.LDI (3, Native.VInt (Z.of_int 1001));
+  Native.LDI (4, Native.VInt (Z.of_int 1000));
+  Native.LDI (5, Native.VInt Z.one);
+  Native.MATMUL (0, 1, 2, 3, 4, 5);
+  Native.STOP;
+|]
+
+let load_cap_code = [|
+  Native.LDI (0, Native.VInt Z.zero);
+  Native.LDI (1, Native.VString (String.make 1_000_001 'x'));
+  Native.LDI (2, Native.VInt Z.zero);
+  Native.LDI (3, Native.VInt (Z.of_int 1_000_001));
+  Native.LDI (4, Native.VInt Z.one);
+  Native.LOAD_INT8_BYTES_TO_MEM (0, 1, 2, 3, 4);
+  Native.STOP;
+|]
+
+let overlap_code = [|
+  Native.LDI (0, Native.VInt Z.one);
+  Native.LDI (1, Native.VInt Z.zero);
+  Native.LDI (2, Native.VInt (Z.of_int 2));
+  Native.LDI (3, Native.VInt (Z.of_int 131_072));
+  Native.MSTORE (0, 3);
+  Native.LDI (3, Native.VInt (Z.of_int 196_608));
+  Native.MSTORE (1, 3);
+  Native.LDI (3, Native.VInt (Z.of_int 262_144));
+  Native.MSTORE (2, 3);
+  Native.ELEMWISE_MUL_INPLACE (0, 1, 2);
+  Native.STOP;
+|]
+
+let square_bits name expected state =
+  match state.Native.regs.(0) with
+  | Native.VInt value ->
+    if Z.numbits value <> expected then fail (name ^ " integer width")
+  | _ -> fail (name ^ " result type")
+
+let memory_int name state index expected =
+  match Hashtbl.find_opt state.Native.memory.data index with
+  | Some (Native.VInt value) when Z.equal value expected -> ()
+  | _ -> fail (name ^ " memory value")
+
 let native raw cap =
   let image =
     match Bytecode.decode_image raw with
@@ -201,4 +289,53 @@ let () =
     | Ok (), used when same_work 15 used -> ()
     | _ -> fail "integer work acceptance"
   end;
-  Printf.printf "aml_profile = pass cases = 19\n"
+  if not
+      (Z.equal
+        (Octra_vm.Int_work.cost ~base:17 Octra_vm.Int_work.Prior
+          Octra_vm.Int_work.Mul cell cell)
+        (Z.of_int 17))
+  then fail "prior opcode work";
+  if not
+      (Z.equal
+        (Octra_vm.Int_work.cost ~base:17 Octra_vm.Int_work.Active
+          Octra_vm.Int_work.Mul cell cell)
+        (Z.of_int 26))
+  then fail "active opcode work";
+  let base_ok, base_state = square_state Native.default_ctx 4 1000 in
+  if not base_ok || base_state.effort_used <> 14 then
+    fail "base integer work";
+  square_bits "base integer work" 17 base_state;
+  let active_ctx = { Native.default_ctx with int_work = Octra_vm.Int_work.Active } in
+  let active_ok, active_state = square_state active_ctx 33 1_000_000 in
+  if active_ok || not active_state.reverted
+      || active_state.effort_used <> 351_636 then
+    fail "active integer work";
+  square_bits "active integer work" 65_537 active_state;
+  let base_ok, base_state = vector_square_state Native.default_ctx 4 1000 in
+  if not base_ok || base_state.effort_used <> 60 then
+    fail "base vector work";
+  square_bits "base vector work" 17 base_state;
+  let active_ok, active_state =
+    vector_square_state active_ctx 33 1_000_000
+  in
+  if active_ok || not active_state.reverted
+      || active_state.effort_used <> 351_812 then
+    fail "active vector work";
+  square_bits "active vector work" 65_537 active_state;
+  let active_ok, active_state = math_state active_ctx matrix_cap_code 1_000_000 in
+  if active_ok || not active_state.reverted
+      || active_state.effort_used <> 1083 then
+    fail "active matrix item cap";
+  let active_ok, active_state = math_state active_ctx load_cap_code 2_000_000 in
+  if active_ok || not active_state.reverted
+      || active_state.effort_used <> 500_015 then
+    fail "active loader item cap";
+  let base_ok, base_state = math_state Native.default_ctx overlap_code 1000 in
+  if not base_ok || base_state.effort_used <> 22 then
+    fail "base overlap work";
+  memory_int "base overlap" base_state 2 (Z.of_int 1_572_864);
+  let active_ok, active_state = math_state active_ctx overlap_code 1000 in
+  if not active_ok || active_state.effort_used <> 24 then
+    fail "active overlap work";
+  memory_int "active overlap" active_state 2 (Z.of_int 786_432);
+  Printf.printf "aml_profile = pass cases = 27\n"

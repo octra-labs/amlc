@@ -6,6 +6,7 @@ type config = {
   args : Contract_vm.v list;
   storage : (string * string) list;
   storage_kinds : (string * Contract_vm.storage_kind) list;
+  strict_values : bool;
   caller : string;
   origin : string;
   address : string;
@@ -19,6 +20,7 @@ type config = {
   tx_hash : string;
   view : bool;
   byte_result : Contract_vm.byte_result;
+  grants : Contract_vm.cap list;
 }
 
 type stop =
@@ -40,10 +42,12 @@ type frame = {
 type outcome = {
   stop : stop;
   result : Contract_vm.v;
+  regs : Contract_vm.v array;
   effort : int;
   steps : int;
   storage : (string * string) list;
   events : Contract_vm.event_record list;
+  closes : Contract_vm.cap list;
   frames : frame list;
 }
 
@@ -52,6 +56,10 @@ type error =
   | Duplicate_storage of string
   | Invalid_step_cap
   | Program_counter of int
+  | Grant_count of int * int
+  | Grant_repeat
+  | Grant of Z.t * Z.t * Z.t
+  | Session of C_sess.error
 
 let local_address =
   "oct11111111111111111111111111111111111111111111"
@@ -59,6 +67,7 @@ let local_address =
 let config
     ?(storage = [])
     ?(storage_kinds = [])
+    ?(strict_values = true)
     ?(caller = local_address)
     ?origin
     ?(address = local_address)
@@ -72,6 +81,7 @@ let config
     ?(tx_hash = String.make 64 '0')
     ?(view = false)
     ?(byte_result = Contract_vm.Text_result)
+    ?(grants = [])
     ~method_name
     ~args
     () =
@@ -80,6 +90,7 @@ let config
     args;
     storage;
     storage_kinds;
+    strict_values;
     caller;
     origin = Option.value origin ~default:caller;
     address;
@@ -93,6 +104,7 @@ let config
     tx_hash;
     view;
     byte_result;
+    grants;
   }
 
 let host_operation = function
@@ -120,6 +132,9 @@ let host_operation = function
   | Contract_vm.FHE_VERIFY_BOUND _
   | Contract_vm.FHE_COMMIT _
   | Contract_vm.FHE_PEDERSEN _
+  | Contract_vm.FHE_PEDERSEN_ADD _
+  | Contract_vm.FHE_PEDERSEN_SUB _
+  | Contract_vm.FHE_PEDERSEN_IDENTITY _
   | Contract_vm.FHE_SER _
   | Contract_vm.FHE_DESER _
   | Contract_vm.FHE_SER_PK _
@@ -146,6 +161,9 @@ let storage_rows table =
 let make_state config storage =
   let ctx = {
     Contract_vm.default_ctx with
+    cap_live = (fun cap -> List.exists (Contract_vm.cap_equal cap) config.grants);
+    point_ops = true;
+    int_work = Int_work.Active;
     current_epoch = config.epoch;
     epoch_time_ms = config.epoch_time;
     tree_hash = config.tree_hash;
@@ -156,10 +174,9 @@ let make_state config storage =
   let state =
     Contract_vm.create_state
       ~limit:config.limit
-      ~int_work_epoch:(Some 0)
       ~ctx
       ~is_view:config.view
-      ~strict_values:true
+      ~strict_values:config.strict_values
       ~byte_result:config.byte_result
       ~storage_kinds:config.storage_kinds
       ~caller:config.caller
@@ -179,18 +196,38 @@ let make_state config storage =
   state
 
 let outcome state stop steps frames storage =
+  let closes =
+    match stop with
+    | Returned -> List.rev state.Contract_vm.closes
+    | Reverted | Step_cap | Host_operation _ -> []
+  in
   {
     stop;
     result = state.Contract_vm.regs.(0);
+    regs = Array.copy state.Contract_vm.regs;
     effort = state.effort_used;
     steps;
     storage = storage_rows storage;
     events = List.rev !(state.logs);
+    closes;
     frames = List.rev frames;
   }
 
+let rec grants_fit left = function
+  | [] -> true
+  | _ when left = 0 -> false
+  | _ :: rest -> grants_fit (left - 1) rest
+
+let rec grants_distinct seen = function
+  | [] -> true
+  | cap :: _ when List.exists (Contract_vm.cap_equal cap) seen -> false
+  | cap :: rest -> grants_distinct (cap :: seen) rest
+
 let execute ~trace config code entry =
   if config.step_cap < 1 then Error Invalid_step_cap
+  else if not (grants_fit Contract_vm.input_limit config.grants) then
+    Error (Grant_count (Contract_vm.input_limit, Contract_vm.input_limit + 1))
+  else if not (grants_distinct [] config.grants) then Error Grant_repeat
   else if entry < 0 || entry >= Array.length code then
     Error (Program_counter entry)
   else
@@ -247,6 +284,88 @@ let run ~trace config raw =
   | None -> Error Dispatcher_absent
   | Some entry -> execute ~trace config code entry
 
+let be64 size =
+  let out = Bytes.make 8 '\000' in
+  let value = Int64.of_int size in
+  for index = 0 to 7 do
+    let shift = (7 - index) * 8 in
+    let byte =
+      Int64.to_int
+        (Int64.logand (Int64.shift_right_logical value shift) 0xffL)
+    in
+    Bytes.set out index (Char.chr byte)
+  done;
+  Bytes.unsafe_to_string out
+
+let field value = be64 (String.length value) ^ value
+
+let scope_id (scope : C_sess.scope) =
+  C_sha.hash
+    (String.concat ""
+      ["AMLCAP\001"; field scope.chain; field scope.prog; field scope.root])
+
+let token_cap scope (token : C_sess.token) = {
+  Contract_vm.scope;
+  kind = C_nat.to_int token.kind;
+  id = C_nat.to_int token.id;
+  rev = C_nat.to_int token.rev;
+}
+
+let grants state tokens =
+  if not (grants_fit Contract_vm.input_limit tokens) then None
+  else
+    let scope = scope_id (C_sess.scope_of state) in
+    let rec walk out = function
+      | [] -> Some (List.rev out)
+      | token :: rest when C_sess.current state token ->
+        let cap = token_cap scope token in
+        if List.exists (Contract_vm.cap_equal cap) out then None
+        else walk (cap :: out) rest
+      | _ -> None
+    in
+    Option.map
+      (List.map (fun cap -> Contract_vm.VCap cap))
+      (walk [] tokens)
+
+let grant state token =
+  match grants state [token] with
+  | Some [value] -> Some value
+  | Some _ | None -> None
+
+let settle state tokens outcome =
+  let scope = scope_id (C_sess.scope_of state) in
+  let caps = List.map (token_cap scope) tokens in
+  let rec remove cap left = function
+    | [] -> None
+    | token :: rest when Contract_vm.cap_equal cap (token_cap scope token) ->
+      Some (token, List.rev_append left rest)
+    | token :: rest -> remove cap (token :: left) rest
+  in
+  let rec walk state tokens = function
+    | [] -> Ok (state, tokens)
+    | cap :: rest ->
+      begin
+        match remove cap [] tokens with
+        | None ->
+          Error (Grant (Z.of_int cap.kind, Z.of_int cap.id, Z.of_int cap.rev))
+        | Some (token, tokens) ->
+          begin
+            match C_sess.take state token ~keep:false with
+            | Ok (state, None) -> walk state tokens rest
+            | Ok (_, Some _) ->
+              Error (Grant (Z.of_int cap.kind, Z.of_int cap.id, Z.of_int cap.rev))
+            | Error error -> Error (Session error)
+          end
+      end
+  in
+  if not (grants_fit Contract_vm.input_limit tokens) then
+    Error (Grant_count (Contract_vm.input_limit, Contract_vm.input_limit + 1))
+  else if not (grants_distinct [] caps) then Error Grant_repeat
+  else
+    match outcome.stop with
+    | Returned -> walk state tokens outcome.closes
+    | Reverted | Step_cap | Host_operation _ -> Ok (state, tokens)
+
 let hex value =
   let out = Bytes.create (String.length value * 2) in
   let digit value =
@@ -279,6 +398,9 @@ let value_text = function
   | Contract_vm.VU128 value -> "u128:" ^ Z.to_string value
   | Contract_vm.VU256 value -> "u256:" ^ Z.to_string value
   | Contract_vm.VAddr value -> "addr:" ^ value
+  | Contract_vm.VCap cap ->
+    Printf.sprintf "cap kind = %d id = %d rev = %d"
+      cap.kind cap.id cap.rev
   | Contract_vm.VCipher _ -> "cipher"
   | Contract_vm.VPubKey _ -> "pubkey"
 
@@ -296,3 +418,11 @@ let error_text = function
   | Invalid_step_cap -> "step cap is invalid"
   | Program_counter pc ->
     Printf.sprintf "program counter is invalid pc = %d" pc
+  | Grant_count (maximum, actual) ->
+    Printf.sprintf "capability grant count exceeds maximum = %d actual = %d"
+      maximum actual
+  | Grant_repeat -> "capability grant is repeated"
+  | Grant (kind, id, rev) ->
+    Printf.sprintf "capability grant is absent kind = %s id = %s rev = %s"
+      (Z.to_string kind) (Z.to_string id) (Z.to_string rev)
+  | Session error -> C_sess.text error

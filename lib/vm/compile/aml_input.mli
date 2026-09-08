@@ -9,13 +9,15 @@ type error =
   | Type of int * string
 
 type core_value = private {
-  vm : Contract_vm.v;
+  vms : Contract_vm.v list;
+  lits : C_emit.lit list;
   lit : C_emit.lit;
   value : C_eval.value;
 }
 
 val integer : string -> Z.t option
 val tagged : string -> Contract_vm.v option
+val detached : string -> Contract_vm.v option
 val core : C_term.bind list -> string list -> (core_value list, error) result
 val core_octb : C_type.t array -> string list -> (core_value list, error) result
 

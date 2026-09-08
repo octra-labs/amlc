@@ -26,11 +26,18 @@ let term value =
     | Term (C_term.Int value) :: rest ->
       C_text.add out (C_eval.value_text (C_eval.Int value));
       walk rest
+    | Term (C_term.Narrow (typ, value)) :: rest ->
+      C_text.add out ("(narrow " ^ C_type.text typ ^ " ");
+      C_text.add out (C_eval.value_text (C_eval.Int value));
+      walk (Text ")" :: rest)
     | Term (C_term.Bytes value) :: rest ->
       C_text.add out (C_eval.value_text (C_eval.Bytes value));
       walk rest
     | Term (C_term.Vec (elem, values)) :: rest ->
       C_text.add out ("(vec<" ^ C_type.text elem ^ "> [");
+      walk (Terms values :: Text "])" :: rest)
+    | Term (C_term.Seq (cap, elem, values)) :: rest ->
+      C_text.add out ("(seq<" ^ C_nat.text cap ^ "," ^ C_type.text elem ^ "> [");
       walk (Terms values :: Text "])" :: rest)
     | Term (C_term.Var id) :: rest -> C_text.add out (var id); walk rest
     | Term (C_term.Let (bind, value, body)) :: rest ->
@@ -88,9 +95,23 @@ let term value =
     | Term (C_term.Abs value) :: rest ->
       C_text.add out "abs(";
       walk (Term value :: Text ")" :: rest)
-    | Term (C_term.Eq (_, left, right)) :: rest ->
-      C_text.add out "(";
-      walk (Term left :: Text " == " :: Term right :: Text ")" :: rest)
+    | Term (C_term.Fit (typ, value)) :: rest ->
+      C_text.add out ("(fit " ^ C_type.text typ ^ " ");
+      walk (Term value :: Text ")" :: rest)
+    | Term (C_term.Wide value) :: rest ->
+      C_text.add out "(wide ";
+      walk (Term value :: Text ")" :: rest)
+    | Term (C_term.Length value) :: rest ->
+      C_text.add out "(length ";
+      walk (Term value :: Text ")" :: rest)
+    | Term (C_term.Eq (typ, left, right)) :: rest ->
+      if C_type.equal typ C_type.Int then begin
+        C_text.add out "(";
+        walk (Term left :: Text " == " :: Term right :: Text ")" :: rest)
+      end else begin
+        C_text.add out ("equal[" ^ C_type.text typ ^ "](");
+        walk (Term left :: Text ", " :: Term right :: Text ")" :: rest)
+      end
     | Term (C_term.Cmp (rel, left, right)) :: rest ->
       let text =
         match rel with

@@ -6,6 +6,7 @@ type lit =
   | Int of Z.t
   | Bytes of string
   | Data of C_rval.t
+  | Cap of C_nat.t * C_nat.t
 
 type op =
   | Load of lit
@@ -46,6 +47,7 @@ let data = function
   | Int value -> 0, Z.to_string value
   | Bytes value -> 3, value
   | Data value -> 2, C_rval.encode value
+  | Cap _ -> invalid_arg "capability cannot be a constant"
 
 let octb lit =
   let tag, raw = data lit in
@@ -70,6 +72,8 @@ let lit typ value =
   | C_type.Bytes size, C_eval.Bytes value
       when Z.equal (C_nat.to_z size) (Z.of_int (String.length value)) ->
       Some (Bytes value)
+  | C_type.Cap kind, C_eval.Cap (found, id) when C_nat.equal kind found ->
+    Some (Cap (kind, id))
   | _ ->
     begin
       match C_rval.make typ value with

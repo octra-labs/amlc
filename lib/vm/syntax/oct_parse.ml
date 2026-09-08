@@ -53,13 +53,32 @@ let parse_nat ts expected =
   | _ -> perr ts expected
 
 let parse_type ts =
-  let rec base () =
+  let rec typ () = fst (product ())
+  and product () =
+    let left = base () in
+    match peek_token ts with
+    | TkStar ->
+      eat ts;
+      TTuple [left; typ ()], true
+    | _ -> left, false
+  and base () =
     match peek_token ts with
     | TkTyInt -> eat ts; TInt
     | TkTyBool -> eat ts; TBool
     | TkTyString -> eat ts; TString
     | TkTyAddress -> eat ts; TAddress
-    | TkTyBytes -> eat ts; TBytes
+    | TkTyBytes ->
+      eat ts;
+      begin
+        match peek_token ts with
+        | TkLBrack ->
+          expect ts TkLBrack;
+          let size = parse_nat ts "expected bytes width" in
+          expect ts TkRBrack;
+          if C_nat.to_int size = 32 then TBytes32
+          else perr ts "sized bytes type has no public ABI"
+        | _ -> TBytes
+      end
     | TkTyBytes32 -> eat ts; TBytes32
     | TkTyU64 -> eat ts; TU64
     | TkTyU128 -> eat ts; TU128
@@ -69,35 +88,82 @@ let parse_type ts =
     | TkMap ->
       eat ts;
       expect ts TkLBrack;
-      let k = base () in
+      let k = typ () in
       expect ts TkRBrack;
       let v = base () in
       TMap (k, v)
     | TkTyList ->
       eat ts;
       expect ts TkLBrack;
-      let t = base () in
+      let t = typ () in
       expect ts TkRBrack;
       TList t
     | TkOption ->
       eat ts;
       expect ts TkLBrack;
-      let t = base () in
+      let t = typ () in
       expect ts TkRBrack;
       TOption t
     | TkLParen ->
       eat ts;
-      let t1 = base () in
+      let t1, paired = product () in
       let rec more acc =
         match peek_token ts with
-        | TkComma -> eat ts; more (base () :: acc)
-        | TkRParen -> eat ts; List.rev acc
+        | TkComma -> eat ts; more (typ () :: acc)
+        | TkRParen ->
+          eat ts;
+          begin
+            match List.rev acc with
+            | [] when paired -> t1
+            | rest -> TTuple (t1 :: rest)
+          end
         | _ -> perr ts "expected , or ) in tuple type"
       in
-      TTuple (t1 :: more [])
+      more []
+    | TkTyUint ->
+      eat ts;
+      begin
+        match peek_token ts with
+        | TkLBrack ->
+          expect ts TkLBrack;
+          let bits = parse_nat ts "expected uint width" in
+          expect ts TkRBrack;
+          begin
+            match C_nat.to_int bits with
+            | 64 -> TU64
+            | 128 -> TU128
+            | 256 -> TU256
+            | _ -> perr ts "uint width has no public ABI"
+          end
+        | _ -> TU256
+      end
+    | TkIdent "sint" ->
+      eat ts;
+      begin
+        match peek_token ts with
+        | TkLBrack ->
+          expect ts TkLBrack;
+          let _ = parse_nat ts "expected sint width" in
+          expect ts TkRBrack;
+          perr ts "sint type has no public ABI"
+        | _ -> TStruct "sint"
+      end
+    | TkIdent ("vec" as name) | TkIdent ("seq" as name) ->
+      eat ts;
+      begin
+        match peek_token ts with
+        | TkLBrack ->
+          expect ts TkLBrack;
+          let _ = parse_nat ts ("expected " ^ name ^ " size") in
+          expect ts TkComma;
+          let _ = typ () in
+          expect ts TkRBrack;
+          perr ts (name ^ " type has no public ABI")
+        | _ -> TStruct name
+      end
     | TkIdent name -> eat ts; TStruct name
     | _ -> perr ts "expected type"
-  in base ()
+  in typ ()
 
 let parse_refinement ts name =
   match peek_token ts with
@@ -154,6 +220,36 @@ let tok_to_binop = function
   | TkAmpAmp -> And | TkPipePipe -> Or
   | _ -> failwith "not a binop"
 
+let expr_start = function
+  | TkLet
+  | TkIf
+  | TkMinus
+  | TkBang
+  | TkIntLit _
+  | TkTrue
+  | TkFalse
+  | TkStrLit _
+  | TkCaller
+  | TkOrigin
+  | TkEpoch
+  | TkEpochTime
+  | TkValue
+  | TkTreeHash
+  | TkNodeId
+  | TkTxHash
+  | TkSelfAddr
+  | TkNone
+  | TkSome
+  | TkUnwrap
+  | TkIsSome
+  | TkBalance
+  | TkSelf
+  | TkLBrack
+  | TkLParen
+  | TkIdent _
+  | TkEmit -> true
+  | _ -> false
+
 let rec parse_expr_bp ts depth min_bp =
   if depth > Program_limits.max_parser_depth then
     perr ts "expression nesting exceeds limit";
@@ -181,6 +277,23 @@ and parse_infix ts depth lhs min_bp =
 
 and parse_prefix ts depth =
   match peek_token ts with
+  | TkLet -> parse_term_let ts depth
+  | TkIf -> parse_term_if ts depth
+  | TkIdent "split" -> parse_term_split ts depth
+  | TkIdent "orbit" ->
+    eat ts;
+    begin
+      match peek_token ts with
+      | TkLBrack -> parse_term_orbit ts depth
+      | _ -> parse_named_tail ts "orbit"
+    end
+  | TkIdent "equal" ->
+    eat ts;
+    begin
+      match peek_token ts with
+      | TkLBrack -> parse_equal ts depth
+      | _ -> parse_named_tail ts "equal"
+    end
   | TkMinus ->
     eat ts;
     let e = parse_prefix ts (depth + 1) in
@@ -190,6 +303,96 @@ and parse_prefix ts depth =
     let e = parse_prefix ts (depth + 1) in
     EUnop (Not, e)
   | _ -> parse_primary ts
+
+and parse_term_mult ts =
+  match peek_token ts with
+  | TkIdent "many" -> eat ts; Many
+  | TkIdent "once" -> eat ts; Once
+  | _ -> perr ts "expected many or once"
+
+and parse_term_bind ts =
+  let mult = parse_term_mult ts in
+  let name = expect_ident ts in
+  expect ts TkColon;
+  name, mult, parse_type ts
+
+and parse_term_word ts value =
+  match peek_token ts with
+  | TkIdent found when String.equal found value -> eat ts
+  | _ -> perr ts ("expected " ^ value)
+
+and parse_term_let ts depth =
+  eat ts;
+  let name, mult, typ = parse_term_bind ts in
+  expect ts TkEq;
+  let value = parse_expr_bp ts (depth + 1) 1 in
+  expect ts TkIn;
+  ELet (name, mult, typ, value, parse_expr_bp ts (depth + 1) 1)
+
+and parse_term_if ts depth =
+  eat ts;
+  let guard = parse_expr_bp ts (depth + 1) 1 in
+  parse_term_word ts "then";
+  let yes = parse_expr_bp ts (depth + 1) 1 in
+  expect ts TkElse;
+  ETernary (guard, yes, parse_expr_bp ts (depth + 1) 1)
+
+and parse_term_split ts depth =
+  eat ts;
+  match peek_token ts with
+  | TkLParen ->
+    let call = parse_call_expr ts "split" in
+    begin
+      match peek_token ts with
+      | TkIdent "as" ->
+        let value =
+          match call with
+          | ECall (_, [value]) -> value
+          | ECall (_, values) -> ETuple values
+          | _ -> perr ts "split call invariant differs"
+        in
+        parse_term_split_tail ts depth value
+      | _ -> call
+    end
+  | token when expr_start token ->
+    let value = parse_expr_bp ts (depth + 1) 1 in
+    parse_term_split_tail ts depth value
+  | _ -> parse_named_tail ts "split"
+
+and parse_term_split_tail ts depth value =
+  parse_term_word ts "as";
+  let left = parse_term_bind ts in
+  expect ts TkComma;
+  let right = parse_term_bind ts in
+  expect ts TkIn;
+  ESplit (value, left, right, parse_expr_bp ts (depth + 1) 1)
+
+and parse_term_orbit ts depth =
+  expect ts TkLBrack;
+  let count = parse_nat ts "expected orbit cap" in
+  let turns =
+    match peek_token ts with
+    | TkComma -> eat ts; Some (parse_expr_bp ts (depth + 1) 1)
+    | _ -> None
+  in
+  expect ts TkRBrack;
+  parse_term_word ts "from";
+  let seed = parse_expr_bp ts (depth + 1) 1 in
+  parse_term_word ts "with";
+  let bind = parse_term_bind ts in
+  expect ts TkFatArrow;
+  EOrbit (count, turns, seed, bind, parse_expr_bp ts (depth + 1) 1)
+
+and parse_equal ts depth =
+  expect ts TkLBrack;
+  let typ = parse_type ts in
+  expect ts TkRBrack;
+  expect ts TkLParen;
+  let left = parse_expr_bp ts (depth + 1) 1 in
+  expect ts TkComma;
+  let right = parse_expr_bp ts (depth + 1) 1 in
+  expect ts TkRParen;
+  EEqual (typ, left, right)
 
 and parse_primary ts =
   match peek_token ts with
@@ -248,20 +451,22 @@ and parse_primary ts =
   | TkLParen ->
     eat ts;
     let e = parse_expr ts in
-    (match peek_token ts with
-     | TkComma ->
-       eat ts;
-       let rec more acc =
-         let e2 = parse_expr ts in
-         match peek_token ts with
-         | TkComma -> eat ts; more (e2 :: acc)
-         | TkRParen -> eat ts; List.rev (e2 :: acc)
-         | _ -> perr ts "expected , or ) in tuple"
-       in
-       ETuple (e :: more [])
-     | _ ->
-       expect ts TkRParen;
-       e)
+    begin
+      match peek_token ts with
+      | TkComma ->
+        eat ts;
+        let rec more acc =
+          let e2 = parse_expr ts in
+          match peek_token ts with
+          | TkComma -> eat ts; more (e2 :: acc)
+          | TkRParen -> eat ts; List.rev (e2 :: acc)
+          | _ -> perr ts "expected , or ) in tuple"
+        in
+        ETuple (e :: more [])
+      | _ ->
+        expect ts TkRParen;
+        e
+    end
   | TkIdent "use" ->
     eat ts;
     if ident (peek_token ts) then parse_use ts else parse_named_tail ts "use"
@@ -734,7 +939,7 @@ let parse_event ts =
   in
   { ev_name = name; ev_fields = go [] }
 
-let parse_function ts is_view is_pure is_payable ?(nonreentrant=false) vis =
+let parse_function ts is_view is_pure is_payable ?(nonreentrant = false) vis =
   eat ts;
   let name = expect_ident ts in
   let params = parse_params ts in
@@ -826,6 +1031,34 @@ let parse_form_marks ts =
   in
   walk []
 
+let parse_form_tail ts line column name params public =
+  expect ts TkMinus;
+  expect ts TkGt;
+  expect ts TkLBrack;
+  let mult = parse_mult ts in
+  expect ts TkRBrack;
+  let ret = parse_type ts in
+  begin
+    match peek_token ts with
+    | TkIdent "marks" -> eat ts
+    | _ -> perr ts "expected marks"
+  end;
+  let marks = parse_form_marks ts in
+  let lim = parse_form_limit ts in
+  expect ts TkEq;
+  {
+    fm_name = name;
+    fm_params = params;
+    fm_ret = ret;
+    fm_mult = mult;
+    fm_marks = marks;
+    fm_lim = lim;
+    fm_body = parse_expr ts;
+    fm_public = public;
+    fm_line = line;
+    fm_column = column;
+  }
+
 let parse_form ts =
   let line = current_line ts in
   let column = current_column ts in
@@ -843,32 +1076,21 @@ let parse_form ts =
   expect ts TkLParen;
   let arg = parse_form_param ts in
   expect ts TkRParen;
-  expect ts TkMinus;
-  expect ts TkGt;
-  expect ts TkLBrack;
-  let mult = parse_mult ts in
-  expect ts TkRBrack;
-  let ret = parse_type ts in
-  begin
+  parse_form_tail ts line column name (caps @ [arg]) false
+
+let parse_main ts =
+  let line = current_line ts in
+  let column = current_column ts in
+  eat ts;
+  expect ts TkLParen;
+  let rec params out =
     match peek_token ts with
-    | TkIdent "marks" -> eat ts
-    | _ -> perr ts "expected marks"
-  end;
-  let marks = parse_form_marks ts in
-  let lim = parse_form_limit ts in
-  expect ts TkEq;
-  {
-    fm_name = name;
-    fm_caps = caps;
-    fm_arg = arg;
-    fm_ret = ret;
-    fm_mult = mult;
-    fm_marks = marks;
-    fm_lim = lim;
-    fm_body = parse_expr ts;
-    fm_line = line;
-    fm_column = column;
-  }
+    | TkRParen -> eat ts; List.rev out
+    | _ ->
+      if out <> [] then expect ts TkComma;
+      params (parse_form_param ts :: out)
+  in
+  parse_form_tail ts line column "main" (params []) true
 
 let parse_constructor ts =
   let params = parse_params ts in
@@ -1127,9 +1349,22 @@ let parse_contract ts =
       if Option.is_some !ctor then perr ts "duplicate constructor";
       ctor := Some (parse_constructor ts);
       go ()
-    | TkPublic | TkPrivate | TkInternal ->
+    | TkPublic ->
+      eat ts;
+      if peek_token ts = TkIdent "main" then begin
+        if declaration <> ProgramDecl then
+          perr ts "main declaration requires Program";
+        if
+          List.exists (fun prior -> String.equal prior.fm_name "main") !forms
+          || List.exists (fun prior -> String.equal prior.fn_name "main") !funcs
+        then perr ts "duplicate main declaration";
+        forms := parse_main ts :: !forms
+      end else
+        parse_fn_modifiers ts ~vis:Public ~is_view:false ~is_pure:false
+          ~is_payable:false ~nonreentrant:false funcs;
+      go ()
+    | TkPrivate | TkInternal ->
       let vis = match peek_token ts with
-        | TkPublic -> eat ts; Public
         | TkPrivate -> eat ts; Private
         | TkInternal -> eat ts; Internal
         | _ -> Public in
@@ -1165,6 +1400,8 @@ let parse_contract ts =
       then perr ts ("duplicate form name = " ^ form.fm_name);
       forms := form :: !forms;
       go ()
+    | TkIdent "input" | TkIdent "term" when declaration = ProgramDecl ->
+      perr ts "stateful or callable entry requires public main"
     | _ -> perr ts "expected struct, enum, const, state, event, constructor, fn, or }"
   in
   go ();

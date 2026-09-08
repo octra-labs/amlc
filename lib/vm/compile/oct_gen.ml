@@ -952,7 +952,8 @@ let rec typ_of_expr_with constants env = function
      | "is_address" | "assert_address" | "starts_with" | "is_hex"
      | "ed25519_ok" | "sig_ok_ed25519"
      | "is_some_opt" -> TBool
-     | "fhe_commit" | "fhe_pedersen" -> TBytes
+     | "fhe_commit" | "fhe_pedersen" | "pedersen_add" | "pedersen_sub"
+     | "pedersen_identity" -> TBytes
      | "circle_balance_state_ref"
      | "circle_balance_status"
      | "circle_balance_last_workflow"
@@ -1076,6 +1077,42 @@ let rec typ_of_expr_with constants env = function
      | value :: _ -> TList (typ_of_expr_with constants env value))
   | ETuple values ->
     TTuple (List.map (typ_of_expr_with constants env) values)
+  | EEqual (declared, left, right) ->
+    require_type env "equality left type differs" declared
+      (typ_of_expr_with constants env left);
+    require_type env "equality right type differs" declared
+      (typ_of_expr_with constants env right);
+    TBool
+  | ELet (name, _, declared, value, body) ->
+    require_type env "local initializer type differs" declared
+      (typ_of_expr_with constants env value);
+    let saved = env.locals in
+    env.locals <- (name, 0, declared) :: saved;
+    let result = typ_of_expr_with constants env body in
+    env.locals <- saved;
+    result
+  | ESplit (value, (left, _, left_typ), (right, _, right_typ), body) ->
+    require_type env "split type differs" (TTuple [left_typ; right_typ])
+      (typ_of_expr_with constants env value);
+    let saved = env.locals in
+    env.locals <- (right, 0, right_typ) :: (left, 0, left_typ) :: saved;
+    let result = typ_of_expr_with constants env body in
+    env.locals <- saved;
+    result
+  | EOrbit (_, turns, seed, (name, _, declared), body) ->
+    Option.iter
+      (fun value ->
+        require_type env "orbit count type differs" TInt
+          (typ_of_expr_with constants env value))
+      turns;
+    require_type env "orbit seed type differs" declared
+      (typ_of_expr_with constants env seed);
+    let saved = env.locals in
+    env.locals <- (name, 0, declared) :: saved;
+    require_type env "orbit body type differs" declared
+      (typ_of_expr_with constants env body);
+    env.locals <- saved;
+    declared
   | ETernary (guard, then_e, else_e) ->
     require_type env "ternary condition type differs" TBool
       (typ_of_expr_with constants env guard);
@@ -1349,6 +1386,9 @@ and gen_builtin env name args =
    | "fhe_verify_bound" -> emit env (Contract_vm.FHE_VERIFY_BOUND (rd, nth 0, nth 1, nth 2, nth 3))
    | "fhe_commit" -> emit env (Contract_vm.FHE_COMMIT (rd, nth 0, nth 1))
    | "fhe_pedersen" -> emit env (Contract_vm.FHE_PEDERSEN (rd, nth 0, nth 1))
+   | "pedersen_add" -> emit env (Contract_vm.FHE_PEDERSEN_ADD (rd, nth 0, nth 1))
+   | "pedersen_sub" -> emit env (Contract_vm.FHE_PEDERSEN_SUB (rd, nth 0, nth 1))
+   | "pedersen_identity" -> emit env (Contract_vm.FHE_PEDERSEN_IDENTITY rd)
    | "fhe_ser" -> emit env (Contract_vm.FHE_SER (rd, nth 0))
    | "fhe_deser" -> emit env (Contract_vm.FHE_DESER (rd, nth 0))
    | "fhe_ser_pk" -> emit env (Contract_vm.FHE_SER_PK (rd, nth 0))
@@ -2005,6 +2045,87 @@ and gen_expr env expr =
        end else r
      | None -> gerr env.line (Printf.sprintf "undefined field: %s" name))
   | EArray elems | ETuple elems -> gen_netstring_pack env elems
+  | EEqual (declared, left, right) ->
+    require_type env "equality left type differs" declared (typ_of_expr env left);
+    require_type env "equality right type differs" declared
+      (typ_of_expr env right);
+    let left_r = gen_expr env left in
+    let right_r = gen_expr env right in
+    let result_r = alloc_reg env in
+    emit env (Contract_vm.EQ (result_r, left_r, right_r));
+    result_r
+  | ELet (name, _, declared, value, body) ->
+    require_type env "local initializer type differs" declared
+      (typ_of_expr env value);
+    let local_r = gen_expr env value in
+    let saved = env.locals in
+    env.locals <- (name, local_r, declared) :: saved;
+    let result = gen_expr env body in
+    env.locals <- saved;
+    result
+  | ESplit (value, (left, _, left_typ), (right, _, right_typ), body) ->
+    require_type env "split type differs" (TTuple [left_typ; right_typ])
+      (typ_of_expr env value);
+    let source_r = gen_expr env value in
+    let hash_r = alloc_reg env in
+    let remaining_r = alloc_reg env in
+    let left_r = alloc_reg env in
+    let right_r = alloc_reg env in
+    emit env (Contract_vm.LDI (hash_r, VString "#"));
+    emit env (Contract_vm.MOV (remaining_r, source_r));
+    emit_netstring_unpack_next env ~hash_r ~remaining_r ~local_r:left_r;
+    ignore (gen_storage_loaded_value env left_r left_typ);
+    emit_netstring_unpack_next env ~hash_r ~remaining_r ~local_r:right_r;
+    ignore (gen_storage_loaded_value env right_r right_typ);
+    let saved = env.locals in
+    env.locals <-
+      (right, right_r, right_typ) :: (left, left_r, left_typ) :: saved;
+    let result = gen_expr env body in
+    env.locals <- saved;
+    result
+  | EOrbit (count, turns, seed, (name, _, declared), body) ->
+    Option.iter
+      (fun value ->
+        require_type env "orbit count type differs" TInt
+          (typ_of_expr env value))
+      turns;
+    let turn_r = Option.map (gen_expr env) turns in
+    require_type env "orbit seed type differs" declared (typ_of_expr env seed);
+    let seed_r = gen_expr env seed in
+    let state_r = alloc_reg env in
+    emit env (Contract_vm.MOV (state_r, seed_r));
+    let first_reg = env.next_reg in
+    let apply () =
+      let saved = env.locals in
+      env.locals <- (name, state_r, declared) :: saved;
+      let body_r = gen_expr env body in
+      env.locals <- saved;
+      emit env (Contract_vm.MOV (state_r, body_r))
+    in
+    let rec expand index left =
+      if left > 0 then begin
+        begin
+          match turn_r with
+          | None -> apply ()
+          | Some turns ->
+            let apply_l = alloc_label env in
+            let next_l = alloc_label env in
+            let index_r = alloc_reg env in
+            let active_r = alloc_reg env in
+            emit env (Contract_vm.LDI (index_r, VInt (Z.of_int index)));
+            emit env (Contract_vm.LT (active_r, index_r, turns));
+            emit env (Contract_vm.JIF (active_r, apply_l));
+            emit env (Contract_vm.JMP next_l);
+            emit env (Contract_vm.JDEST apply_l);
+            apply ();
+            emit env (Contract_vm.JDEST next_l)
+        end;
+        env.next_reg <- first_reg;
+        expand (index + 1) (left - 1)
+      end
+    in
+    expand 0 (C_nat.to_int count);
+    state_r
   | EAction _ ->
     gerr env.line "effect action requires sealed form"
   | EUse value ->

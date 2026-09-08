@@ -15,8 +15,10 @@ type t =
   | Unit
   | Bool of bool
   | Int of Z.t
+  | Narrow of C_type.t * Z.t
   | Bytes of string
   | Vec of C_type.t * t list
+  | Seq of C_nat.t * C_type.t * t list
   | Var of id
   | Let of bind * t * t
   | If of t * t * t
@@ -35,6 +37,9 @@ type t =
   | Mod of t * t
   | Neg of t
   | Abs of t
+  | Fit of C_type.t * t
+  | Wide of t
+  | Length of t
   | Eq of C_type.t * t * t
   | Cmp of rel * t * t
   | Cat of t * t

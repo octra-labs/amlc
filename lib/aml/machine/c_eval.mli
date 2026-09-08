@@ -51,6 +51,7 @@ type error =
   | Need_bytes
   | Need_vec
   | Need_cap
+  | Need_seq
   | Byte_index of C_nat.t * C_nat.t
   | Vec_index of C_nat.t * C_nat.t
   | Input of C_term.id
@@ -69,8 +70,11 @@ type rule_error =
 
 val max_cost : Z.t
 val equal : value -> value -> bool
+val zero : C_type.t -> value option
+val typed : C_type.t -> value -> bool
 val atoms : action list -> C_eff.atom list
 val direct : C_eff.atom -> value -> action
+val held : C_eff.atom -> value -> C_nat.t -> C_nat.t -> action
 val int_text : Z.t -> string
 val value_text : value -> string
 val run : ?fuel:Z.t -> C_term.t -> (out, error) result

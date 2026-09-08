@@ -27,6 +27,9 @@ Definition decide (relation : rel) (left right : Z) : bool :=
   | Ge => nonnegative (left - right)
   end.
 
+Definition distinct (left right : Z) : bool :=
+  negb (Z.eqb left right).
+
 Definition term (relation : rel) (left_name right_name delta_name : nat)
     (left right : stm) : stm :=
   let left_var := SVar left_name in
@@ -84,4 +87,13 @@ Proof.
       nonnegative_spec.
     lia.
   - rewrite nonnegative_spec. lia.
+Qed.
+
+Theorem distinct_spec : forall left right,
+  distinct left right = true <-> left <> right.
+Proof.
+  intros left right.
+  unfold distinct.
+  rewrite Bool.negb_true_iff, Z.eqb_neq.
+  reflexivity.
 Qed.

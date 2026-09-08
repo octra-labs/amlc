@@ -141,6 +141,8 @@ let rec rename env = function
   | C_syn.KBytes value -> C_syn.KBytes value
   | C_syn.KVec (typ, values) ->
     C_syn.KVec (typ, List.map (rename env) values)
+  | C_syn.KSeq (cap, typ, values) ->
+    C_syn.KSeq (cap, typ, List.map (rename env) values)
   | C_syn.Var name ->
     begin
       match List.find_opt (fun (key, _) -> C_syn.name_equal name key) env with
@@ -170,6 +172,9 @@ let rec rename env = function
   | C_syn.Mod (left, right) -> C_syn.Mod (rename env left, rename env right)
   | C_syn.Neg value -> C_syn.Neg (rename env value)
   | C_syn.Abs value -> C_syn.Abs (rename env value)
+  | C_syn.Fit (typ, value) -> C_syn.Fit (typ, rename env value)
+  | C_syn.Wide value -> C_syn.Wide (rename env value)
+  | C_syn.Length value -> C_syn.Length (rename env value)
   | C_syn.Eq (typ, left, right) ->
     C_syn.Eq (typ, rename env left, rename env right)
   | C_syn.Cmp (rel, left, right) ->
@@ -264,7 +269,8 @@ let shape fns body =
         match term with
         | C_syn.KUnit | C_syn.KBool _ | C_syn.KInt _ | C_syn.KBytes _
         | C_syn.Var _ -> rest
-        | C_syn.KVec (_, values) -> push next values rest
+        | C_syn.KVec (_, values) | C_syn.KSeq (_, _, values) ->
+          push next values rest
         | C_syn.Let (_, value, body)
         | C_syn.Pair (value, body)
         | C_syn.Add (value, body)
@@ -285,6 +291,7 @@ let shape fns body =
         | C_syn.Fst value | C_syn.Snd value
         | C_syn.Inl (value, _) | C_syn.Inr (_, value)
         | C_syn.Act (_, value) | C_syn.Neg value | C_syn.Abs value
+        | C_syn.Fit (_, value) | C_syn.Wide value | C_syn.Length value
         | C_syn.Take (_, value)
         | C_syn.Drop (_, value) | C_syn.At (_, value)
         | C_syn.Uncons value | C_syn.Close value -> Syn (next, value) :: rest
@@ -364,10 +371,19 @@ let rec expand fns = function
           Ok (C_syn.Let (result, value, rest))
     end
 
-let lower inputs fns body =
+let resolve fns body =
   let* () = defs fns in
   let* () = shape fns body in
-  let* body = expand fns body in
+  expand fns body
+
+let names inputs fns body =
+  let* body = resolve fns body in
+  match C_low.names inputs body with
+  | Some values -> Ok values
+  | None -> Error (Low C_low.Count)
+
+let lower inputs fns body =
+  let* body = resolve fns body in
   Result.map_error (fun error -> Low error) (C_low.prog inputs body)
 
 let check inputs fns body =

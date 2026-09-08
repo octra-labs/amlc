@@ -17,6 +17,7 @@ type t =
   | KInt of Z.t
   | KBytes of string
   | KVec of C_decl.typ * t list
+  | KSeq of C_idx.t * C_decl.typ * t list
   | Var of C_syn.name
   | Let of bind * t * t
   | If of t * t * t
@@ -35,6 +36,9 @@ type t =
   | Mod of t * t
   | Neg of t
   | Abs of t
+  | Fit of C_decl.typ * t
+  | Wide of t
+  | Length of t
   | Eq of C_decl.typ * t * t
   | Cmp of C_syn.rel * t * t
   | Cat of t * t

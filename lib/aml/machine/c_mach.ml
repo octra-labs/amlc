@@ -4,6 +4,7 @@
 type shape =
   | SUnit
   | SAtom
+  | SCap of C_nat.t
   | SPair of shape * shape
   | SVec of C_nat.t * shape
   | SSum of shape
@@ -25,6 +26,7 @@ type code =
   | Negate of code
   | Absolute of code
   | Same of code
+  | Different of code
   | Order of C_term.rel * code
   | Join of code
   | Clip of C_nat.t * code
@@ -39,10 +41,15 @@ type code =
   | Unhead of code
   | Left of code
   | Right of code
+  | Pack of C_nat.t * C_type.t * code
+  | Fit of C_type.t * code
+  | Wide of code
+  | Close of C_nat.t * code
   | Effect of int * C_eff.atom * code * code
   | Scope of C_term.bind * code * code
   | Scope2 of C_term.bind * C_term.bind * code * code
   | Iter of C_nat.t * C_term.bind * C_term.bind * code * code
+  | Iter_seq of C_nat.t * C_term.bind * C_term.bind * code * code
   | Choice of C_term.bind * code * C_term.bind * code * shape * code
   | Fork of shape * code * code * code
 
@@ -59,6 +66,7 @@ type loc =
   | LNegate of C_lex.span * loc
   | LAbsolute of C_lex.span * loc
   | LSame of C_lex.span * loc
+  | LDifferent of C_lex.span * loc
   | LOrder of C_term.rel * C_lex.span * loc
   | LJoin of C_lex.span * loc
   | LClip of C_nat.t * C_lex.span * loc
@@ -73,6 +81,10 @@ type loc =
   | LUnhead of C_lex.span * loc
   | LLeft of C_lex.span * loc
   | LRight of C_lex.span * loc
+  | LPack of C_lex.span * loc
+  | LFit of C_lex.span * loc
+  | LWide of C_lex.span * loc
+  | LClose of C_lex.span * loc
   | LEffect of C_lex.span * loc * loc
   | LScope of C_lex.span * loc * loc
   | LScope2 of C_lex.span * loc * loc
@@ -96,7 +108,9 @@ type error =
   | Source of C_parse.error
   | Feed of C_feed.error
   | Input of C_term.id * C_type.t
-  | Inputs of int
+  | Inputs of Z.t
+  | Layout of Z.t
+  | Types of Z.t
   | Effects of C_eff.atom list
   | Term
   | Run of C_eval.error
@@ -121,6 +135,8 @@ let equal left right =
   | C_emit.Int lhs, C_emit.Int rhs -> Z.equal lhs rhs
   | C_emit.Bytes lhs, C_emit.Bytes rhs -> String.equal lhs rhs
   | C_emit.Data lhs, C_emit.Data rhs -> C_rval.equal lhs rhs
+  | C_emit.Cap (lk, li), C_emit.Cap (rk, ri) ->
+    C_nat.equal lk rk && C_nat.equal li ri
   | _ -> false
 
 let atom_equal left right =
@@ -143,9 +159,13 @@ let literal typ value =
   match typ, value with
   | C_type.Bool, C_eval.Bool value -> Some (C_emit.Bool value)
   | C_type.Int, C_eval.Int value -> Some (C_emit.Int value)
+  | (C_type.Num _ as typ), C_eval.Int value when C_type.admits typ value ->
+    Some (C_emit.Int value)
   | C_type.Bytes size, C_eval.Bytes value
       when Z.equal (C_nat.to_z size) (Z.of_int (String.length value)) ->
       Some (C_emit.Bytes value)
+  | C_type.Cap kind, C_eval.Cap (found, id) when C_nat.equal kind found ->
+    Some (C_emit.Cap (kind, id))
   | _ ->
     begin
       match C_rval.make typ value with
@@ -153,9 +173,83 @@ let literal typ value =
       | Error _ -> None
     end
 
+let rec atoms_into typ value out =
+  match typ, value with
+  | C_type.Unit, C_eval.Unit -> Some out
+  | C_type.Bool, C_eval.Bool value -> Some (C_emit.Bool value :: out)
+  | C_type.Int, C_eval.Int value -> Some (C_emit.Int value :: out)
+  | (C_type.Num _ as typ), C_eval.Int value when C_type.admits typ value ->
+    Some (C_emit.Int value :: out)
+  | C_type.Bytes len, C_eval.Bytes value
+      when C_nat.to_int len = String.length value ->
+    Some (C_emit.Bytes value :: out)
+  | C_type.Cap kind, C_eval.Cap (found, id) when C_nat.equal kind found ->
+    Some (C_emit.Cap (kind, id) :: out)
+  | C_type.Vec (len, elem), C_eval.Vec values
+      when C_nat.to_int len = Array.length values ->
+    atoms_array elem values 0 out
+  | (C_type.Seq _ as typ), value when C_eval.typed typ value ->
+    atoms_into (C_type.repr typ) value out
+  | C_type.Pair (lhs, rhs), C_eval.Pair (left, right) ->
+    Option.bind (atoms_into lhs left out) (atoms_into rhs right)
+  | C_type.Sum (lhs, _), C_eval.Inl value ->
+    atoms_into lhs value (C_emit.Bool true :: out)
+  | C_type.Sum (_, rhs), C_eval.Inr value ->
+    atoms_into rhs value (C_emit.Bool false :: out)
+  | _ -> None
+
+and atoms_array typ values index out =
+  if index = Array.length values then Some out
+  else
+    Option.bind (atoms_into typ values.(index) out)
+      (atoms_array typ values (index + 1))
+
+let atoms typ value =
+  Option.map List.rev (atoms_into typ value [])
+
+let rec value typ input =
+  match typ, input with
+  | C_type.Unit, _ -> Some (C_eval.Unit, input)
+  | C_type.Bool, C_emit.Bool value :: rest -> Some (C_eval.Bool value, rest)
+  | C_type.Int, C_emit.Int value :: rest -> Some (C_eval.Int value, rest)
+  | (C_type.Num _ as typ), C_emit.Int value :: rest
+      when C_type.admits typ value ->
+    Some (C_eval.Int value, rest)
+  | C_type.Bytes len, C_emit.Bytes raw :: rest
+      when C_nat.to_int len = String.length raw ->
+    Some (C_eval.Bytes raw, rest)
+  | C_type.Cap kind, C_emit.Cap (found, id) :: rest
+      when C_nat.equal kind found ->
+    Some (C_eval.Cap (kind, id), rest)
+  | C_type.Vec (len, elem), _ ->
+    Option.map
+      (fun (values, rest) -> C_eval.Vec (Array.of_list values), rest)
+      (values (C_nat.to_int len) elem input)
+  | (C_type.Seq _ as typ), _ ->
+    Option.bind (value (C_type.repr typ) input) (fun (item, rest) ->
+      if C_eval.typed typ item then Some (item, rest) else None)
+  | C_type.Pair (lhs, rhs), _ ->
+    Option.bind (value lhs input) (fun (left, rest) ->
+      Option.map
+        (fun (right, tail) -> C_eval.Pair (left, right), tail)
+        (value rhs rest))
+  | C_type.Sum (lhs, rhs), C_emit.Bool side :: rest ->
+    if side then
+      Option.map (fun (item, tail) -> C_eval.Inl item, tail) (value lhs rest)
+    else Option.map (fun (item, tail) -> C_eval.Inr item, tail) (value rhs rest)
+  | _ -> None
+
+and values count typ input =
+  if count = 0 then Some ([], input)
+  else
+    Option.bind (value typ input) (fun (first, rest) ->
+      Option.map (fun (tail, left) -> first :: tail, left)
+        (values (count - 1) typ rest))
+
 let rec same_shape left right =
   match left, right with
   | SUnit, SUnit | SAtom, SAtom -> true
+  | SCap lhs, SCap rhs -> C_nat.equal lhs rhs
   | SPair (ll, lr), SPair (rl, rr) ->
     same_shape ll rl && same_shape lr rr
   | SVec (ln, le), SVec (rn, re) ->
@@ -165,9 +259,12 @@ let rec same_shape left right =
 
 let rec shape_of = function
   | C_type.Unit -> Some SUnit
-  | C_type.Bool | C_type.Int | C_type.Bytes _ -> Some SAtom
+  | C_type.Bool | C_type.Int | C_type.Num _ | C_type.Bytes _ -> Some SAtom
+  | C_type.Cap kind -> Some (SCap kind)
   | C_type.Vec (len, elem) ->
     Option.map (fun item -> SVec (len, item)) (shape_of elem)
+  | C_type.Seq (cap, elem) ->
+    Option.map (fun item -> SPair (SAtom, SVec (cap, item))) (shape_of elem)
   | C_type.Pair (lhs, rhs) ->
     Option.bind (shape_of lhs) (fun lshape ->
       Option.map (fun rshape -> SPair (lshape, rshape)) (shape_of rhs))
@@ -175,14 +272,23 @@ let rec shape_of = function
     Option.bind (shape_of lhs) (fun lshape ->
       Option.bind (shape_of rhs) (fun rshape ->
         if same_shape lshape rshape then Some (SSum lshape) else None))
-  | C_type.Cap _ | C_type.Enc _ -> None
+  | C_type.Enc _ -> None
 
 let rec shape_width = function
   | SUnit -> Z.zero
   | SAtom -> Z.one
+  | SCap _ -> Z.one
   | SPair (lhs, rhs) -> Z.add (shape_width lhs) (shape_width rhs)
   | SVec (len, elem) -> Z.mul (C_nat.to_z len) (shape_width elem)
   | SSum payload -> Z.succ (shape_width payload)
+
+let rec shape_cells = function
+  | SUnit | SAtom | SCap _ -> Z.one
+  | SPair (lhs, rhs) ->
+    Z.succ (Z.add (shape_cells lhs) (shape_cells rhs))
+  | SVec (len, elem) ->
+    Z.succ (Z.mul (C_nat.to_z len) (shape_cells elem))
+  | SSum payload -> Z.succ (shape_cells payload)
 
 let rec same_shapes left right =
   match left, right with
@@ -202,7 +308,7 @@ let rec flow code stack =
   | Void rest -> flow rest (SUnit :: stack)
   | Get (_, form, rest) -> flow rest (form :: stack)
   | Plus rest | Minus rest | Times rest | Quot rest | Rem rest
-  | Same rest | Order (_, rest) | Join rest ->
+  | Same rest | Different rest | Order (_, rest) | Join rest ->
     begin
       match stack with
       | SAtom :: SAtom :: tail -> flow rest (SAtom :: tail)
@@ -276,6 +382,34 @@ let rec flow code stack =
       | payload :: tail -> flow rest (SSum payload :: tail)
       | [] -> None
     end
+  | Pack (cap, typ, rest) ->
+    begin
+      match stack, shape_of typ with
+      | SVec (len, elem) :: tail, Some found
+          when C_nat.le len cap && same_shape elem found ->
+        flow rest (SPair (SAtom, SVec (cap, elem)) :: tail)
+      | _ -> None
+    end
+  | Fit (typ, rest) ->
+    begin
+      match stack, typ with
+      | SAtom :: tail, C_type.Num _ when C_type.valid typ ->
+        flow rest (SSum SAtom :: tail)
+      | _ -> None
+    end
+  | Wide rest ->
+    begin
+      match stack with
+      | SAtom :: tail -> flow rest (SAtom :: tail)
+      | _ -> None
+    end
+  | Close (kind, rest) ->
+    begin
+      match stack with
+      | SCap found :: tail when C_nat.equal kind found ->
+        flow rest (SUnit :: tail)
+      | _ -> None
+    end
   | Effect (_, _, body, rest) ->
     Option.bind (flow body stack) (flow rest)
   | Scope (_, body, rest) ->
@@ -304,6 +438,21 @@ let rec flow code stack =
       | _, _, seed :: SVec (found, elem) :: tail, Some item_shape,
           Some state_shape
           when C_nat.equal len found
+            && same_shape item_shape elem
+            && same_shape state_shape seed ->
+        Option.bind (flow body tail) (fun after ->
+          Option.bind (keep_shape tail after) (fun out ->
+            if same_shape seed out then flow rest (out :: tail) else None))
+      | _ -> None
+    end
+  | Iter_seq (cap, item, state, body, rest) ->
+    begin
+      match item.C_term.mul, state.C_term.mul, stack,
+          shape_of item.C_term.typ, shape_of state.C_term.typ with
+      | C_type.Zero, _, _, _, _ | _, C_type.Zero, _, _, _ -> None
+      | _, _, seed :: SPair (SAtom, SVec (found, elem)) :: tail,
+          Some item_shape, Some state_shape
+          when C_nat.equal cap found
             && same_shape item_shape elem
             && same_shape state_shape seed ->
         Option.bind (flow body tail) (fun after ->
@@ -366,6 +515,7 @@ let rec continue code tail =
   | Negate rest -> Negate (continue rest tail)
   | Absolute rest -> Absolute (continue rest tail)
   | Same rest -> Same (continue rest tail)
+  | Different rest -> Different (continue rest tail)
   | Order (rel, rest) -> Order (rel, continue rest tail)
   | Join rest -> Join (continue rest tail)
   | Clip (len, rest) -> Clip (len, continue rest tail)
@@ -380,6 +530,10 @@ let rec continue code tail =
   | Unhead rest -> Unhead (continue rest tail)
   | Left rest -> Left (continue rest tail)
   | Right rest -> Right (continue rest tail)
+  | Pack (cap, typ, rest) -> Pack (cap, typ, continue rest tail)
+  | Fit (typ, rest) -> Fit (typ, continue rest tail)
+  | Wide rest -> Wide (continue rest tail)
+  | Close (kind, rest) -> Close (kind, continue rest tail)
   | Effect (index, atom, body, rest) ->
     Effect (index, atom, body, continue rest tail)
   | Scope (bind, body, rest) ->
@@ -388,6 +542,8 @@ let rec continue code tail =
     Scope2 (left, right, body, continue rest tail)
   | Iter (len, item, state, body, rest) ->
     Iter (len, item, state, body, continue rest tail)
+  | Iter_seq (cap, item, state, body, rest) ->
+    Iter_seq (cap, item, state, body, continue rest tail)
   | Choice (left, yes, right, no, shape, rest) ->
     Choice (left, yes, right, no, shape, continue rest tail)
   | Fork (shape, yes, no, rest) ->
@@ -398,10 +554,16 @@ let rec build env term rest =
   | C_term.Unit -> Some (Void rest)
   | C_term.Bool value -> Some (Push (C_emit.Bool value, rest))
   | C_term.Int value -> Some (Push (C_emit.Int value, rest))
+  | C_term.Narrow (typ, value) ->
+    if C_type.admits typ value then Some (Push (C_emit.Int value, rest))
+    else None
   | C_term.Bytes value -> Some (Push (C_emit.Bytes value, rest))
   | C_term.Vec (elem, values) ->
     Option.bind (shape_of elem) (fun form ->
       build_vec env form values rest)
+  | C_term.Seq (cap, elem, values) ->
+    Option.bind (shape_of elem) (fun form ->
+      build_vec env form values (Pack (cap, elem, rest)))
   | C_term.Var id ->
     Option.bind (find_bind id env) (fun item ->
       Option.map (fun form -> Get (id, form, rest)) (shape_of item.typ))
@@ -446,6 +608,13 @@ let rec build env term rest =
       build env lhs rhs_code)
   | C_term.Neg value -> build env value (Negate rest)
   | C_term.Abs value -> build env value (Absolute rest)
+  | C_term.Fit (typ, value) -> build env value (Fit (typ, rest))
+  | C_term.Wide value -> build env value (Wide rest)
+  | C_term.Length value -> build env value (First rest)
+  | C_term.Eq (C_type.Bool,
+      C_term.Eq (C_type.Int, lhs, rhs), C_term.Bool false) ->
+    Option.bind (build env rhs (Different rest)) (fun rhs_code ->
+      build env lhs rhs_code)
   | C_term.Eq (typ, lhs, rhs) ->
     begin
       match shape_of typ with
@@ -469,6 +638,11 @@ let rec build env term rest =
   | C_term.Uncons value -> build env value (Unhead rest)
   | C_term.Act (atom, body) ->
     Option.map (fun body -> Effect (-1, atom, body, rest)) (build env body Done)
+  | C_term.Close value ->
+    Option.bind (build env value Done) (fun value_code ->
+      match one_shape value_code with
+      | Some (SCap kind) -> Some (continue value_code (Close (kind, rest)))
+      | _ -> None)
   | C_term.Inl (value, right) ->
     Option.bind (shape_of right) (fun right_shape ->
       Option.bind (build env value Done) (fun value_code ->
@@ -516,9 +690,21 @@ let rec build env term rest =
                       (Iter (len, fold.item, fold.state, body_code, rest)))
                     (fun seed_code -> Some (continue vector_code seed_code))
                 | _ -> None)
+          | Some (SPair (SAtom, SVec (cap, elem))), Some item_shape,
+              Some state_shape when same_shape elem item_shape ->
+            Option.bind
+              (build (fold.state :: fold.item :: env) fold.body Done)
+              (fun body_code ->
+                match one_shape body_code with
+                | Some body_shape when same_shape state_shape body_shape ->
+                  Option.bind
+                    (build env seed
+                      (Iter_seq (cap, fold.item, fold.state, body_code, rest)))
+                    (fun seed_code -> Some (continue vector_code seed_code))
+                | _ -> None)
           | _ -> None)
     end
-  | C_term.Step _ | C_term.Close _ -> None
+  | C_term.Step _ -> None
 
 and build_vec env elem values rest =
   match values with
@@ -562,6 +748,9 @@ let rec index_effects index = function
   | Same rest ->
     let rest, index = index_effects index rest in
     Same rest, index
+  | Different rest ->
+    let rest, index = index_effects index rest in
+    Different rest, index
   | Order (rel, rest) ->
     let rest, index = index_effects index rest in
     Order (rel, rest), index
@@ -604,6 +793,18 @@ let rec index_effects index = function
   | Right rest ->
     let rest, index = index_effects index rest in
     Right rest, index
+  | Pack (cap, typ, rest) ->
+    let rest, index = index_effects index rest in
+    Pack (cap, typ, rest), index
+  | Fit (typ, rest) ->
+    let rest, index = index_effects index rest in
+    Fit (typ, rest), index
+  | Wide rest ->
+    let rest, index = index_effects index rest in
+    Wide rest, index
+  | Close (kind, rest) ->
+    let rest, index = index_effects index rest in
+    Close (kind, rest), index
   | Effect (_, atom, body, rest) ->
     let at = index in
     let body, index = index_effects (index + 1) body in
@@ -621,6 +822,10 @@ let rec index_effects index = function
     let body, index = index_effects index body in
     let rest, index = index_effects index rest in
     Iter (len, item, state, body, rest), index
+  | Iter_seq (cap, item, state, body, rest) ->
+    let body, index = index_effects index body in
+    let rest, index = index_effects index rest in
+    Iter_seq (cap, item, state, body, rest), index
   | Choice (left, yes, right, no, shape, rest) ->
     let yes, index = index_effects index yes in
     let no, index = index_effects index no in
@@ -645,9 +850,11 @@ let rec code_size = function
   | Done -> Z.one
   | Push (_, rest) | Void rest | Get (_, _, rest) | Plus rest | Minus rest
   | Times rest | Quot rest | Rem rest | Negate rest | Absolute rest | Same rest
+  | Different rest
   | Order (_, rest) | Join rest | Clip (_, rest) | Skip (_, rest) | Duo rest
   | First rest | Second rest | Empty (_, rest) | Cons rest | Append rest
-  | Pick (_, rest) | Unhead rest | Left rest | Right rest ->
+  | Pick (_, rest) | Unhead rest | Left rest | Right rest | Pack (_, _, rest)
+  | Fit (_, rest) | Wide rest | Close (_, rest) ->
     size_add Z.one (code_size rest)
   | Effect (_, _, body, rest) | Scope (_, body, rest)
   | Scope2 (_, _, body, rest) ->
@@ -656,6 +863,11 @@ let rec code_size = function
     size_add Z.one
       (size_add
         (size_scale (C_nat.to_z len) (code_size body))
+        (code_size rest))
+  | Iter_seq (cap, _, _, body, rest) ->
+    size_add Z.one
+      (size_add
+        (size_scale (C_nat.to_z cap) (code_size body))
         (code_size rest))
   | Choice (_, yes, _, no, _, rest) | Fork (_, yes, no, rest) ->
     size_add Z.one
@@ -682,6 +894,7 @@ let rec locate at = function
   | Negate rest -> LNegate (at, locate at rest)
   | Absolute rest -> LAbsolute (at, locate at rest)
   | Same rest -> LSame (at, locate at rest)
+  | Different rest -> LDifferent (at, locate at rest)
   | Order (rel, rest) -> LOrder (rel, at, locate at rest)
   | Join rest -> LJoin (at, locate at rest)
   | Clip (len, rest) -> LClip (len, at, locate at rest)
@@ -696,12 +909,18 @@ let rec locate at = function
   | Unhead rest -> LUnhead (at, locate at rest)
   | Left rest -> LLeft (at, locate at rest)
   | Right rest -> LRight (at, locate at rest)
+  | Pack (_, _, rest) -> LPack (at, locate at rest)
+  | Fit (_, rest) -> LFit (at, locate at rest)
+  | Wide rest -> LWide (at, locate at rest)
+  | Close (_, rest) -> LClose (at, locate at rest)
   | Effect (_, _, body, rest) ->
     LEffect (at, locate at body, locate at rest)
   | Scope (_, body, rest) -> LScope (at, locate at body, locate at rest)
   | Scope2 (_, _, body, rest) ->
     LScope2 (at, locate at body, locate at rest)
   | Iter (_, _, _, body, rest) ->
+    LIter (at, locate at body, locate at rest)
+  | Iter_seq (_, _, _, body, rest) ->
     LIter (at, locate at body, locate at rest)
   | Choice (_, yes, _, no, _, rest) ->
     LChoice (at, at, at, locate at yes, locate at no, locate at rest)
@@ -714,10 +933,11 @@ let root sub = function
 
 let rec tree term marks =
   match term with
-  | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Bytes _
+  | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Narrow _
+  | C_term.Bytes _
   | C_term.Var _ ->
       root [] marks
-  | C_term.Vec (_, values) ->
+  | C_term.Vec (_, values) | C_term.Seq (_, _, values) ->
     let* values, marks = trees values marks in
     root values marks
   | C_term.Let (_, value, body) ->
@@ -743,9 +963,10 @@ let rec tree term marks =
     let* body, marks = tree body marks in
     root [value; body] marks
   | C_term.Fst value | C_term.Snd value | C_term.Neg value
-  | C_term.Abs value | C_term.Take (_, value)
+  | C_term.Abs value | C_term.Fit (_, value) | C_term.Wide value
+  | C_term.Length value | C_term.Take (_, value)
   | C_term.Drop (_, value) | C_term.At (_, value) | C_term.Uncons value
-  | C_term.Inl (value, _) | C_term.Inr (_, value) ->
+  | C_term.Inl (value, _) | C_term.Inr (_, value) | C_term.Close value ->
       let* value, marks = tree value marks in
       root [value] marks
   | C_term.Case (value, _, yes, _, no) ->
@@ -761,7 +982,7 @@ let rec tree term marks =
     let* seed, marks = tree seed marks in
     let* body, marks = tree fold.body marks in
     root [vector; seed; body] marks
-  | C_term.Step _ | C_term.Close _ -> Error Map
+  | C_term.Step _ -> Error Map
 
 and trees terms marks =
   match terms with
@@ -772,9 +993,11 @@ and trees terms marks =
     Ok (first :: rest, marks)
 
 let rec spread at = function
-  | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Bytes _
+  | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Narrow _
+  | C_term.Bytes _
   | C_term.Var _ -> { at; sub = [] }
-  | C_term.Vec (_, values) -> { at; sub = List.map (spread at) values }
+  | C_term.Vec (_, values) | C_term.Seq (_, _, values) ->
+    { at; sub = List.map (spread at) values }
   | C_term.Let (_, value, body) ->
     { at; sub = [spread at value; spread at body] }
   | C_term.If (guard, yes, no) ->
@@ -789,7 +1012,8 @@ let rec spread at = function
   | C_term.Unpair (value, _, _, body) ->
     { at; sub = [spread at value; spread at body] }
   | C_term.Fst value | C_term.Snd value | C_term.Neg value
-  | C_term.Abs value | C_term.Take (_, value)
+  | C_term.Abs value | C_term.Fit (_, value) | C_term.Wide value
+  | C_term.Length value | C_term.Take (_, value)
   | C_term.Drop (_, value) | C_term.At (_, value) | C_term.Uncons value
   | C_term.Inl (value, _) | C_term.Inr (_, value) | C_term.Close value ->
     { at; sub = [spread at value] }
@@ -808,8 +1032,13 @@ let rec retree source target mark =
   | C_term.Unit, C_term.Unit, []
   | C_term.Bool _, C_term.Bool _, []
   | C_term.Int _, C_term.Int _, []
+  | C_term.Narrow _, C_term.Narrow _, []
   | C_term.Bytes _, C_term.Bytes _, [] -> Some mark
   | C_term.Vec (_, left), C_term.Vec (_, right), marks ->
+    Option.bind (retrees left right marks) node
+  | C_term.Seq (left_cap, left_typ, left),
+      C_term.Seq (right_cap, right_typ, right), marks
+      when C_nat.equal left_cap right_cap && C_type.equal left_typ right_typ ->
     Option.bind (retrees left right marks) node
   | C_term.Let (_, left_value, left_body),
       C_term.Let (_, right_value, right_body), [value_mark; body_mark] ->
@@ -864,8 +1093,16 @@ let rec retree source target mark =
   | C_term.At (_, left), C_term.At (_, right), [child]
   | C_term.Uncons left, C_term.Uncons right, [child] ->
     Option.bind (retree left right child) (fun value -> node [value])
+  | C_term.Fit (left_typ, left), C_term.Fit (right_typ, right), [child]
+      when C_type.equal left_typ right_typ ->
+    Option.bind (retree left right child) (fun value -> node [value])
+  | C_term.Wide left, C_term.Wide right, [child]
+  | C_term.Length left, C_term.Length right, [child] ->
+    Option.bind (retree left right child) (fun value -> node [value])
   | C_term.Inl (left, _), C_term.Inl (right, _), [child]
   | C_term.Inr (_, left), C_term.Inr (_, right), [child] ->
+    Option.bind (retree left right child) (fun value -> node [value])
+  | C_term.Close left, C_term.Close right, [child] ->
     Option.bind (retree left right child) (fun value -> node [value])
   | C_term.Case (left_value, _, left_yes, _, left_no),
       C_term.Case (right_value, _, right_yes, _, right_no),
@@ -898,9 +1135,11 @@ and retrees sources targets marks =
 let rec into_loc term mark rest =
   match term, mark.sub with
   | C_term.Unit, [] -> Some (LVoid (mark.at, rest))
-  | (C_term.Bool _ | C_term.Int _ | C_term.Bytes _), [] ->
+  | (C_term.Bool _ | C_term.Int _ | C_term.Narrow _ | C_term.Bytes _), [] ->
       Some (LPush (mark.at, rest))
   | C_term.Vec (_, values), marks -> loc_vec values marks mark.at rest
+  | C_term.Seq (_, _, values), marks ->
+    loc_vec values marks mark.at (LPack (mark.at, rest))
   | C_term.Var _, [] -> Some (LGet (mark.at, rest))
   | C_term.Let (item, value, body), [value_mark; body_mark] ->
       begin
@@ -974,6 +1213,20 @@ let rec into_loc term mark rest =
       into_loc value value_mark (LNegate (mark.at, rest))
   | C_term.Abs value, [value_mark] ->
       into_loc value value_mark (LAbsolute (mark.at, rest))
+  | C_term.Fit (_, value), [value_mark] ->
+    into_loc value value_mark (LFit (mark.at, rest))
+  | C_term.Wide value, [value_mark] ->
+    into_loc value value_mark (LWide (mark.at, rest))
+  | C_term.Length value, [value_mark] ->
+    into_loc value value_mark (LFirst (mark.at, rest))
+  | C_term.Eq (C_type.Bool,
+      C_term.Eq (C_type.Int, left, right), C_term.Bool false),
+      [{ sub = [left_mark; right_mark]; _ }; _] ->
+    begin
+      match into_loc right right_mark (LDifferent (mark.at, rest)) with
+      | Some right_loc -> into_loc left left_mark right_loc
+      | None -> None
+    end
   | C_term.Eq (_, left, right), [left_mark; right_mark] ->
     begin
       match into_loc right right_mark (LSame (mark.at, rest)) with
@@ -1010,6 +1263,8 @@ let rec into_loc term mark rest =
     into_loc value value_mark (LLeft (mark.at, rest))
   | C_term.Inr (_, value), [value_mark] ->
     into_loc value value_mark (LRight (mark.at, rest))
+  | C_term.Close value, [value_mark] ->
+    into_loc value value_mark (LClose (mark.at, rest))
   | C_term.Case (value, _, yes, _, no),
       [value_mark; yes_mark; no_mark] ->
     begin
@@ -1059,6 +1314,7 @@ let rec same_loc code loc =
   | Negate rest, LNegate (_, lrest)
   | Absolute rest, LAbsolute (_, lrest)
   | Same rest, LSame (_, lrest)
+  | Different rest, LDifferent (_, lrest)
   | Join rest, LJoin (_, lrest)
   | Duo rest, LDuo (_, lrest)
   | First rest, LFirst (_, lrest)
@@ -1068,6 +1324,10 @@ let rec same_loc code loc =
   | Unhead rest, LUnhead (_, lrest)
   | Left rest, LLeft (_, lrest)
   | Right rest, LRight (_, lrest) -> same_loc rest lrest
+  | Pack (_, _, rest), LPack (_, lrest)
+  | Fit (_, rest), LFit (_, lrest)
+  | Wide rest, LWide (_, lrest) -> same_loc rest lrest
+  | Close (_, rest), LClose (_, lrest) -> same_loc rest lrest
   | Effect (_, _, body, rest), LEffect (_, lbody, lrest) ->
     same_loc body lbody && same_loc rest lrest
   | Order (rel, rest), LOrder (found, _, lrest) when rel = found ->
@@ -1089,6 +1349,8 @@ let rec same_loc code loc =
     same_loc body lbody && same_loc rest lrest
   | Iter (_, _, _, body, rest), LIter (_, lbody, lrest) ->
     same_loc body lbody && same_loc rest lrest
+  | Iter_seq (_, _, _, body, rest), LIter (_, lbody, lrest) ->
+    same_loc body lbody && same_loc rest lrest
   | Choice (_, yes, _, no, _, rest),
       LChoice (_, _, _, lyes, lno, lrest) ->
     same_loc yes lyes && same_loc no lno && same_loc rest lrest
@@ -1103,12 +1365,61 @@ type mvalue =
   | VVec of shape * mvalue list
   | VSum of bool * mvalue
 
+let rec machine_value typ value =
+  match typ, value with
+  | C_type.Unit, C_eval.Unit -> Some VUnit
+  | C_type.Bool, C_eval.Bool value -> Some (VAtom (C_emit.Bool value))
+  | C_type.Int, C_eval.Int value -> Some (VAtom (C_emit.Int value))
+  | (C_type.Num _ as typ), C_eval.Int value when C_type.admits typ value ->
+    Some (VAtom (C_emit.Int value))
+  | C_type.Bytes len, C_eval.Bytes value
+      when C_nat.to_int len = String.length value ->
+    Some (VAtom (C_emit.Bytes value))
+  | C_type.Cap kind, C_eval.Cap (found, id) when C_nat.equal kind found ->
+    Some (VAtom (C_emit.Cap (kind, id)))
+  | C_type.Vec (len, elem), C_eval.Vec values
+      when C_nat.to_int len = Array.length values ->
+    Option.bind (shape_of elem) (fun form ->
+      Option.map (fun items -> VVec (form, items))
+        (machine_values elem (Array.to_list values)))
+  | (C_type.Seq _ as typ), value when C_eval.typed typ value ->
+    machine_value (C_type.repr typ) value
+  | C_type.Pair (lhs, rhs), C_eval.Pair (left, right) ->
+    Option.bind (machine_value lhs left) (fun first ->
+      Option.map (fun second -> VPair (first, second))
+        (machine_value rhs right))
+  | C_type.Sum (lhs, rhs), C_eval.Inl item ->
+    Option.bind (shape_of lhs) (fun left ->
+      Option.bind (shape_of rhs) (fun right ->
+        if same_shape left right then
+          Option.map (fun value -> VSum (true, value))
+            (machine_value lhs item)
+        else None))
+  | C_type.Sum (lhs, rhs), C_eval.Inr item ->
+    Option.bind (shape_of lhs) (fun left ->
+      Option.bind (shape_of rhs) (fun right ->
+        if same_shape left right then
+          Option.map (fun value -> VSum (false, value))
+            (machine_value rhs item)
+        else None))
+  | _ -> None
+
+and machine_values typ = function
+  | [] -> Some []
+  | value :: rest ->
+    Option.bind (machine_value typ value) (fun first ->
+      Option.map (fun tail -> first :: tail) (machine_values typ rest))
+
+let machine_zero typ =
+  Option.bind (C_eval.zero typ) (machine_value typ)
+
 let rec eval_value = function
   | VUnit -> Some C_eval.Unit
   | VAtom (C_emit.Bool value) -> Some (C_eval.Bool value)
   | VAtom (C_emit.Int value) -> Some (C_eval.Int value)
   | VAtom (C_emit.Bytes value) -> Some (C_eval.Bytes value)
   | VAtom (C_emit.Data value) -> Some (C_rval.value value)
+  | VAtom (C_emit.Cap (kind, id)) -> Some (C_eval.Cap (kind, id))
   | VPair (left, right) ->
     Option.bind (eval_value left) (fun left ->
       Option.map (fun right -> C_eval.Pair (left, right)) (eval_value right))
@@ -1124,6 +1435,7 @@ let rec eval_value = function
 
 let rec value_shape = function
   | VUnit -> SUnit
+  | VAtom (C_emit.Cap (kind, _)) -> SCap kind
   | VAtom _ -> SAtom
   | VPair (lhs, rhs) -> SPair (value_shape lhs, value_shape rhs)
   | VVec (elem, values) ->
@@ -1197,6 +1509,7 @@ let rec collect_effects row = function
   | Negate rest
   | Absolute rest
   | Same rest
+  | Different rest
   | Order (_, rest)
   | Join rest
   | Clip (_, rest)
@@ -1209,7 +1522,9 @@ let rec collect_effects row = function
   | Append rest
   | Pick (_, rest)
   | Unhead rest -> collect_effects row rest
-  | Left rest | Right rest -> collect_effects row rest
+  | Left rest | Right rest | Pack (_, _, rest) | Fit (_, rest) | Wide rest ->
+    collect_effects row rest
+  | Close (kind, rest) -> collect_effects (C_eff.add (C_eff.Close kind) row) rest
   | Effect (_, action, body, rest) ->
     collect_effects (collect_effects (C_eff.add action row) body) rest
   | Scope (_, body, rest) ->
@@ -1217,6 +1532,8 @@ let rec collect_effects row = function
   | Scope2 (_, _, body, rest) ->
     collect_effects (collect_effects row body) rest
   | Iter (_, _, _, body, rest) ->
+    collect_effects (collect_effects row body) rest
+  | Iter_seq (_, _, _, body, rest) ->
     collect_effects (collect_effects row body) rest
   | Choice (_, yes, _, no, _, rest) ->
     collect_effects
@@ -1298,6 +1615,14 @@ let rec exec fuel code env stack plan =
         match stack with
         | VAtom rhs :: VAtom lhs :: tail ->
           exec left rest env (VAtom (C_emit.Bool (equal lhs rhs)) :: tail) plan
+        | _ -> None
+      end
+    | Different rest ->
+      begin
+        match stack with
+        | VAtom (C_emit.Int rhs) :: VAtom (C_emit.Int lhs) :: tail ->
+          exec left rest env (VAtom (C_emit.Bool (not (Z.equal lhs rhs))) :: tail)
+            plan
         | _ -> None
       end
     | Order (rel, rest) ->
@@ -1408,6 +1733,47 @@ let rec exec fuel code env stack plan =
         | payload :: tail -> exec left rest env (VSum (false, payload) :: tail) plan
         | [] -> None
       end
+    | Pack (cap, typ, rest) ->
+      begin
+        match stack, shape_of typ, machine_zero typ with
+        | VVec (form, values) :: tail, Some expected, Some zero
+            when List.length values <= C_nat.to_int cap
+              && same_shape form expected
+              && same_shape form (value_shape zero) ->
+          let rec fill count out =
+            if count = 0 then List.rev out
+            else fill (count - 1) (zero :: out)
+          in
+          let count = List.length values in
+          let pad = fill (C_nat.to_int cap - count) [] in
+          let value =
+            VPair (VAtom (C_emit.Int (Z.of_int count)), VVec (form, values @ pad))
+          in
+          exec left rest env (value :: tail) plan
+        | _ -> None
+      end
+    | Fit (typ, rest) ->
+      begin
+        match stack with
+        | VAtom (C_emit.Int value) :: tail ->
+          let side = C_type.admits typ value in
+          exec left rest env (VSum (side, VAtom (C_emit.Int value)) :: tail) plan
+        | _ -> None
+      end
+    | Wide rest ->
+      begin
+        match stack with
+        | VAtom (C_emit.Int _) :: _ -> exec left rest env stack plan
+        | _ -> None
+      end
+    | Close (kind, rest) ->
+      begin
+        match stack with
+        | VAtom (C_emit.Cap (found, id)) :: tail when C_nat.equal kind found ->
+          let action = C_eval.held (C_eff.Close kind) C_eval.Unit kind id in
+          exec left rest env (VUnit :: tail) (action :: plan)
+        | _ -> None
+      end
     | Scope (bind, body, rest) ->
       begin
         match stack with
@@ -1449,6 +1815,32 @@ let rec exec fuel code env stack plan =
                 (fun value -> same_shape elem (value_shape value))
                 values ->
           exec_fold left body item_bind state_bind values env tail state plan rest
+        | _ -> None
+      end
+    | Iter_seq (cap, item_bind, state_bind, body, rest) ->
+      begin
+        match item_bind.C_term.mul, state_bind.C_term.mul, stack,
+            shape_of item_bind.C_term.typ, shape_of state_bind.C_term.typ with
+        | C_type.Zero, _, _, _, _ | _, C_type.Zero, _, _, _ -> None
+        | _, _, state :: VPair (VAtom (C_emit.Int len), VVec (elem, values))
+            :: tail, Some item_shape, Some state_shape
+            when Z.sign len >= 0
+              && Z.leq len (C_nat.to_z cap)
+              && List.length values = C_nat.to_int cap
+              && same_shape item_shape elem
+              && same_shape state_shape (value_shape state)
+              && List.for_all
+                (fun value -> same_shape elem (value_shape value))
+                values ->
+          let rec prefix count out values =
+            if count = 0 then Some (List.rev out)
+            else
+              match values with
+              | value :: rest -> prefix (count - 1) (value :: out) rest
+              | [] -> None
+          in
+          Option.bind (prefix (Z.to_int len) [] values) (fun active ->
+            exec_fold left body item_bind state_bind active env tail state plan rest)
         | _ -> None
       end
     | Choice (left_bind, yes, right_bind, no, form, rest) ->
@@ -1525,12 +1917,23 @@ let atom typ = function
     Some (VAtom (C_emit.Bool value))
   | C_emit.Int value when C_type.equal typ C_type.Int ->
     Some (VAtom (C_emit.Int value))
+  | C_emit.Int value when C_type.admits typ value ->
+    Some (VAtom (C_emit.Int value))
   | C_emit.Bytes value ->
     begin
       match typ with
       | C_type.Bytes len
           when Z.equal (C_nat.to_z len) (Z.of_int (String.length value)) ->
         Some (VAtom (C_emit.Bytes value))
+      | _ -> None
+    end
+  | C_emit.Data item when C_type.equal typ (C_rval.typ item) ->
+    machine_value typ (C_rval.value item)
+  | C_emit.Cap (kind, id) ->
+    begin
+      match typ with
+      | C_type.Cap found when C_nat.equal kind found ->
+        Some (VAtom (C_emit.Cap (kind, id)))
       | _ -> None
     end
   | C_emit.Data _ | C_emit.Bool _ | C_emit.Int _ -> None
@@ -1580,6 +1983,18 @@ let replay_plan_in code inputs =
     (replay_actions_in code inputs)
 
 let replay_in code inputs = Option.map fst (replay_plan_in code inputs)
+
+let replay_value_in code inputs typ =
+  match open_inputs [] inputs with
+  | None -> None
+  | Some env ->
+    begin
+      match exec (1 + size code) code env [] [] with
+      | Some ([value], final, _)
+          when terminal (List.map fst inputs) final ->
+        Option.bind (eval_value value) (literal typ)
+      | Some _ | None -> None
+    end
 
 let source source =
   let* parsed =
@@ -1660,33 +2075,50 @@ let finish ?marks parsed term (info : C_check.info) (out : C_eval.out) =
       | None -> Error Term
     end
 
-let runtime_input bind =
-  match shape_of bind.C_term.typ with
-  | Some SAtom -> Ok ()
-  | Some _ | None -> Error (Input (bind.id, bind.typ))
-
 let open_image parsed lowered (info : C_check.info) =
-  let rec inputs = function
-    | [] -> Ok ()
+  let rec measure width cells nodes = function
+    | [] -> Ok (width, cells, nodes)
     | bind :: rest ->
-      let* () = runtime_input bind in
-      inputs rest
+      begin
+        match shape_of bind.C_term.typ, C_type.nodes bind.typ with
+        | Some form, Some count ->
+          measure
+            (Z.add width (shape_width form))
+            (Z.add cells (shape_cells form))
+            (Z.add nodes (Z.of_int count))
+            rest
+        | _, _ -> Error (Input (bind.id, bind.typ))
+      end
   in
-  let count = List.length lowered.C_low.inputs in
-  if count > Contract_vm.input_limit then Error (Inputs count)
+  let* count, cells, nodes =
+    measure Z.zero Z.zero Z.zero lowered.C_low.inputs
+  in
+  let* out, out_nodes =
+    match shape_of info.typ, C_type.nodes info.typ with
+    | Some value, Some count -> Ok (value, count)
+    | _, _ -> Error Term
+  in
+  let cells = Z.add cells (shape_cells out) in
+  let nodes = Z.add nodes (Z.of_int out_nodes) in
+  if Z.gt count (Z.of_int Contract_vm.input_limit) then
+    Error (Inputs count)
+  else if Z.gt cells (Z.of_int C_check.max_inputs) then
+    Error (Layout cells)
+  else if Z.gt nodes (Z.of_int C_type.max_nodes) then
+    Error (Types nodes)
   else if Z.gt info.res.steps C_eval.max_cost then
     Error (Run (C_eval.Fuel (C_eval.max_cost, info.res.steps)))
   else
-  let* () = inputs lowered.C_low.inputs in
   let effects = C_eff.to_list info.eff in
-  if effects <> [] then Error (Effects effects)
+  if not (List.for_all (function C_eff.Close _ -> true | _ -> false) effects)
+  then Error (Effects effects)
   else
     match lower_in lowered.inputs lowered.term with
     | None -> Error Term
     | Some code ->
       begin
         match one_shape code with
-        | Some SAtom ->
+        | Some actual when same_shape actual out ->
           let* mark = source_tree parsed lowered.term in
           let* loc =
             match into_loc lowered.term mark LDone with
@@ -1741,14 +2173,18 @@ let text = function
   | Source error -> C_parse.text error
   | Feed error -> C_feed.text error
   | Input (id, typ) ->
-    "machine input is not scalar id = " ^ C_nat.text id
+    "machine input is outside the plain data profile id = " ^ C_nat.text id
     ^ " type = " ^ C_type.text typ
   | Inputs count ->
-    Printf.sprintf "machine input count = %d maximum = 60" count
+    "machine input count = " ^ Z.to_string count ^ " maximum = 60"
+  | Layout cells ->
+    "machine layout cells = " ^ Z.to_string cells ^ " maximum = 4096"
+  | Types nodes ->
+    "machine type nodes = " ^ Z.to_string nodes ^ " maximum = 4096"
   | Effects effects ->
       "machine effects are not representable effects = "
       ^ C_eff.text (C_eff.of_list effects)
-  | Term -> "machine term is outside the runtime scalar profile"
+  | Term -> "machine term is outside the runtime data profile"
   | Run error -> C_eval.text error
   | Plan effects ->
       "machine execution plan is not empty effects = "

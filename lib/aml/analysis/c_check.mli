@@ -10,6 +10,8 @@ type error =
   | Bad of C_type.t
   | Byte_index of C_nat.t * C_nat.t
   | Vec_index of C_nat.t * C_nat.t
+  | Seq_size of C_nat.t * C_nat.t
+  | Range_type of C_type.t
   | Size
   | Mode of C_term.id * C_type.mul
   | Split of C_term.id list
@@ -81,4 +83,5 @@ val check_in_at :
 val locations : info -> location list
 val sites : info -> site list
 val text : error -> string
+val text_named : (C_term.id -> string option) -> error -> string
 val rule_text : rule_error -> string

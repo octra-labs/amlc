@@ -6,6 +6,7 @@ type lit =
   | Int of Z.t
   | Bytes of string
   | Data of C_rval.t
+  | Cap of C_nat.t * C_nat.t
 
 type op =
   | Load of lit

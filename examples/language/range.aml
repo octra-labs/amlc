@@ -1,0 +1,4 @@
+program Amount {
+  input many amount: int
+  term fit[uint[128]](amount)
+}

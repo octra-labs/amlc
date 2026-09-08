@@ -137,7 +137,7 @@ let keyword_map = [
   "true", TkTrue; "false", TkFalse;
   "int", TkTyInt; "bool", TkTyBool; "string", TkTyString;
   "address", TkTyAddress; "bytes", TkTyBytes; "bytes32", TkTyBytes32;
-  "u64", TkTyU64; "u128", TkTyU128; "u256", TkTyU256; "uint", TkTyU256;
+  "u64", TkTyU64; "u128", TkTyU128; "u256", TkTyU256; "uint", TkTyUint;
   "cipher", TkTyCipher; "pubkey", TkTyPubKey;
   "map", TkMap; "tree_hash", TkTreeHash; "node_id", TkNodeId; "tx_hash", TkTxHash;
   "for", TkFor; "in", TkIn; "list", TkTyList;

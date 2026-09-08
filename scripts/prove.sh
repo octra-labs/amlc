@@ -18,14 +18,28 @@ if grep -En '(^|[^[:alnum:]_])(Admitted|Axiom|Parameter|Conjecture|admit)([^[:al
   exit 1
 fi
 
+opam exec -- dune build --root "$root" lib/octra_vm.cmxa
+
 (
   cd "$work"
-  set -- Fp Lpn Iwork Uni Surf Fin Dec DecRel DecComp DecSound Fuel Lim Rule Proj Pack Bin Ser Pimg Low Fun Data Rift Rec Quant Weave Braid Loom Cmp Orbit Wake Idx Law Raw Norm Rnom Spec Poly Perm Fhe Hop Hfhe Graph Ent Param Crypt Hpar Sess Sbin Pbin Cert Scert Prof Text Lex Read Comp Src Seal Sha Root Host Effect Ciph Turn Feed Rval Emit Trace Mach Smap Live Path Folio Dbg Dbin
+  set -- Fp Lpn Iwork Uni Surf Fin Dec DecRel DecComp DecSound Fuel Lim Rule Proj Pack Bin Ser Pimg Low Fun Data Rift Rec Quant Weave Braid Loom Cmp Range Seq Orbit Wake Idx Law Raw Norm Rnom Spec Poly Perm Fhe Hop Hfhe Graph Ent Param Crypt Hpar Sess Sbin Pbin Cert Scert Prof Text Lex Read Comp Src Seal Sha Root Host Effect Ciph Turn Feed Rval Emit Trace Mach Otb Smap Live Path Folio Dbg Dbin
   for unit in "$@"; do
     coqc -q "$unit.v"
   done
   coqc -q Iextract.v
   coqc -q Extract.v
+  cp "$root/formal/Model.ml" .
+  opam exec -- ocamlfind ocamlopt -thread -linkall \
+    -package zarith,threads,base64,digestif.c -linkpkg \
+    -I "$root/_build/default/lib" \
+    -I "$root/_build/default/lib/.octra_vm.objs/byte" \
+    range_model.mli range_model.ml seq_model.mli seq_model.ml \
+    graph_model.mli graph_model.ml \
+    layout_model.mli layout_model.ml \
+    otb_model.mli otb_model.ml \
+    hop_model.mli hop_model.ml \
+    "$root/_build/default/lib/octra_vm.cmxa" Model.ml -o model
+  ./model
   proof_ctx=$(coqchk -silent -o "$@" 2>&1)
   for claim in \
     '* Axioms: <none>' \

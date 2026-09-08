@@ -98,6 +98,45 @@ let valid config value =
             && List.for_all (edge_ok config count) value.edges
       end
 
+let mul_depth value =
+  let parent id depths value =
+    List.nth_opt depths (id - C_nat.to_int value - 1)
+  in
+  let rec walk id depths peak = function
+    | [] ->
+        begin
+          match C_nat.of_int peak with
+          | Some depth -> Ok depth
+          | None -> Error Layer
+        end
+    | value :: rest ->
+        begin
+          match C_nat.of_int id with
+          | None -> Error Layer
+          | Some at when not (layer_ok at value) -> Error Layer
+          | Some _ ->
+              let depth =
+                match value.rule with
+                | Base -> Some 0
+                | Prod (left, right) ->
+                    begin
+                      match parent id depths left, parent id depths right with
+                      | Some lhs, Some rhs -> Some (1 + Int.max lhs rhs)
+                      | _, _ -> None
+                    end
+              in
+              begin
+                match depth with
+                | Some depth ->
+                    walk (id + 1) (depth :: depths) (Int.max peak depth) rest
+                | None -> Error Layer
+              end
+        end
+  in
+  match C_nat.of_int (List.length value.layers) with
+  | Some _ -> walk 0 [] 0 value.layers
+  | None -> Error Layer
+
 let fadd left right = Z.erem (Z.add left right) prime
 
 let rec wadd left right =

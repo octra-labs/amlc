@@ -108,6 +108,40 @@ let imported_interface = {|
 interface Store { fn read(): int }
 |}
 
+let nested_loop = {|
+contract NestedLoop {
+  private pure fn inner(limit: int): int {
+    let total: int = 0
+    for index in 0..limit {
+      total = total + 1
+    }
+    return total
+  }
+
+  public pure fn run(): int {
+    let total: int = 0
+    for index in 0..20 {
+      total = total + inner(index) + 1
+    }
+    return total
+  }
+}
+|}
+
+let context_name = {|
+contract ContextName {
+  public pure fn digest(value: string): string {
+    return value
+  }
+}
+|}
+
+let map_pair = {|
+program MapPair {
+  state { value: map[int]int * int }
+}
+|}
+
 let private_namespace = {|
 contract PrivateNamespace {
   state { @aml: int }
@@ -165,6 +199,48 @@ let established_program = {|
 program Store {
   state { value: string }
   public fn permit(input: string): string { return input }
+}
+|}
+
+let broken_established = {|
+program Broken {
+  state { value: int }
+  public fn read(): int { return value + }
+}
+|}
+
+let broken_current = {|
+program Broken {
+  term
+    let once item: int = 1 in
+    item +
+}
+|}
+
+let misspelled_source = {|
+contrakt Broken {
+  public pure fn value(): string { return "wrong header" }
+}
+|}
+
+let form_first_mixed = {|
+program FormFirst {
+  form add [] (many value: int) ->[many] int marks {} = value + 1
+  public pure fn run(value: int): int { return add(value) }
+}
+|}
+
+let keyword_binders = {|
+program KeywordBinders {
+  input many event: int
+  input many invariant: int
+  term orbit[1] from event with once state: int => state
+}
+|}
+
+let invariant_only = {|
+program InvariantOnly {
+  invariant valid = true
 }
 |}
 
@@ -241,8 +317,26 @@ program OrderEdges {
 
 let order_type = "program BadOrder { term true < 5 }"
 let order_chain = "program Chain { term 1 < 2 < 3 }"
+let equality_type = "program BadEquality { term true == false }"
+let equality_chain = "program EqualityChain { term 1 == 1 == 1 }"
 
 let order_auto = "program AutoOrder { term 3 < 5 }"
+
+let equality_auto = {|
+program AutoEquality {
+  input many left: int
+  input many right: int
+  term left == right
+}
+|}
+
+let equality_explicit = {|
+program ExplicitEquality {
+  input many left: int
+  input many right: int
+  term equal[int](left, right)
+}
+|}
 
 let order_explicit = {|
 program ExplicitOrder {
@@ -332,6 +426,7 @@ program FiniteSeedType {
 let order_matrix () =
   let values = List.init 33 (fun index -> index - 16) in
   let relations = [
+    "==", (fun left right -> left = right);
     "<", (fun left right -> left < right);
     "<=", (fun left right -> left <= right);
     ">", (fun left right -> left > right);
@@ -460,6 +555,240 @@ let mixed_plain = mixed_program ""
 
 let mixed_under =
   mixed_program " under {steps[0], depth[0], work[0]}"
+
+let mixed_main = {|
+program MainEntry {
+  state { total: int }
+  form add [many left: int] (many right: int) ->[many] int marks {} =
+    left + right
+  public main(many left: int, many right: int) ->[many] int marks {} =
+    add(left, right)
+  public view fn read(): int { return self.total }
+}
+|}
+
+let mixed_main_only = {|
+program MainOnly {
+  public main() ->[many] int marks {} = 42
+}
+|}
+
+let mixed_main_write = {|
+program MainWrite {
+  state { total: int }
+  public main(many value: int) ->[many] int marks {write[7]:total} =
+    write[7](value)
+}
+|}
+
+let mixed_main_emit = {|
+program MainEmit {
+  event Value(value: int)
+  public main(many value: int) ->[many] int marks {emit[7]:Value} =
+    emit[7](value)
+}
+|}
+
+let mixed_main_read = {|
+program MainRead {
+  state { total: int }
+  public main(many value: int) ->[many] int marks {read[7]:total} =
+    read[7](value)
+}
+|}
+
+let mixed_main_fail = {|
+program MainFail {
+  error Denied(403, "denied")
+  public main(many value: int) ->[many] int marks {fail[9]:Denied} =
+    fail[9](value)
+}
+|}
+
+let mixed_main_pair_fail = {|
+program MainPairFail {
+  error Denied(403, "denied")
+  public main(many value: int) ->[many] int * int marks {fail[9]:Denied} =
+    let many kept: int = fail[9](value) in
+    (kept, value)
+}
+|}
+
+let mixed_main_twice = {|
+program MainTwice {
+  public main() ->[many] int marks {} = 1
+  public main() ->[many] int marks {} = 2
+}
+|}
+
+let mixed_main_before = {|
+program MainBefore {
+  public pure fn main(): int { return 1 }
+  public main() ->[many] int marks {} = 2
+}
+|}
+
+let mixed_main_after = {|
+program MainAfter {
+  public main() ->[many] int marks {} = 1
+  public pure fn main(): int { return 2 }
+}
+|}
+
+let mixed_context = {|
+program ContextFlow {
+  form quote [many now: int] (many sent: int) ->[many] int marks {} =
+    if now >= 0 then sent else 0
+  public payable fn run(expected: address): int {
+    require(caller == expected, "caller differs")
+    return quote(epoch, value)
+  }
+}
+|}
+
+let mixed_context_names = {|
+program ContextNames {
+  form quote [many epoch: int] (many value: int) ->[many] int marks {} =
+    epoch + value
+  public payable fn run(): int { return quote(epoch, value) }
+}
+|}
+
+let hidden_text = {|
+program TextHidden {
+  form message [] (many value: int) ->[many] int marks {} = "message"
+  public pure fn run(value: int): int { return message(value) }
+}
+|}
+
+let context_program expr =
+  Printf.sprintf {|
+program HiddenContext {
+  form probe [] (many input: int) ->[many] int marks {} = %s
+  public pure fn run(input: int): int { return probe(input) }
+}
+|} expr
+
+let legacy_main = {|
+contract LegacyMain {
+  public main() ->[many] int marks {} = 1
+}
+|}
+
+let stateful_input = {|
+program StatefulInput {
+  state { total: int }
+  input many value: int
+  term value
+}
+|}
+
+let stateful_term = {|
+program StatefulTerm {
+  state { total: int }
+  term 1
+}
+|}
+
+let callable_input = {|
+program CallableInput {
+  input many value: int
+  public pure fn read(): int { return 1 }
+  term value
+}
+|}
+
+let callable_term = {|
+program CallableTerm {
+  public pure fn read(): int { return 1 }
+  term 1
+}
+|}
+
+let core_main_name = {|
+program CoreMainName {
+  form main [] (many value: int) ->[many] int marks {} = value + 1
+  term main(41)
+}
+|}
+
+let mixed_structured = {|
+program Structured {
+  state { total: int }
+  form step [] (many pair: int * int) ->[many] int * int marks {} =
+    split pair as many value: int, many count: int in
+    (value + 1, count + 1)
+  form count [many turns: int] (many value: int) ->[many] int marks {} =
+    let many start: int * int = (value, 0) in
+    split orbit[4, turns] from start with once pair: int * int => step(pair)
+      as many kept: int, many count: int in
+    count
+  form same [] (many pair: int * int) ->[many] bool marks {} =
+    split pair as many left: int, many right: int in
+    equal[int](left, right)
+  public fn run(value: int, turns: int): int {
+    self.total = count(turns, value)
+    return self.total
+  }
+  public pure fn equal(left: int, right: int): bool {
+    return same((left, right))
+  }
+}
+|}
+
+let mixed_equal_type = {|
+program EqualType {
+  state { total: int }
+  form same [] (many pair: int * int) ->[many] bool marks {} =
+    split pair as many left: int, many right: int in
+    equal[bool](left, right)
+  public pure fn run(left: int, right: int): bool {
+    return same((left, right))
+  }
+}
+|}
+
+let mixed_once_expr = {|
+program OnceExpr {
+  public pure fn run(value: int): int {
+    return let once item: int = value in item + item
+  }
+}
+|}
+
+let mixed_nested_pair = {|
+program NestedPair {
+  form total [] (many value: int * (int * int)) ->[many] int marks {} =
+    split value as many first: int, many rest: int * int in
+    split rest as many second: int, many third: int in
+    first + second + third
+  public pure fn run(first: int, second: int, third: int): int {
+    return total((first, (second, third)))
+  }
+}
+|}
+
+let mixed_orbit_depth = {|
+program OrbitDepth {
+  form step [] (many value: int) ->[many] int marks {} = value + 1
+  form count [] (many value: int) ->[many] int marks {} =
+    orbit[32] from value with once item: int => step(item)
+  public pure fn run(value: int): int {
+    return count(value)
+  }
+}
+|}
+
+let legacy_names = {|
+contract LegacyNames {
+  private pure fn orbit(value: int): int { return value + 1 }
+  private pure fn equal(value: int): int { return orbit(value) }
+  public pure fn number(value: int): int { return equal(value) }
+  public pure fn text(value: string): string {
+    return join(split(value, ","), "|")
+  }
+}
+|}
 
 let mixed_public = {|
 program PublicPure {
@@ -1054,6 +1383,86 @@ program FixedBytes {
 }
 |}
 
+let mixed_uint_legacy = {|
+program UIntAlias {
+  form keep [] (many value: u64) ->[many] u64 marks {} = value
+  form same [many left: u64] (many right: u64) ->[many] bool marks {} =
+    left == right
+  public pure fn run(value: u64): u64 { return keep(value) }
+  public pure fn equal(left: u64, right: u64): bool {
+    return same(left, right)
+  }
+}
+|}
+
+let mixed_uint_sized = {|
+program UIntAlias {
+  form keep [] (many value: uint[64]) ->[many] uint[64] marks {} = value
+  form same [many left: uint[64]] (many right: uint[64])
+    ->[many] bool marks {} = left == right
+  public pure fn run(value: uint[64]): uint[64] { return keep(value) }
+  public pure fn equal(left: uint[64], right: uint[64]): bool {
+    return same(left, right)
+  }
+}
+|}
+
+let mixed_bytes_legacy = {|
+program BytesAlias {
+  form keep [] (many value: bytes32) ->[many] bytes32 marks {} = value
+  public pure fn run(value: bytes32): bytes32 { return keep(value) }
+}
+|}
+
+let mixed_bytes_sized = {|
+program BytesAlias {
+  form keep [] (many value: bytes[32]) ->[many] bytes[32] marks {} = value
+  public pure fn run(value: bytes[32]): bytes[32] { return keep(value) }
+}
+|}
+
+let mixed_uint_width = {|
+program UIntWidth {
+  public main(many value: uint[63]) ->[many] uint[63] marks {} = value
+}
+|}
+
+let mixed_sint_abi = {|
+program SintAbi {
+  public main(many value: sint[64]) ->[many] sint[64] marks {} = value
+}
+|}
+
+let mixed_vec_abi = {|
+program VecAbi {
+  public main(many value: vec[4, int]) ->[many] vec[4, int] marks {} = value
+}
+|}
+
+let mixed_seq_abi = {|
+program SeqAbi {
+  public main(many value: seq[4, int]) ->[many] seq[4, int] marks {} = value
+}
+|}
+
+let mixed_bytes_width = {|
+program BytesWidth {
+  public main(many value: bytes[31]) ->[many] bytes[31] marks {} = value
+}
+|}
+
+let mixed_addr_abi = {|
+program AddressAbi {
+  public main(many value: address) ->[many] address marks {} = value
+}
+|}
+
+let mixed_text_abi = {|
+program TextAbi {
+  public main(many value: string) ->[many] string marks {} = value
+}
+|}
+
 let mixed_mutation = {|
 program Mutation {
   private pure fn change(value: int): int {
@@ -1096,6 +1505,17 @@ contract Mixed {
 |}
 
 let mixed_limits () =
+  let rec nest count body =
+    if count = 0 then body
+    else
+      "let many x" ^ string_of_int count ^ ": int = 0 in "
+      ^ nest (count - 1) body
+  in
+  let deep =
+    "program ExprDepth { form run [] (many value: int) ->[many] int marks {} = "
+    ^ nest 130 "value" ^ " }"
+  in
+  refuse "mixed expression depth" "expression nesting exceeds limit" deep;
   let leaf = String.concat " + " (List.init 100 (fun _ -> "value")) in
   let calls count =
     String.concat " + " (List.init count (fun _ -> "leaf(value)"))
@@ -1434,8 +1854,9 @@ let mixed_runtime_matrix () =
     "value <= -2", "value <= -2", "bool";
     "value > -2", "value > -2", "bool";
     "value >= -2", "value >= -2", "bool";
+    "value == -2", "value == -2", "bool";
     "equal[int](value, -2)", "value == -2", "bool";
-    "equal[bool](equal[int](value, -2), false)", "value != -2", "bool";
+    "value != -2", "value != -2", "bool";
     "if value < 0 then -value else value",
       "value < 0 ? -value : value", "int";
   ] in
@@ -1469,8 +1890,152 @@ let mixed_runtime_matrix () =
     "value / 0" "value / 0" (VM.VInt Z.one)
 
 let mixed_checks () =
+  let number_args = [VM.VInt (Z.of_int 40)] in
+  let number = execute ~args:number_args "legacy names number" "number"
+    legacy_names in
+  result "legacy names number" "int:41" number;
+  let text_args = [VM.VString "left,right"] in
+  let text = execute ~args:text_args "legacy names text" "text" legacy_names in
+  result "legacy names text" "text:left|right" text;
   if Amlc_cli.source_form_raw mixed <> Amlc_cli.Contract_source then
     fail "mixed source" "program not recognized";
+  if Amlc_cli.source_form_raw mixed_main <> Amlc_cli.Contract_source then
+    fail "mixed main source" "program not recognized";
+  if Amlc_cli.source_form_raw core_main_name <> Amlc_cli.Program_source then
+    fail "core main name" "program form differs";
+  core_result "core main name" (Octra_vm.C_emit.Int (Z.of_int 42))
+    core_main_name;
+  let main_only_source = execute "mixed main only source" "main"
+    mixed_main_only in
+  let main_only_octb = execute_octb "mixed main only OCTB" "main"
+    mixed_main_only in
+  result "mixed main only source" "int:42" main_only_source;
+  same_runtime "mixed main only" main_only_source main_only_octb;
+  let write_args = [VM.VInt (Z.of_int 7)] in
+  let main_write_source = execute ~args:write_args "mixed main write source"
+    "main" mixed_main_write in
+  let main_write_octb = execute_octb ~args:write_args "mixed main write OCTB"
+    "main" mixed_main_write in
+  result "mixed main write source" "int:7" main_write_source;
+  storage_value "mixed main write source" "total" "7" main_write_source;
+  same_runtime "mixed main write" main_write_source main_write_octb;
+  let main_emit_source = execute ~args:write_args "mixed main emit source"
+    "main" mixed_main_emit in
+  let main_emit_octb = execute_octb ~args:write_args "mixed main emit OCTB"
+    "main" mixed_main_emit in
+  result "mixed main emit source" "int:7" main_emit_source;
+  if List.length main_emit_source.events <> 1 then
+    fail "mixed main emit source" "event count differs";
+  same_runtime "mixed main emit" main_emit_source main_emit_octb;
+  let read_storage = ["total", "7"] in
+  let main_read_source =
+    execute ~args:write_args ~storage:read_storage "mixed main read source"
+      "main" mixed_main_read
+  in
+  let main_read_octb =
+    execute_octb ~args:write_args ~storage:read_storage "mixed main read OCTB"
+      "main" mixed_main_read
+  in
+  result "mixed main read source" "int:7" main_read_source;
+  same_runtime "mixed main read" main_read_source main_read_octb;
+  let main_fail_source =
+    attempt ~args:write_args "mixed main fail source" "main" mixed_main_fail
+  in
+  let main_fail_octb =
+    attempt_octb ~args:write_args "mixed main fail OCTB" "main"
+      mixed_main_fail
+  in
+  if main_fail_source.stop <> Local.Reverted then
+    fail "mixed main fail source" "fault returned";
+  same_runtime "mixed main fail" main_fail_source main_fail_octb;
+  refuse "mixed main pair fail"
+    "public main effect result has no proved ABI = tuple"
+    mixed_main_pair_fail;
+  let main_emit = compile "mixed main emit compile" mixed_main_emit in
+  begin
+    match
+      List.find_opt
+        (fun value -> String.equal value.Octra_vm.Oct_lang.fn_name "main")
+        main_emit.ast.funcs
+    with
+    | Some value when not value.fn_view && not value.fn_pure -> ()
+    | Some _ -> fail "mixed main emit ABI" "method is pure"
+    | None -> fail "mixed main emit ABI" "method is absent"
+  end;
+  let main_compiled = compile "mixed main compile" mixed_main in
+  let main_public =
+    List.filter
+      (fun value -> value.Octra_vm.Oct_lang.fn_vis = Octra_vm.Oct_lang.Public)
+      main_compiled.ast.funcs
+    |> List.map (fun value -> value.Octra_vm.Oct_lang.fn_name)
+  in
+  if main_public <> ["read"; "main"] then
+    fail "mixed main ABI" "public methods differ";
+  let main_args = [VM.VInt (Z.of_int 20); VM.VInt (Z.of_int 22)] in
+  let main_source = execute ~args:main_args "mixed main source" "main"
+    mixed_main in
+  let main_octb = execute_octb ~args:main_args "mixed main OCTB" "main"
+    mixed_main in
+  result "mixed main source" "int:42" main_source;
+  same_runtime "mixed main" main_source main_octb;
+  refuse "mixed main repeated" "duplicate main declaration" mixed_main_twice;
+  refuse "mixed main before" "duplicate main declaration" mixed_main_before;
+  refuse "mixed main after" "callable name is repeated = main"
+    mixed_main_after;
+  refuse "legacy main" "main declaration requires Program" legacy_main;
+  refuse "stateful input" "stateful or callable entry requires public main"
+    stateful_input;
+  refuse "stateful term" "stateful or callable entry requires public main"
+    stateful_term;
+  refuse "callable input" "stateful or callable entry requires public main"
+    callable_input;
+  refuse "callable term" "stateful or callable entry requires public main"
+    callable_term;
+  let context_args = [VM.VAddr "oct1context"] in
+  let context_source =
+    execute ~args:context_args ~caller:"oct1context" ~value:(Z.of_int 9)
+      ~epoch:17 "mixed context source" "run" mixed_context
+  in
+  let context_octb =
+    execute_octb ~args:context_args ~caller:"oct1context" ~value:(Z.of_int 9)
+      ~epoch:17 "mixed context OCTB" "run" mixed_context
+  in
+  result "mixed context source" "int:9" context_source;
+  same_runtime "mixed context" context_source context_octb;
+  let names_source =
+    execute ~value:(Z.of_int 9) ~epoch:17 "mixed context names source" "run"
+      mixed_context_names
+  in
+  let names_octb =
+    execute_octb ~value:(Z.of_int 9) ~epoch:17 "mixed context names OCTB" "run"
+      mixed_context_names
+  in
+  result "mixed context names source" "int:26" names_source;
+  same_runtime "mixed context names" names_source names_octb;
+  let context_refused =
+    attempt ~args:context_args ~caller:"oct1other" ~value:(Z.of_int 9)
+      ~epoch:17 "mixed context caller" "run" mixed_context
+  in
+  if context_refused.stop <> Local.Reverted then
+    fail "mixed context caller" "caller accepted";
+  [
+    "caller", "caller";
+    "origin", "origin";
+    "self_addr", "self_addr";
+    "epoch", "epoch";
+    "epoch_time", "epoch_time";
+    "value", "value";
+    "balance", "balance(caller)";
+    "tree_hash", "tree_hash";
+    "node_id", "node_id";
+    "tx_hash", "tx_hash";
+  ]
+  |> List.iter (fun (name, expr) ->
+    refuse ("hidden " ^ name)
+      ("direct form context requires function wrapper = " ^ name)
+      (context_program expr));
+  refuse "hidden text" "direct form text requires finite bytes"
+    hidden_text;
   let compiled = compile "mixed compile" mixed in
   let plain = compile "mixed plain" mixed_plain in
   if not (String.equal compiled.octb plain.octb) then
@@ -1510,6 +2075,64 @@ let mixed_checks () =
     fail "mixed OCTB" "effects differ";
   execute_octb ~storage:octb.storage "mixed state" "read" mixed
   |> result "mixed state" "int:11";
+  let structured_args = [VM.VInt (Z.of_int 10); VM.VInt (Z.of_int 9)] in
+  let structured_source =
+    execute ~args:structured_args "mixed structured source" "run"
+      mixed_structured
+  in
+  let structured_octb =
+    execute_octb ~args:structured_args "mixed structured OCTB" "run"
+      mixed_structured
+  in
+  result "mixed structured source" "int:4" structured_source;
+  same_runtime "mixed structured" structured_source structured_octb;
+  execute
+    ~args:[VM.VInt (Z.of_int 10); VM.VInt Z.zero]
+    "mixed structured zero" "run" mixed_structured
+  |> result "mixed structured zero" "int:0";
+  execute_octb
+    ~args:[VM.VInt (Z.of_int 10); VM.VInt (Z.of_int 2)]
+    "mixed structured two" "run" mixed_structured
+  |> result "mixed structured two" "int:2";
+  execute
+    ~args:[VM.VInt (Z.of_int 10); VM.VInt (Z.of_int (-3))]
+    "mixed structured negative" "run" mixed_structured
+  |> result "mixed structured negative" "int:0";
+  execute
+    ~args:[VM.VInt (Z.of_int 9); VM.VInt (Z.of_int 9)]
+    "mixed structured equal" "equal" mixed_structured
+  |> result "mixed structured equal" "bool:true";
+  execute_octb
+    ~args:[VM.VInt (Z.of_int 9); VM.VInt (Z.of_int 8)]
+    "mixed structured differ" "equal" mixed_structured
+  |> result "mixed structured differ" "bool:false";
+  refuse "mixed equal type" "direct form equality left type differs"
+    mixed_equal_type;
+  refuse "mixed once expression" "linear value used more than once name = item"
+    mixed_once_expr;
+  let nested_args =
+    [VM.VInt Z.one; VM.VInt (Z.of_int 2); VM.VInt (Z.of_int 3)]
+  in
+  let nested_source =
+    execute ~args:nested_args "mixed nested pair source" "run"
+      mixed_nested_pair
+  in
+  let nested_octb =
+    execute_octb ~args:nested_args "mixed nested pair OCTB" "run"
+      mixed_nested_pair
+  in
+  result "mixed nested pair source" "int:6" nested_source;
+  same_runtime "mixed nested pair" nested_source nested_octb;
+  let orbit_source =
+    execute ~args:[VM.VInt (Z.of_int 10)]
+      "mixed orbit depth source" "run" mixed_orbit_depth
+  in
+  let orbit_octb =
+    execute_octb ~args:[VM.VInt (Z.of_int 10)]
+      "mixed orbit depth OCTB" "run" mixed_orbit_depth
+  in
+  result "mixed orbit depth source" "int:42" orbit_source;
+  same_runtime "mixed orbit depth" orbit_source orbit_octb;
   execute ~args "mixed public fn" "run" mixed_public
   |> result "mixed public fn" "int:6";
   execute ~args ~value:Z.one "mixed payable helper" "pay" mixed_payable
@@ -1563,6 +2186,49 @@ let mixed_checks () =
     mixed_bytes in
   if short.stop <> Local.Reverted then
     fail "mixed bytes length" "short value accepted";
+  let uint_legacy = compile "mixed uint legacy" mixed_uint_legacy in
+  let uint_sized = compile "mixed uint sized" mixed_uint_sized in
+  if not (String.equal uint_legacy.octb uint_sized.octb) then
+    fail "mixed uint alias" "OCTB differs";
+  let u64_max = Z.pred (Z.shift_left Z.one 64) in
+  let uint_args = [VM.VInt u64_max] in
+  let uint_source = execute ~args:uint_args "mixed uint source" "run"
+    mixed_uint_sized in
+  let uint_octb = execute_octb ~args:uint_args "mixed uint OCTB" "run"
+    mixed_uint_sized in
+  result "mixed uint source" ("int:" ^ Z.to_string u64_max) uint_source;
+  same_runtime "mixed uint" uint_source uint_octb;
+  execute
+    ~args:[VM.VInt u64_max; VM.VInt u64_max]
+    "mixed uint equal" "equal" mixed_uint_sized
+  |> result "mixed uint equal" "bool:true";
+  let uint_over =
+    attempt ~args:[VM.VInt (Z.succ u64_max)] "mixed uint range" "run"
+      mixed_uint_sized
+  in
+  if uint_over.stop <> Local.Reverted then
+    fail "mixed uint range" "wide value accepted";
+  let bytes_legacy = compile "mixed bytes legacy" mixed_bytes_legacy in
+  let bytes_sized = compile "mixed bytes sized" mixed_bytes_sized in
+  if not (String.equal bytes_legacy.octb bytes_sized.octb) then
+    fail "mixed bytes alias" "OCTB differs";
+  let bytes_value = VM.VBytes (String.make 32 '\003') in
+  let bytes_source = execute ~args:[bytes_value] "mixed bytes sized source"
+    "run" mixed_bytes_sized in
+  let bytes_octb = execute_octb ~args:[bytes_value] "mixed bytes sized OCTB"
+    "run" mixed_bytes_sized in
+  result "mixed bytes sized source" (Local.value_text bytes_value) bytes_source;
+  same_runtime "mixed bytes sized" bytes_source bytes_octb;
+  refuse "mixed uint width" "uint width has no public ABI" mixed_uint_width;
+  refuse "mixed sint ABI" "sint type has no public ABI" mixed_sint_abi;
+  refuse "mixed vec ABI" "vec type has no public ABI" mixed_vec_abi;
+  refuse "mixed seq ABI" "seq type has no public ABI" mixed_seq_abi;
+  refuse "mixed bytes width" "sized bytes type has no public ABI"
+    mixed_bytes_width;
+  refuse "mixed address ABI" "direct form type is unsupported = address"
+    mixed_addr_abi;
+  refuse "mixed text ABI" "direct form type is unsupported = string"
+    mixed_text_abi;
   refuse "mixed once" "form requires explicit use = take" mixed_once;
   let once_source =
     execute ~args "mixed once use source" "run" mixed_once_use
@@ -1578,7 +2244,8 @@ let mixed_checks () =
       || once_source.steps <> once_octb.steps
       || once_source.storage <> once_octb.storage
   then fail "mixed once use" "detached execution differs";
-  refuse "mixed once use linear" "used id =" mixed_once_use_twice;
+  refuse "mixed once use linear"
+    "linear value used more than once name = out" mixed_once_use_twice;
   refuse "mixed once use type" "use result type differs = take"
     mixed_once_use_type;
   execute ~args "mixed once use local source" "run" mixed_once_use_local
@@ -1615,9 +2282,11 @@ let mixed_checks () =
   |> result "mixed use name source" "int:6";
   execute_octb ~args "mixed use name OCTB" "run" mixed_use_name
   |> result "mixed use name OCTB" "int:6";
-  refuse "mixed once use constructor" "used id =" mixed_once_use_ctor;
+  refuse "mixed once use constructor"
+    "linear value used more than once name = out" mixed_once_use_ctor;
   ignore (compile "mixed once use constructor valid" mixed_once_use_ctor_ok);
-  refuse "mixed once use constant" "used id =" mixed_once_use_const;
+  refuse "mixed once use constant"
+    "linear value used more than once name = out" mixed_once_use_const;
   execute ~args:[] "mixed once use constant source" "read"
     mixed_once_use_const_ok
   |> result "mixed once use constant source" "int:1";
@@ -1938,7 +2607,7 @@ let mixed_checks () =
     mixed_effect;
   refuse "mixed view" "function cannot enter a direct form = increase"
     mixed_view;
-  refuse "mixed state" "direct form expression is unsupported" mixed_state;
+  refuse "mixed state" "direct form state requires a proved effect" mixed_state;
   refuse "mixed open guard"
     "direct pure function body is unsupported = choose" mixed_open_guard;
   refuse "mixed mutation" "direct pure function body is unsupported = change"
@@ -1955,6 +2624,22 @@ let mixed_checks () =
   mixed_limits ()
 
 let run () =
+  let nested = compile "nested loop" nested_loop in
+  let nested_hash = Digestif.SHA256.(digest_string nested.octb |> to_hex) in
+  if not
+      (String.equal
+        nested_hash
+        "3236a1c9b9ca5a4051743fff3ef2936fdf490eb3d9b7931d338532d6d43a85a0")
+  then fail "nested loop" "compiler differs";
+  execute "nested loop" "run" nested_loop
+  |> result "nested loop" "int:210";
+  execute
+    ~args:[VM.VString "payload"]
+    ~value:(Z.of_int 17)
+    "context name"
+    "digest"
+    context_name
+  |> result "context name" "text:payload";
   refuse "trailing source" "trailing source after declaration" trailing;
   refuse "duplicate function" "duplicate function name" duplicate_function;
   refuse "duplicate parameter" "duplicate parameter name" duplicate_parameter;
@@ -1986,24 +2671,67 @@ let run () =
   refuse "bool refinement" "refinement type is not numeric" bool_refinement;
   refuse "wide error" "integer exceeds portable range" wide_error;
   refuse "NUL string" "NUL byte is not allowed in string" nul_string;
+  begin
+    let open Octra_vm.Oct_lang in
+    match (Octra_vm.Oct_parse.parse map_pair).state with
+    | [{ sf_typ = TTuple [TMap (TInt, TInt); TInt]; _ }] -> ()
+    | _ -> fail "map pair" "type precedence differs"
+  end;
   mixed_checks ();
   core_refuse "form position" "line = 4 col = 5" core_form_position;
-  core_refuse "linearity position" "line = 5 col = 5" core_linearity_position;
+  core_refuse "empty program" "line = 2 col = 1 program body is empty"
+    "program Empty {\n}\n";
+  core_refuse "linearity position"
+    "line = 5 col = 5 linear value is not consumed name = unused"
+    core_linearity_position;
   core_refuse "vector index" "vec index = 5 size = 3" core_vec_index;
   if Amlc_cli.source_form_raw established_program <> Amlc_cli.Contract_source then
     fail "established source" "program not recognized";
+  if Amlc_cli.source_form_raw broken_established <> Amlc_cli.Contract_source then
+    fail "broken established source" "program not recognized";
+  if Amlc_cli.source_form_raw broken_current <> Amlc_cli.Program_source then
+    fail "broken current source" "program not recognized";
+  if Amlc_cli.source_form_raw misspelled_source <> Amlc_cli.Contract_source then
+    fail "misspelled contract source" "program not recognized";
+  refuse "misspelled contract" "expected program or contract"
+    misspelled_source;
+  if Amlc_cli.source_form_raw form_first_mixed <> Amlc_cli.Contract_source then
+    fail "form first mixed source" "program not recognized";
+  if Amlc_cli.source_form_raw keyword_binders <> Amlc_cli.Program_source then
+    fail "keyword binder source" "program not recognized";
+  if Amlc_cli.source_form_raw invariant_only <> Amlc_cli.Contract_source then
+    fail "invariant source" "program not recognized";
   if Amlc_cli.source_form_raw direct_form <> Amlc_cli.Program_source then
     fail "current source" "program not recognized";
   core_result "direct form" (Octra_vm.C_emit.Int (Z.of_int 42)) direct_form;
   core_equal "direct use equality" direct_form used_form;
   core_result "let before use" (Octra_vm.C_emit.Int (Z.of_int 42)) let_use;
-  core_refuse "let use linear" "used id =" let_use_twice;
+  core_refuse "let use linear"
+    "linear value used more than once name = item" let_use_twice;
   core_result "nested form" (Octra_vm.C_emit.Int (Z.of_int 21)) nested_form;
   core_result "integer order" (Octra_vm.C_emit.Int (Z.of_int 42)) order;
   core_result "order edges" (Octra_vm.C_emit.Int (Z.of_int 42)) order_edges;
   core_refuse "order type" "type expected = int actual = bool" order_type;
   core_refuse "order chain" "expected = } actual = <" order_chain;
+  core_refuse "equality type" "type expected = int actual = bool"
+    equality_type;
+  core_refuse "equality chain" "expected = } actual = ==" equality_chain;
   core_result "order native" (Octra_vm.C_emit.Bool true) order_auto;
+  core_equal "integer equality syntax" equality_auto equality_explicit;
+  let bool_equality =
+    Octra_vm.C_term.Eq
+      (Octra_vm.C_type.Bool, Octra_vm.C_term.Bool true,
+        Octra_vm.C_term.Bool false)
+    |> Octra_vm.C_print.term
+  in
+  if not (String.equal bool_equality "equal[bool](true, false)") then
+    fail "typed equality text" "text differs";
+  core_input "integer equality true" (Octra_vm.C_eval.Bool true)
+    (Octra_vm.C_eval.Int (Z.of_int 7))
+    "program Equality { input many value: int term value == 7 }";
+  core_input "integer equality false" (Octra_vm.C_eval.Bool false)
+    (Octra_vm.C_eval.Int (Z.of_int 8))
+    "program Equality { input many value: int term value == 7 }";
   core_result "order explicit" (Octra_vm.C_emit.Bool true) order_explicit;
   core_input "order left once" (Octra_vm.C_eval.Bool true)
     (Octra_vm.C_eval.Int (Z.of_int 3)) order_left;

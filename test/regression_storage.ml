@@ -123,6 +123,24 @@ contract EmptyPop {
 }
 |}
 
+let legacy_value_source = {|
+contract LegacyValue {
+  state { owner: address }
+  public fn same(): bool {
+    self.owner = caller
+    return caller == self.owner
+  }
+  public fn differs(): bool {
+    self.owner = caller
+    return caller != self.owner
+  }
+  public fn reject(): bool {
+    require(1 == 2, "denied")
+    return true
+  }
+}
+|}
+
 let schema_source = {|
 program StateSchema {
   state {
@@ -241,6 +259,28 @@ let run () =
     "run"
     tuple_source
   |> result "tuple" "int:6";
+  let same_source = execute "legacy same source" "same" legacy_value_source in
+  let same_octb = execute_octb "legacy same OCTB" "same" legacy_value_source in
+  result "legacy same source" "bool:true" same_source;
+  result "legacy same OCTB" "bool:true" same_octb;
+  same_runtime "legacy same" same_source same_octb;
+  let differs_source =
+    execute "legacy differs source" "differs" legacy_value_source
+  in
+  let differs_octb =
+    execute_octb "legacy differs OCTB" "differs" legacy_value_source
+  in
+  result "legacy differs source" "bool:false" differs_source;
+  result "legacy differs OCTB" "bool:false" differs_octb;
+  same_runtime "legacy differs" differs_source differs_octb;
+  let rejected = attempt "legacy require" "reject" legacy_value_source in
+  if rejected.stop <> Local.Reverted then
+    fail "legacy require" "call returned";
+  if not
+      (includes
+        (Aml_cli.stop_reason rejected)
+        "error = Require message = text:denied")
+  then fail "legacy require" "reason differs";
   List.iter
     (fun (method_name, expected) ->
       let source = execute "state schema source" method_name schema_source in

@@ -10,6 +10,8 @@ type error =
   | Bad of C_type.t
   | Byte_index of C_nat.t * C_nat.t
   | Vec_index of C_nat.t * C_nat.t
+  | Seq_size of C_nat.t * C_nat.t
+  | Range_type of C_type.t
   | Size
   | Mode of C_term.id * C_type.mul
   | Split of C_term.id list
@@ -151,9 +153,11 @@ let shape term =
         let next = depth + 1 in
         let rest =
           match term with
-          | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Bytes _
+          | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Narrow _
+          | C_term.Bytes _
           | C_term.Var _ -> rest
-          | C_term.Vec (_, values) -> push next values rest
+          | C_term.Vec (_, values) | C_term.Seq (_, _, values) ->
+            push next values rest
           | C_term.Let (_, value, body)
           | C_term.Pair (value, body)
           | C_term.Add (value, body)
@@ -174,6 +178,7 @@ let shape term =
           | C_term.Fst value | C_term.Snd value
           | C_term.Inl (value, _) | C_term.Inr (_, value)
           | C_term.Act (_, value) | C_term.Neg value | C_term.Abs value
+          | C_term.Fit (_, value) | C_term.Wide value | C_term.Length value
           | C_term.Take (_, value)
           | C_term.Drop (_, value) | C_term.At (_, value)
           | C_term.Uncons value | C_term.Close value ->
@@ -306,6 +311,13 @@ and infer_node env term =
   | C_term.Unit -> Ok (leaf C_type.Unit, env)
   | C_term.Bool _ -> Ok (leaf C_type.Bool, env)
   | C_term.Int _ -> Ok (leaf C_type.Int, env)
+  | C_term.Narrow (typ, value) ->
+    begin
+      match typ with
+      | C_type.Num _ when C_type.valid typ && C_type.admits typ value ->
+        Ok (leaf typ, env)
+      | _ -> Error (Range_type typ)
+    end
   | C_term.Bytes value ->
     let* len =
       match C_nat.of_int (String.length value) with
@@ -323,6 +335,25 @@ and infer_node env term =
     in
     let* eff, res, flow, next_env = infer_vec elem env values in
     Ok ({ typ = C_type.Vec (len, elem); eff; res; flow }, next_env)
+  | C_term.Seq (cap, elem, values) ->
+    let typ = C_type.Seq (cap, elem) in
+    let* () = if C_type.valid typ then Ok () else Error (Bad typ) in
+    let* len =
+      match C_nat.of_int (List.length values) with
+      | Some len -> Ok len
+      | None -> Error Size
+    in
+    if not (C_nat.le len cap) then Error (Seq_size (len, cap))
+    else
+      let* eff, res, flow, next_env = infer_vec elem env values in
+      let* pad =
+        match C_nat.sub cap len with
+        | Some pad -> Ok pad
+        | None -> Error (Seq_size (len, cap))
+      in
+      let res = C_limit.add res
+        (C_limit.make (Z.succ (C_nat.to_z pad))) in
+      Ok ({ typ; eff; res; flow }, next_env)
   | C_term.Var id ->
     if not (C_nat.valid id) then Error Size
     else
@@ -465,6 +496,34 @@ and infer_node env term =
     let* info, next_env = infer env value in
     let* () = need C_type.Int info.typ in
     Ok ({ info with res = C_limit.succ info.res }, next_env)
+  | C_term.Fit (target, value) ->
+    let* () =
+      match target with
+      | C_type.Num _ when C_type.valid target -> Ok ()
+      | _ -> Error (Range_type target)
+    in
+    let* info, next_env = infer env value in
+    let* () = need C_type.Int info.typ in
+    let typ = C_type.Sum (target, C_type.Int) in
+      let cost = C_limit.used ~steps:Z.one ~work:(Z.of_int 12) in
+      let res = C_limit.add info.res cost in
+    Ok ({ info with typ; res }, next_env)
+  | C_term.Wide value ->
+    let* info, next_env = infer env value in
+    begin
+      match info.typ with
+      | C_type.Num _ ->
+        Ok ({ info with typ = C_type.Int; res = C_limit.succ info.res }, next_env)
+      | typ -> Error (Range_type typ)
+    end
+  | C_term.Length value ->
+    let* info, next_env = infer env value in
+    begin
+      match info.typ with
+      | C_type.Seq _ ->
+        Ok ({ info with typ = C_type.Int; res = C_limit.succ info.res }, next_env)
+      | typ -> Error (Need (C_type.Seq (C_nat.zero, C_type.Unit), typ))
+    end
   | C_term.Eq (typ, left, right) ->
     let* left_info, left_env = infer env left in
     let* right_info, right_env = infer left_env right in
@@ -565,7 +624,7 @@ and infer_node env term =
     let* vector_info, vector_env = infer env vector in
     begin
       match vector_info.typ with
-      | C_type.Vec (len, elem) ->
+      | C_type.Vec (len, elem) | C_type.Seq (len, elem) ->
         let* () = need elem fold.item.typ in
         let* seed_info, seed_env = infer vector_env seed in
         let* () = need seed_info.typ fold.state.typ in
@@ -655,9 +714,10 @@ let rec binding_term id = function
   | term ->
     let children =
       match term with
-      | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Bytes _
+      | C_term.Unit | C_term.Bool _ | C_term.Int _ | C_term.Narrow _
+      | C_term.Bytes _
       | C_term.Var _ -> []
-      | C_term.Vec (_, values) -> values
+      | C_term.Vec (_, values) | C_term.Seq (_, _, values) -> values
       | C_term.Let (_, value, body)
       | C_term.Unpair (value, _, _, body)
       | C_term.Pair (value, body)
@@ -674,7 +734,8 @@ let rec binding_term id = function
       | C_term.If (guard, yes, no) -> [guard; yes; no]
       | C_term.Fst value | C_term.Snd value | C_term.Inl (value, _)
       | C_term.Inr (_, value) | C_term.Act (_, value) | C_term.Neg value
-      | C_term.Abs value | C_term.Take (_, value) | C_term.Drop (_, value)
+      | C_term.Abs value | C_term.Fit (_, value) | C_term.Wide value
+      | C_term.Length value | C_term.Take (_, value) | C_term.Drop (_, value)
       | C_term.At (_, value) | C_term.Uncons value | C_term.Close value -> [value]
       | C_term.Case (value, _, yes, _, no) -> [value; yes; no]
       | C_term.Vfold (vector, seed, fold) -> [vector; seed; fold.body]
@@ -753,6 +814,9 @@ let raw = function
     "byte index = " ^ C_nat.text len ^ " size = " ^ C_nat.text total
   | Vec_index (index, total) ->
     "vec index = " ^ C_nat.text index ^ " size = " ^ C_nat.text total
+  | Seq_size (actual, cap) ->
+    "sequence size = " ^ C_nat.text actual ^ " capacity = " ^ C_nat.text cap
+  | Range_type typ -> "range type invalid = " ^ C_type.text typ
   | Size -> "byte size overflow"
   | Mode (id, mul) ->
     "resource mode id = " ^ C_nat.text id ^ " mode = " ^ C_type.mul_text mul
@@ -774,6 +838,21 @@ let raw = function
     "input limit = " ^ string_of_int limit ^ " actual = " ^ string_of_int actual
 
 let text error = C_text.clip (raw error)
+
+let text_named find = function
+  | Used id ->
+    begin
+      match find id with
+      | Some name -> "linear value used more than once name = " ^ name
+      | None -> text (Used id)
+    end
+  | Unused id ->
+    begin
+      match find id with
+      | Some name -> "linear value is not consumed name = " ^ name
+      | None -> text (Unused id)
+    end
+  | error -> text error
 
 let rule_text = function
   | Rule error -> C_text.clip (C_rule.text error)

@@ -60,6 +60,7 @@ let valid_lit = function
   | C_emit.Bool _ | C_emit.Int _ -> true
   | C_emit.Bytes value -> String.length value <= C_nat.max
   | C_emit.Data _ -> true
+  | C_emit.Cap (kind, id) -> C_nat.valid kind && C_nat.valid id
 
 let make ~cap ~points ~expect =
   if cap < 1 || cap > C_nat.max then Error Cap
@@ -88,6 +89,8 @@ let equal left right =
   | C_emit.Int lhs, C_emit.Int rhs -> Z.equal lhs rhs
   | C_emit.Bytes lhs, C_emit.Bytes rhs -> String.equal lhs rhs
   | C_emit.Data lhs, C_emit.Data rhs -> C_rval.equal lhs rhs
+  | C_emit.Cap (lk, li), C_emit.Cap (rk, ri) ->
+    C_nat.equal lk rk && C_nat.equal li ri
   | _ -> false
 
 let check cfg actual =
@@ -126,6 +129,8 @@ let lit_text = function
   | C_emit.Int value -> "i:" ^ Z.to_string value
   | C_emit.Bytes value -> "x:" ^ hex value
   | C_emit.Data value -> "d:" ^ hex (C_rval.encode value)
+  | C_emit.Cap (kind, id) ->
+    "c:" ^ C_nat.text kind ^ ":" ^ C_nat.text id
 
 let z value =
   try Some (Z.of_string value) with Invalid_argument _ -> None
@@ -148,6 +153,17 @@ let lit value =
       match C_rval.decode bytes with
       | Ok item when String.equal (hex bytes) raw -> Some (C_emit.Data item)
       | Ok _ | Error _ -> None)
+  else if String.starts_with ~prefix:"c:" value then
+    begin
+      match String.split_on_char ':' value with
+      | ["c"; kind; id] ->
+        Option.bind (z kind) (fun kind ->
+          Option.bind (z id) (fun id ->
+            match C_nat.make kind, C_nat.make id with
+            | Some kind, Some id -> Some (C_emit.Cap (kind, id))
+            | _ -> None))
+      | _ -> None
+    end
   else None
 
 let digest value =
@@ -202,6 +218,10 @@ let lit_code = function
   | C_emit.Bytes value -> Some (C_bin.Tag (Z.of_int 2, raw_code value))
   | C_emit.Data value ->
     Some (C_bin.Tag (Z.of_int 3, raw_code (C_rval.encode value)))
+  | C_emit.Cap (kind, id) ->
+    Some (C_bin.Tag (Z.of_int 4,
+      C_bin.Cons (C_bin.Num (C_nat.to_z kind),
+        C_bin.Cons (C_bin.Num (C_nat.to_z id), C_bin.Nil))))
 
 let lit_get = function
   | C_bin.Tag (tag, C_bin.Num value) when Z.equal tag Z.zero ->
@@ -219,6 +239,14 @@ let lit_get = function
       match C_rval.decode value with
       | Ok item -> Some (C_emit.Data item)
       | Error _ -> None
+    end
+  | C_bin.Tag (tag,
+      C_bin.Cons (C_bin.Num kind, C_bin.Cons (C_bin.Num id, C_bin.Nil)))
+      when Z.equal tag (Z.of_int 4) ->
+    begin
+      match C_nat.make kind, C_nat.make id with
+      | Some kind, Some id -> Some (C_emit.Cap (kind, id))
+      | _ -> None
     end
   | _ -> None
 

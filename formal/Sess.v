@@ -364,6 +364,35 @@ Proof.
   - discriminate.
 Qed.
 
+Theorem close_once : forall state token,
+  current state token = true ->
+  exists next,
+    take state token false = Some (next, None) /\
+    current next token = false /\
+    forall keep, take next token keep = None.
+Proof.
+  intros state token accepted.
+  exists (put state token false).
+  assert (taken :
+    take state token false = Some (put state token false, None)).
+  {
+    unfold take.
+    rewrite accepted.
+    reflexivity.
+  }
+  split.
+  - exact taken.
+  - split.
+    + apply take_close with (state := state).
+      exact taken.
+    + intros keep.
+      pose proof (take_close state token (put state token false) taken)
+        as stale.
+      unfold take.
+      rewrite stale.
+      reflexivity.
+Qed.
+
 Theorem take_no_issue : forall state token keep next out,
   take state token keep = Some (next, out) ->
   issue next (tkind token) (tid token) = None.

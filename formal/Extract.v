@@ -25,6 +25,8 @@ Require Import Quant.
 Require Import Weave.
 Require Import Braid.
 Require Import Loom.
+Require Import Range.
+Require Import Seq.
 Require Import Orbit.
 Require Import Wake.
 Require Import Rift.
@@ -66,6 +68,7 @@ Require Import Feed.
 Require Import Rval.
 Require Import Trace.
 Require Import Mach.
+Require Import Otb.
 Require Import Smap.
 Require Import Live.
 Require Import Path.
@@ -123,13 +126,19 @@ Extraction "uni_model.ml"
 Extraction "pbin_model.ml"
   Pbin.prog_b Pbin.enc_prog Pbin.dec_prog.
 
+Extraction "range_model.ml"
+  Range.valid Range.low Range.high Range.admits Range.fit Range.wide.
+
+Extraction "seq_model.ml"
+  Seq.read_len Seq.pack Seq.make Seq.active Seq.run.
+
 Extraction "fhe_model.ml"
   Fhe.profile_b Fhe.env_b Fhe.ftm_b Fhe.ftrim Fhe.fadd Fhe.fmul Fhe.fre
   Fhe.frun Fhe.fcheck
   Param.catalog_b Param.psel Param.params.
 
 Extraction "hop_model.ml"
-  Hop.hty Hop.herase Hop.hval Hop.hem Hop.lower.
+  Hop.hty Hop.herase Hop.hval Hop.hem Hop.lower Hop.hemit Hop.hexec.
 
 Extraction "crypt_model.ml"
   Fp.p Fp.norm Fp.valid Fp.add Fp.mul
@@ -141,7 +150,8 @@ Extraction "hfhe_model.ml"
   Hfhe.henv_b Hfhe.hadd Hfhe.hmul Hfhe.hre Hfhe.hrun Hfhe.hcheck.
 
 Extraction "graph_model.ml"
-  Graph.fprime Graph.cfg_b Graph.graph_b Graph.merge Graph.compact Graph.norm.
+  Graph.fprime Graph.cfg_b Graph.graph_b Graph.mul_depth Graph.merge
+  Graph.compact Graph.norm.
 
 Extract Constant Z.of_nat => "(fun value -> value)".
 Extraction "ent_model.ml"
@@ -233,11 +243,27 @@ Extraction "trace_model.ml"
 
 Extraction "mach_model.ml"
   Mach.into Mach.lower Mach.take Mach.openm Mach.closem Mach.size Mach.exec
-  Mach.open_inputs Mach.terminal Mach.replay_plan Mach.replay
-  Mach.replay_plan_in Mach.replay_in Mach.image_code Mach.image_feed_code
+  Mach.machine_value Mach.runtime_value Mach.open_inputs Mach.terminal
+  Mach.replay_plan Mach.replay Mach.replay_plan_in Mach.replay_in
+  Mach.replay_value_in Mach.image_code Mach.image_feed_code Mach.type_nodes
+  Mach.input_width Mach.input_nodes Mach.inputs_b Mach.image_open_code
   Mach.source_open_code
   Mach.image_plan_code Mach.source_code Mach.source_feed_code
   Mach.source_plan_code Live.scan Live.analyze.
+
+Extraction "layout_model.ml"
+  Mach.shape_width Mach.shape_regs Mach.result_regs_b Mach.label_limit
+  Mach.dispatch_label Mach.check_label Mach.data_label Mach.guard_label
+  Mach.body_label Mach.label_count_b Mach.label_zone Mach.zone_value Mach.zone_b
+  Mach.body_target.
+
+Extraction "otb_model.ml"
+  Otb.frame_b Otb.frame_bits Otb.frame_read Otb.header Otb.header_read
+  Otb.header_cost Otb.arg_code Otb.arg_read Otb.otype_shape
+  Otb.input_layout Otb.layout_b Otb.layout_read Otb.in_code Otb.in_read
+  Otb.out_code Otb.out_read Otb.xops_cost Otb.in_cost Otb.out_cost
+  Otb.xregs_b Otb.xvalue_b Otb.in_run_cost Otb.out_run_cost Otb.in_turn
+  Otb.out_turn.
 
 Extraction "smap_model.ml"
   Smap.map_b Smap.map_fit Smap.enc_map Smap.dec_map.

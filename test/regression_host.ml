@@ -175,6 +175,20 @@ program EffectNames {
 }
 |}
 
+let point_ops = {|
+program PointOps {
+  public fn identity(): bytes {
+    return pedersen_identity()
+  }
+  public fn add(left: bytes, right: bytes): bytes {
+    return pedersen_add(left, right)
+  }
+  public fn sub(left: bytes, right: bytes): bytes {
+    return pedersen_sub(left, right)
+  }
+}
+|}
+
 let witness name compiled =
   match Octra_vm.Bytecode.decode_image compiled.Source.octb with
   | Ok { proof = Some proof; state; _ } ->
@@ -287,6 +301,10 @@ let fault_checks () =
           ] -> ()
     | _ -> fail "fault source" "error event differs"
   end;
+  if not
+      (String.equal (Aml_cli.stop_reason source)
+        "execution stopped stop = reverted error = Denied code = 403 message = text:denied effort = 63 steps = 18")
+  then fail "fault source" "error reason differs";
   same_runtime "fault" source octb;
   cost "fault cost" 63 18 source;
   refuse "fault pure"
@@ -307,7 +325,53 @@ let name_checks () =
   result "effect names source" "int:13" source;
   same_runtime "effect names" source octb
 
+let point_checks () =
+  let compiled = compile "point compile" point_ops in
+  if not
+      (Array.exists
+        (function VM.FHE_PEDERSEN_ADD _ -> true | _ -> false)
+        compiled.code)
+  then fail "point compile" "addition operation is absent";
+  if not
+      (Array.exists
+        (function VM.FHE_PEDERSEN_SUB _ -> true | _ -> false)
+        compiled.code)
+  then fail "point compile" "subtraction operation is absent";
+  if not
+      (Array.exists
+        (function VM.FHE_PEDERSEN_IDENTITY _ -> true | _ -> false)
+        compiled.code)
+  then fail "point compile" "identity operation is absent";
+  if Octra_vm.Bytecode.op_tag (VM.FHE_PEDERSEN_ADD (0, 1, 2)) <> 0x5D
+      || Octra_vm.Bytecode.op_tag (VM.FHE_PEDERSEN_SUB (0, 1, 2)) <> 0x5E
+      || Octra_vm.Bytecode.op_tag (VM.FHE_PEDERSEN_IDENTITY 0) <> 0x5F
+  then fail "point wire" "operation tag differs";
+  let point_code = [|
+    VM.FHE_PEDERSEN_IDENTITY 0;
+    VM.FHE_PEDERSEN_ADD (1, 2, 3);
+    VM.FHE_PEDERSEN_SUB (4, 5, 6);
+  |] in
+  if Octra_vm.Assembler.parse (Octra_vm.Assembler.emit point_code) <> point_code
+  then fail "point assembler" "instruction round trip differs";
+  begin
+    match Octra_vm.Bytecode.decode_image compiled.octb with
+    | Ok image when image.code = compiled.code -> ()
+    | Ok _ | Error _ -> fail "point wire" "detached code differs"
+  end;
+  let args = [VM.VBytes (String.make 32 '\001'); VM.VBytes (String.make 32 '\002')] in
+  let added = attempt ~args "point add" "add" point_ops in
+  let subtracted = attempt ~args "point sub" "sub" point_ops in
+  let identity = attempt "point identity" "identity" point_ops in
+  begin
+    match added.stop, subtracted.stop, identity.stop with
+    | Local.Host_operation (_, "fhe"),
+      Local.Host_operation (_, "fhe"),
+      Local.Host_operation (_, "fhe") -> ()
+    | _ -> fail "point host" "operation class differs"
+  end
+
 let run () =
   read_checks ();
   fault_checks ();
-  name_checks ()
+  name_checks ();
+  point_checks ()

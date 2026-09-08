@@ -30,14 +30,19 @@ let refuse name part source =
   | Error reason -> fail name ("unexpected reason = " ^ reason)
   | Ok _ -> fail name "source accepted"
 
-let attempt ?(args = []) ?(storage = []) ?(value = Z.zero) name method_name source =
+let attempt ?(args = []) ?(storage = []) ?caller ?(value = Z.zero) ?epoch
+    name method_name source =
   let compiled = compile name source in
+  let strict_values = compiled.declaration = Octra_vm.Oct_lang.ProgramDecl in
   let config =
     Local.config
       ~method_name
       ~args
       ~storage
+      ?caller
       ~value
+      ?epoch
+      ~strict_values
       ~storage_kinds:(Input.storage_kinds compiled.ast)
       ()
   in
@@ -45,26 +50,41 @@ let attempt ?(args = []) ?(storage = []) ?(value = Z.zero) name method_name sour
   | Error error -> fail name ("runner reason = " ^ Local.error_text error)
   | Ok outcome -> outcome
 
-let attempt_octb ?(args = []) ?(storage = []) ?(value = Z.zero) name method_name source =
+let attempt_octb ?(args = []) ?(storage = []) ?caller ?(value = Z.zero) ?epoch
+    name method_name source =
   let compiled = compile name source in
+  let strict_values = compiled.declaration = Octra_vm.Oct_lang.ProgramDecl in
   let image =
     match Octra_vm.Bytecode.decode_image compiled.octb with
     | Ok image -> image
     | Error reason -> fail name ("decode reason = " ^ reason)
   in
   let storage_kinds = Option.value ~default:[] image.state in
-  let config = Local.config ~method_name ~args ~storage ~value ~storage_kinds () in
+  let config =
+    Local.config
+      ~method_name
+      ~args
+      ~storage
+      ?caller
+      ~value
+      ?epoch
+      ~strict_values
+      ~storage_kinds
+      ()
+  in
   match Local.run ~trace:false config image.code with
   | Error error -> fail name ("runner reason = " ^ Local.error_text error)
   | Ok outcome -> outcome
 
-let execute ?args ?storage ?value name method_name source =
-  let outcome = attempt ?args ?storage ?value name method_name source in
+let execute ?args ?storage ?caller ?value ?epoch name method_name source =
+  let outcome = attempt ?args ?storage ?caller ?value ?epoch name method_name source in
   if outcome.stop = Local.Returned then outcome
   else fail name ("stop = " ^ Local.stop_text outcome.stop)
 
-let execute_octb ?args ?storage ?value name method_name source =
-  let outcome = attempt_octb ?args ?storage ?value name method_name source in
+let execute_octb ?args ?storage ?caller ?value ?epoch name method_name source =
+  let outcome =
+    attempt_octb ?args ?storage ?caller ?value ?epoch name method_name source
+  in
   if outcome.stop = Local.Returned then outcome
   else fail name ("stop = " ^ Local.stop_text outcome.stop)
 
@@ -98,6 +118,7 @@ let same_runtime name left right =
       || left.steps <> right.steps
       || left.storage <> right.storage
       || left.events <> right.events
+      || left.closes <> right.closes
   then fail name "detached execution differs"
 
 let core_error name source =
