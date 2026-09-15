@@ -485,7 +485,7 @@ let dump path args =
 let feed path args =
   if not (aml path) then fail "feed" "source path is invalid";
   if source_form path = Contract_source then
-    fail "feed" "source has no fixture inputs";
+    fail "feed" "source has no input schema";
   let values, output =
     match args with
     | [values] -> values, Filename.chop_extension path ^ ".af1"
