@@ -4,6 +4,16 @@
  (libraries octra_vm zarith))
 
 (test
+ (name test_byte_modes)
+ (modules test_byte_modes)
+ (libraries octra_vm zarith))
+
+(test
+ (name test_program_abi)
+ (modules test_program_abi)
+ (libraries octra_vm yojson))
+
+(test
  (name feed_large)
  (modules feed_large)
  (libraries octra_vm))

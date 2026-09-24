@@ -494,7 +494,16 @@ let feed path args =
   in
   Aml_cli.feed path values output
 
+let abi path args =
+  let info = stat "abi" path in
+  if info.st_kind <> Unix.S_REG || not (aml path) then
+    fail "abi" "AML source file is required";
+  match source_form path with
+  | Contract_source -> Contract_cli.abi_as "abi" path args
+  | Program_source -> fail "abi" "stateful AML source is required"
+
 let usage () =
+  Printf.eprintf "usage = amlc abi SOURCE\n";
   Printf.eprintf
     "usage = amlc version | feed SOURCE VALUES [--out AF1] | check SOURCE [OPTIONS] | compile SOURCE [OPTIONS] | test SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | run SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | debug SOURCE [--method NAME] [--arg VALUE] [OPTIONS] | check PROJECT [--epoch N] | compile PROJECT [--epoch N] [--out PATH] | test PROJECT [--root NAME] [--method NAME] [--arg VALUE] [--epoch N] | run PROJECT [--root NAME] [--method NAME] [--arg VALUE] [--epoch N] | debug PROJECT [--root NAME] [OPTIONS] | dump OCTB [--format text|events|dot]\n";
   Printf.eprintf "execution = local_current epoch = local_context network_replay = false\n";
@@ -504,6 +513,7 @@ let main argv =
   try
     match Array.to_list argv with
     | [_; "version"] | [_; "--version"] -> version ()
+    | _ :: "abi" :: path :: args -> abi path args
     | _ :: ("feed" | "-feed") :: path :: args -> feed path args
     | _ :: ("compile" | "-compile") :: path :: args -> compile path args
     | _ :: ("check" | "-check") :: path :: args -> check path args

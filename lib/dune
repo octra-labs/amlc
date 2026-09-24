@@ -8,6 +8,8 @@
   zarith
   threads
   base64
+  yojson
+  mirage-crypto-ec
   digestif
   digestif.c))
 

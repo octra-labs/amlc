@@ -144,7 +144,7 @@ let native raw cap =
   let config =
     Local.config
       ~view:true
-      ~byte_result:Native.Bytes_result
+      ~byte_result:Native.Typed_bytes
       ~limit:cap
       ~method_name:"main"
       ~args:[]

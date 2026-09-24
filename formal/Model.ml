@@ -689,7 +689,7 @@ let otb_run native args =
   let config =
     Local.config
       ~view:true
-      ~byte_result:Vm.Bytes_result
+      ~byte_result:Vm.Typed_bytes
       ~method_name:"main"
       ~args
       ~strict_values:true
@@ -922,7 +922,7 @@ let otb_scalar () =
       let config =
         Local.config
           ~view:true
-          ~byte_result:Vm.Bytes_result
+          ~byte_result:Vm.Typed_bytes
           ~method_name:"main"
           ~args
           ~strict_values:true

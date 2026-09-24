@@ -240,7 +240,7 @@ let run_octb command raw =
   let config =
     Local.config
       ~view:true
-      ~byte_result:Octra_vm.Contract_vm.Bytes_result
+      ~byte_result:Octra_vm.Contract_vm.Typed_bytes
       ~limit:1_000_000
       ~step_cap:1_000_000
       ~method_name:"main"
@@ -300,7 +300,7 @@ let local_run ?(trace = false) command raw method_name values =
   let config =
     Local.config
       ~view:(not closes)
-      ~byte_result:Octra_vm.Contract_vm.Bytes_result
+      ~byte_result:Octra_vm.Contract_vm.Typed_bytes
       ~method_name
       ~args
       ~grants

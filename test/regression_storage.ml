@@ -3,6 +3,182 @@
 
 open Regression_support
 
+let option_source = {|
+program Optional {
+  state { a: option[int] b: option[int] xs: map[int]option[int] calls: int }
+  private fn next(): int {
+    self.calls += 1
+    return self.calls
+  }
+  public fn copy_empty(): bool {
+    self.a = none()
+    self.b = self.a
+    return is_some_opt(self.b)
+  }
+  public fn pick(): int {
+    self.xs[1] = some(11)
+    self.xs[2] = some(22)
+    self.calls = 0
+    return unwrap(self.xs[next()])
+  }
+  private fn pass(value: option[int]): option[int] { return value }
+  public view fn present(): bool { return is_some_opt(self.a) }
+  public fn copy_local(empty: bool): bool {
+    self.a = some(0)
+    self.b = some(99)
+    self.xs[3] = some(99)
+    if empty { self.a = none() }
+    let saved = pass(self.a)
+    self.b = saved
+    self.xs[3] = self.b
+    self.a = self.xs[3]
+    return is_some_opt(self.a)
+  }
+  public fn local_value(): int {
+    let saved: option[int] = some(0)
+    return unwrap(pass(saved))
+  }
+  public fn missing(): int {
+    self.calls = 17
+    return unwrap(self.a)
+  }
+  public fn clear(): bool {
+    self.a = none()
+    self.a = self.a
+    self.xs[7] = self.xs[8]
+    return is_some_opt(self.a) || is_some_opt(self.xs[7])
+  }
+}
+|}
+
+let option_values = {|
+program OptionValues {
+  struct Row { value: option[string] }
+  state {
+    text: option[string]
+    flag: option[bool]
+    owner: option[address]
+    nested: option[option[int]]
+    row: Row
+    items: list[option[int]]
+  }
+  private fn echo(value: option[string]): option[string] { return value }
+  public fn roundtrip(value: string): string {
+    self.text = some(value)
+    let saved = echo(self.text)
+    self.row.value = saved
+    return unwrap(self.row.value)
+  }
+  public fn boolean(value: bool): bool {
+    self.flag = some(value)
+    return unwrap(self.flag)
+  }
+  public fn address_value(value: address): address {
+    self.owner = some(value)
+    let saved = self.owner
+    return unwrap(saved)
+  }
+  public fn owner_same(): bool {
+    self.owner = some(caller)
+    return unwrap(self.owner) == caller
+  }
+  public view fn owner_diff(value: address): bool {
+    let saved = some(caller)
+    return unwrap(saved) != value
+  }
+  public view fn bytes_same(value: bytes): bool {
+    let saved = some(value)
+    return unwrap(saved) == value
+  }
+  public view fn digest_same(value: bytes32): bool {
+    let saved = some(value)
+    return unwrap(saved) == value
+  }
+  public view fn bytes_diff(left: bytes, right: bytes): bool {
+    return unwrap(some(left)) != right
+  }
+  public fn inner_empty(): bool {
+    self.nested = some(none())
+    return is_some_opt(self.nested) && !is_some_opt(unwrap(self.nested))
+  }
+  public fn inner_value(): int {
+    self.nested = some(some(7))
+    return unwrap(unwrap(self.nested))
+  }
+  public fn list_value(): int {
+    self.items.push(none())
+    self.items.push(some(7))
+    let total = 0
+    for item in self.items { if is_some_opt(item) { total += unwrap(item) } }
+    return total
+  }
+  public view fn supplied(value: option[string]): bool { return is_some_opt(value) }
+}
+|}
+
+let option_checks () =
+  let cases = [
+    option_source, "copy_empty", [], "bool:false";
+    option_source, "pick", [], "int:11";
+    option_source, "copy_local", [VM.VBool true], "bool:false";
+    option_source, "copy_local", [VM.VBool false], "bool:true";
+    option_source, "local_value", [], "int:0";
+    option_source, "clear", [], "bool:false";
+    option_values, "boolean", [VM.VBool false], "bool:false";
+    option_values, "boolean", [VM.VBool true], "bool:true";
+    option_values, "owner_same", [], "bool:true";
+    option_values, "owner_diff", [VM.VAddr ("oct" ^ String.make 44 '2')], "bool:true";
+    option_values, "bytes_same", [VM.VBytes ""], "bool:true";
+    option_values, "bytes_same", [VM.VBytes "\x00\xff"], "bool:true";
+    option_values, "digest_same", [VM.VBytes32 (String.make 32 '\x01')], "bool:true";
+    option_values, "bytes_diff", [VM.VBytes "one"; VM.VBytes "two"], "bool:true";
+    option_values, "bytes_diff", [VM.VBytes "one"; VM.VBytes "one"], "bool:false";
+    option_values, "inner_empty", [], "bool:true";
+    option_values, "inner_value", [], "int:7";
+    option_values, "list_value", [], "int:7";
+  ] in
+  List.iter (fun (source, method_name, args, expected) ->
+    let direct = execute ~args method_name method_name source in
+    let detached = execute_octb ~args method_name method_name source in
+    result method_name expected direct;
+    same_runtime method_name direct detached) cases;
+  let picked = execute "option key" "pick" option_source in
+  storage_value "option key" "calls" "1" picked;
+  execute ~args:[VM.VBool true] "option cleared" "copy_local" option_source
+  |> storage_count "option cleared" 0;
+  List.iter (fun mark ->
+    let storage = ["a", "12"; "@aml/option/a/present", mark] in
+    let out = attempt ~storage "option mark" "present" option_source in
+    if out.stop <> Local.Reverted then
+      fail "option mark" ("invalid presence accepted mark = " ^ mark);
+    if out.storage <> List.sort compare storage then
+      fail "option mark" "refusal changed storage") [""; "false"; "1"; "yes"];
+  let missing = attempt "option missing" "missing" option_source in
+  if missing.stop <> Local.Reverted || missing.storage <> [] then
+    fail "option missing" "refusal did not preserve storage";
+  let valid = "oct" ^ String.make 44 '1' in
+  execute ~args:[VM.VString valid] "option address" "address_value" option_values
+  |> result "option address" ("text:" ^ valid);
+  List.iter (fun text ->
+    let args = [VM.VString text] in
+    let direct = execute ~args "option text" "roundtrip" option_values in
+    let detached = execute_octb ~args "option text OCTB" "roundtrip" option_values in
+    if direct.result <> VM.VString text then fail "option text" "payload changed";
+    same_runtime "option text" direct detached)
+    ([""; "0"; "1"; "true"; "a#b/c"; "\x00\xff"]
+      @ List.init 64 (fun size -> String.init size (fun index -> Char.chr ((size + index * 31) mod 256))));
+  List.iter (fun raw ->
+    let out = attempt ~args:[VM.VString raw] "option input" "supplied" option_values in
+    if out.stop <> Local.Reverted then fail "option input" "invalid tag accepted")
+    [""; "00"; "01"; "2"; "true"];
+  List.iter (fun (expr, reason) ->
+    let source = "program Wrong { public fn run() { let value = " ^ expr ^ " } }" in
+    refuse "option type" reason source)
+    ["unwrap(1)", "unwrap requires option";
+     "is_some_opt(true)", "is_some_opt requires option";
+     "unwrap()", "expected expression";
+     "none(1)", "expected )"]
+
 let foreach_source = {|
 contract Total {
   state { xs: list[int] }
@@ -232,6 +408,7 @@ let schema_checks () =
   | Ok _ -> fail "state schema repeated" "image accepted"
 
 let run () =
+  option_checks ();
   execute "foreach" "total" foreach_source
   |> result "foreach" "int:60";
   let nested = execute "checkpoint" "nested" checkpoint_source in

@@ -189,7 +189,7 @@ module Verifier = struct
   let check_regs pc regs = List.find_map (check_reg pc) regs
 
   let check_reg_span pc base count =
-    if base < 0 || count < 0 || base > 64 || count > 64 - base then
+    if base < 0 || count < 0 || base > 63 || count > 64 - base then
       Some (InvalidRegSpan (pc, base, count))
     else None
 

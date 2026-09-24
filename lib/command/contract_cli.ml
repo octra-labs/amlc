@@ -19,7 +19,7 @@ let artifact_result path =
         if prefix root path then Some (Aml_cli.source path) else None
       with Unix.Unix_error _ | Sys_error _ -> None
   in
-  Octra_vm.Aml_source.compile_multi resolver name
+  Octra_vm.Aml_source.compile_multi ~syntax:Octra_vm.Oct_gen.Source resolver name
 
 let artifact command path =
   match artifact_result path with
@@ -27,6 +27,11 @@ let artifact command path =
   | Error reason -> Aml_cli.fail command reason
 
 let owns_source = Octra_vm.Aml_source.owns
+
+let abi_as command path args =
+  if args <> [] then Aml_cli.fail command "option is invalid";
+  let value = artifact command path in
+  Octra_vm.Source_abi.encode value.ast |> print_endline
 
 let image_result raw =
   match Octra_vm.Bytecode.decode_image raw with

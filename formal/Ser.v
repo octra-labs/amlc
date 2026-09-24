@@ -11,6 +11,51 @@ Require Import Bin.
 
 Import ListNotations.
 
+Definition option_code (value : option (list nat)) : list nat :=
+  match value with
+  | None => [48]
+  | Some payload => 49 :: payload
+  end.
+
+Definition option_get (bytes : list nat) : option (option (list nat)) :=
+  match bytes with
+  | [48] => Some None
+  | 49 :: payload => Some (Some payload)
+  | _ => None
+  end.
+
+Lemma option_roundtrip : forall value,
+  option_get (option_code value) = Some value.
+Proof.
+  intros [payload |]; reflexivity.
+Qed.
+
+Lemma option_unique : forall left right,
+  option_code left = option_code right -> left = right.
+Proof.
+  intros left right equal.
+  apply (f_equal option_get) in equal.
+  rewrite !option_roundtrip in equal.
+  inversion equal.
+  reflexivity.
+Qed.
+
+Lemma option_exact : forall bytes value,
+  option_get bytes = Some value -> option_code value = bytes.
+Proof.
+  intros [| tag bytes] value read; try discriminate.
+  destruct tag as [| tag]; try discriminate.
+  do 47 (destruct tag as [| tag]; try discriminate).
+  destruct tag as [| tag].
+  - destruct bytes; inversion read; reflexivity.
+  - destruct tag; inversion read; reflexivity.
+Qed.
+
+Lemma option_empty_distinct : option_code None <> option_code (Some []).
+Proof.
+  discriminate.
+Qed.
+
 Fixpoint list_code {A : Type} (put : A -> code) (values : list A) : code :=
   match values with
   | [] => CNil

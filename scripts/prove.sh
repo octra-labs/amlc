@@ -30,7 +30,7 @@ opam exec -- dune build --root "$root" lib/octra_vm.cmxa
   coqc -q Extract.v
   cp "$root/formal/Model.ml" .
   opam exec -- ocamlfind ocamlopt -thread -linkall \
-    -package zarith,threads,base64,digestif.c -linkpkg \
+    -package zarith,threads,base64,yojson,digestif.c,mirage-crypto-ec -linkpkg \
     -I "$root/_build/default/lib" \
     -I "$root/_build/default/lib/.octra_vm.objs/byte" \
     range_model.mli range_model.ml seq_model.mli seq_model.ml \

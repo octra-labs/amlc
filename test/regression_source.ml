@@ -1671,7 +1671,7 @@ let core_out name source args =
     | Error reason -> fail name ("core decode reason = " ^ reason)
   in
   let config =
-    Local.config ~view:true ~byte_result:VM.Bytes_result
+    Local.config ~view:true ~byte_result:VM.Typed_bytes
       ~method_name:"main" ~args ()
   in
   match Local.run ~trace:false config image.code with
@@ -2660,7 +2660,7 @@ let run () =
       else if String.equal path "store.aml" then Some imported_interface
       else None
     in
-    match Source.compile_multi resolve "main.aml" with
+    match Source.compile_multi ~syntax:Octra_vm.Oct_gen.Source resolve "main.aml" with
     | Error reason when includes reason "duplicate interface name" -> ()
     | Error reason -> fail "duplicate import" ("unexpected reason = " ^ reason)
     | Ok _ -> fail "duplicate import" "source accepted"
@@ -2687,6 +2687,13 @@ let run () =
   core_refuse "vector index" "vec index = 5 size = 3" core_vec_index;
   if Amlc_cli.source_form_raw established_program <> Amlc_cli.Contract_source then
     fail "established source" "program not recognized";
+  List.iter (fun name ->
+    let body = Printf.sprintf
+      "Program Number { fn %s(input: int): int { return input + 1 } }" name in
+    if Amlc_cli.source_form_raw body <> Amlc_cli.Contract_source then
+      fail "method name" ("program not recognized name = " ^ name);
+    ignore (compile ("method " ^ name) body))
+    ["value"; "epoch"; "epoch_time"; "balance"];
   if Amlc_cli.source_form_raw broken_established <> Amlc_cli.Contract_source then
     fail "broken established source" "program not recognized";
   if Amlc_cli.source_form_raw broken_current <> Amlc_cli.Program_source then

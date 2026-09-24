@@ -58,7 +58,9 @@ type exec_ctx = {
   circle_hfhe_intent_id : string option;
   circle_hfhe_active_relay_id : string option;
   point_ops : bool;
+  math : bool;
   int_work : Int_work.mode;
+  object_cost : bool;
   current_epoch : int;
   epoch_time_ms : int64;
   tree_hash : string;
@@ -80,7 +82,9 @@ let default_ctx = {
   circle_hfhe_intent_id = None;
   circle_hfhe_active_relay_id = None;
   point_ops = false;
+  math = false;
   int_work = Int_work.Prior;
+  object_cost = false;
   current_epoch = 0;
   epoch_time_ms = 0L;
   tree_hash = String.make 64 '0';
@@ -104,8 +108,8 @@ type progress =
   | Refused
 
 type byte_result =
-  | Text_result
-  | Bytes_result
+  | String_bytes
+  | Typed_bytes
 
 type s = {
   regs : v array;
@@ -238,7 +242,7 @@ let is_valid_addr s =
     in check 3
 
 let create_state ?(limit = 1_000_000) ?(ctx = default_ctx) ?(depth = 0) ?(is_view = false)
-    ?(strict_values = false) ?(byte_result = Text_result) ?(storage_kinds = [])
+    ?(strict_values = false) ?(byte_result = String_bytes) ?(storage_kinds = [])
     ~caller ~origin ~address ~value ~storage () =
   {
     regs = Array.make register_count (VInt Z.zero);
@@ -673,7 +677,11 @@ let strict_operands st = function
   | SSTOREN (base_key, base_value, count) ->
     List.for_all (fun reg -> is_numeric (getr st reg)) [base_key; base_value; count]
   | CONCAT (_, left, right) ->
-    is_scalar_value (getr st left) && is_scalar_value (getr st right)
+    begin match st.byte_result, getr st left, getr st right with
+    | Typed_bytes, VBytes _, VBytes _ -> true
+    | Typed_bytes, _, _ -> false
+    | String_bytes, left, right -> is_scalar_value left && is_scalar_value right
+    end
   | STRLEN (_, text) -> is_text (getr st text)
   | XCALL (_, target, method_name, base, count) ->
     is_address (getr st target) && is_text (getr st method_name)
@@ -1122,12 +1130,13 @@ let exec_one st op =
     end
   | OBJECT_MEMBER_COUNT (rd, robject_ref) ->
     let object_ref = to_string (getr st robject_ref) in
-    let count =
-      Contract_vm_host.member_count
-        st.storage
-        object_ref in
-    setr st rd (VInt (Z.of_int count));
-    true
+    if st.ctx.object_cost && not (add_dyn_product st [Hashtbl.length st.storage; 5] 1) then
+      revert st
+    else begin
+      let count = Contract_vm_host.member_count st.storage object_ref in
+      setr st rd (VInt (Z.of_int count));
+      true
+    end
   | OBJECT_HAS_MEMBER (rd, robject_ref, rmember_ref) ->
     let object_ref = to_string (getr st robject_ref) in
     let member_ref = to_string (getr st rmember_ref) in
@@ -1141,7 +1150,9 @@ let exec_one st op =
   | OBJECT_MEMBER_REF_AT (rd, robject_ref, rindex) ->
     let object_ref = to_string (getr st robject_ref) in
     let index = Z.to_int (to_z (getr st rindex)) in
-    begin
+    if st.ctx.object_cost && not (add_dyn_product st [Hashtbl.length st.storage; 5] 1) then
+      revert st
+    else begin
       match
         Contract_vm_host.member_at
           st.storage
@@ -1168,6 +1179,8 @@ let exec_one st op =
         rstatus,
         rintent_id ) ->
     if not (view_guard st) then false
+    else if st.ctx.object_cost && not (add_dyn_product st [Hashtbl.length st.storage; 5] 1) then
+      revert st
     else
       begin
         match
@@ -1220,16 +1233,17 @@ let exec_one st op =
       revert st
     end
   | SUBSTR (rd, rs, rstart, rlen) ->
-    let s = to_string (getr st rs) in
+    let source = getr st rs in
+    let s = to_string source in
     let slen = String.length s in
     if not (add_dyn_effort st (slen / 256)) then revert st
     else
     let start = Z.to_int (to_z (getr st rstart)) in
     let len = Z.to_int (to_z (getr st rlen)) in
     let bytes value =
-      match st.byte_result with
-      | Text_result -> VString value
-      | Bytes_result -> VBytes value
+      match st.byte_result, source with
+      | Typed_bytes, VBytes _ -> VBytes value
+      | Typed_bytes, _ | String_bytes, _ -> VString value
     in
     if start < 0 || start > slen || len < 0 then setr st rd (bytes "")
     else begin
@@ -1624,7 +1638,7 @@ let exec_one st op =
          (match read_q16 st addr n, read_q16 st gamma_addr n,
                 read_q16 st beta_addr n with
           | Some values, Some gamma, Some beta ->
-            (match Fixed_q16.layer values gamma beta with
+            (match Fixed_q16.layer ~math:st.ctx.math values gamma beta with
              | Some result -> write_q16 st addr result; true
              | None -> revert st)
           | _ -> revert st)
@@ -1717,7 +1731,7 @@ let exec_one st op =
        else
          (match read_q16 st addr n, read_q16 st gamma_addr n with
           | Some values, Some gamma ->
-            (match Fixed_q16.rms values gamma with
+            (match Fixed_q16.rms ~math:st.ctx.math values gamma with
              | Some result -> write_q16 st addr result; true
              | None -> revert st)
           | _ -> revert st)
@@ -2553,11 +2567,13 @@ let exec_one st op =
                :: !(st.logs);
     true
   | CONCAT (rd, rs1, rs2) ->
-    let value = to_string (getr st rs1) ^ to_string (getr st rs2) in
+    let left = getr st rs1 in
+    let right = getr st rs2 in
+    let value = to_string left ^ to_string right in
     let result =
-      match st.byte_result with
-      | Text_result -> VString value
-      | Bytes_result -> VBytes value
+      match st.byte_result, left, right with
+      | Typed_bytes, VBytes _, VBytes _ -> VBytes value
+      | Typed_bytes, _, _ | String_bytes, _, _ -> VString value
     in
     setr st rd result; true
   | STRLEN (rd, rs) ->
@@ -2607,7 +2623,7 @@ let exec_one st op =
               string_of_int st.pc;
               string_of_int rd;
             ] in
-            setr st rd (VCipher (Pvac_ffi.ct_mul_seeded pk a b seed)); true
+            setr st rd (VCipher (Pvac_ffi.ct_mul_seeded ~math:st.ctx.math pk a b seed)); true
           with _ -> revert st)
        | _ -> revert st)
   | FHE_SCALE (rd, rpk, rct, rscalar) ->
@@ -2618,7 +2634,7 @@ let exec_one st op =
        | Some pk, Some ct ->
          (try
             let s = Z.to_int64 (to_z (getr st rscalar)) in
-            setr st rd (VCipher (Pvac_ffi.ct_scale pk ct s)); true
+            setr st rd (VCipher (Pvac_ffi.ct_scale ~math:st.ctx.math pk ct s)); true
           with _ -> revert st)
        | _ -> revert st)
   | FHE_DIV_CONST (rd, rpk, rct, rdivisor) ->
@@ -2644,7 +2660,12 @@ let exec_one st op =
        | Some pk, Some ct ->
          (try
             let c = Z.to_int64 (to_z (getr st rconst)) in
-            setr st rd (VCipher (Pvac_ffi.ct_add_const pk ct c 0L)); true
+            let lo, hi =
+              if st.ctx.math && Int64.compare c 0L < 0 then
+                Int64.pred c, Int64.max_int
+              else c, 0L
+            in
+            setr st rd (VCipher (Pvac_ffi.ct_add_const ~math:st.ctx.math pk ct lo hi)); true
           with _ -> revert st)
        | _ -> revert st)
   | FHE_SUB_CONST (rd, rpk, rct, rconst) ->
@@ -2655,7 +2676,12 @@ let exec_one st op =
        | Some pk, Some ct ->
          (try
             let c = Z.to_int64 (to_z (getr st rconst)) in
-            setr st rd (VCipher (Pvac_ffi.ct_sub_const pk ct c)); true
+            let result =
+              if st.ctx.math && Int64.compare c 0L < 0 then
+                Pvac_ffi.ct_add_const ~math:true pk ct (Int64.neg c) 0L
+              else Pvac_ffi.ct_sub_const ~math:st.ctx.math pk ct c
+            in
+            setr st rd (VCipher result); true
           with _ -> revert st)
        | _ -> revert st)
   | FHE_VERIFY_ZERO (rd, rpk, rct, rproof) ->

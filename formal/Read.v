@@ -3420,3 +3420,17 @@ Proof.
   inversion rhs.
   reflexivity.
 Qed.
+
+Theorem prefix_fold : forall (op tree : Type)
+  (apply : op -> tree -> tree) ops value,
+  fold_left (fun acc item => apply item acc) (rev ops) value =
+  fold_right apply value ops.
+Proof.
+  intros op tree apply ops.
+  induction ops as [| item rest step]; intros value; simpl.
+  - reflexivity.
+  - rewrite fold_left_app.
+    simpl.
+    rewrite step.
+    reflexivity.
+Qed.

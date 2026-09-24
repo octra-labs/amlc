@@ -51,7 +51,7 @@ let local ?(trace = false) ?(view = true) ?(grants = [])
   let config =
     Local.config
       ~view
-      ~byte_result:Vm.Bytes_result
+      ~byte_result:Vm.Typed_bytes
       ~method_name
       ~args
       ~grants
@@ -65,7 +65,7 @@ let local_code ?(view = true) ?(grants = []) name code method_name args =
   let config =
     Local.config
       ~view
-      ~byte_result:Vm.Bytes_result
+      ~byte_result:Vm.Typed_bytes
       ~method_name
       ~args
       ~grants

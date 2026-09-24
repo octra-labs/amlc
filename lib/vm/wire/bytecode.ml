@@ -556,8 +556,7 @@ let encode_instr buf pool instr =
     put_u8 buf d; put_u8 buf pk; put_u8 buf a; put_u8 buf b
   | Contract_vm.FHE_VERIFY_BOUND (d,pk,ct,pf,cm) ->
     put_u8 buf d; put_u8 buf pk; put_u8 buf ct; put_u8 buf pf; put_u8 buf cm
-  | Contract_vm.FHE_COMMIT (d,pk,ct)
-  | Contract_vm.FHE_PEDERSEN (d,pk,ct)
+  | Contract_vm.FHE_COMMIT (d,pk,ct) | Contract_vm.FHE_PEDERSEN (d,pk,ct)
   | Contract_vm.FHE_PEDERSEN_ADD (d,pk,ct)
   | Contract_vm.FHE_PEDERSEN_SUB (d,pk,ct) ->
     put_u8 buf d; put_u8 buf pk; put_u8 buf ct
@@ -734,12 +733,12 @@ let decode_const s pos total_len =
   in
   (c, pos + 5 + len)
 
-let const_at pc consts index =
-  if index < 0 || index >= Array.length consts then
+let const_at active pc consts index =
+  if active && (index < 0 || index >= Array.length consts) then
     failwith (Printf.sprintf "constant reference %d at pc %d" index pc);
   consts.(index)
 
-let decode_instr s pos consts pc =
+let decode_instr ~active s pos consts pc =
   let tag = get_u8 s pos in
   let p = pos + 1 in
   match tag with
@@ -757,29 +756,29 @@ let decode_instr s pos consts pc =
   | 0x0B ->
     let d = get_u8 s p in
     let ci = get_u16le s (p+1) in
-    (Contract_vm.LDI (d, v_of_const (const_at pc consts ci)), p+3)
+    (Contract_vm.LDI (d, v_of_const (const_at active pc consts ci)), p+3)
   | 0x0C -> (Contract_vm.MOV (get_u8 s p, get_u8 s (p+1)), p+2)
   | 0x0D ->
     let d = get_u8 s p in
     let ci = get_u16le s (p+1) in
-    let k = match const_at pc consts ci with CStr s -> s | _ -> "" in
+    let k = match const_at active pc consts ci with CStr s -> s | _ -> "" in
     (Contract_vm.SLOAD (d, k), p+3)
   | 0x0E ->
     let ci = get_u16le s p in
     let r = get_u8 s (p+2) in
-    let k = match const_at pc consts ci with CStr s -> s | _ -> "" in
+    let k = match const_at active pc consts ci with CStr s -> s | _ -> "" in
     (Contract_vm.SSTORE (k, r), p+3)
   | 0x0F ->
     let ci = get_u16le s p in
-    let k = match const_at pc consts ci with CStr s -> s | _ -> "" in
+    let k = match const_at active pc consts ci with CStr s -> s | _ -> "" in
     (Contract_vm.SDEL k, p+2)
   | 0x10 -> (Contract_vm.SLOADK (get_u8 s p, get_u8 s (p+1)), p+2)
   | 0x11 -> (Contract_vm.SSTOREK (get_u8 s p, get_u8 s (p+1)), p+2)
   | 0x54 -> (Contract_vm.SDELK (get_u8 s p), p+1)
-  | 0x89 | 0x8A ->
+  | (0x89 | 0x8A) when active ->
     let ci = get_u16le s p in
     let kind =
-      match v_of_const (const_at pc consts ci) with
+      match v_of_const (const_at active pc consts ci) with
       | Contract_vm.VInt value -> value
       | _ -> Z.minus_one
     in
@@ -811,7 +810,7 @@ let decode_instr s pos consts pc =
   | 0x26 -> (Contract_vm.COMMIT, p)
   | 0x27 ->
     let ci = get_u16le s p in
-    let name = match const_at pc consts ci with CStr s -> s | _ -> "" in
+    let name = match const_at active pc consts ci with CStr s -> s | _ -> "" in
     let nregs = get_u8 s (p+2) in
     let regs = List.init nregs (fun i -> get_u8 s (p+3+i)) in
     (Contract_vm.EMIT (name, regs), p+3+nregs)
@@ -841,9 +840,9 @@ let decode_instr s pos consts pc =
   | 0x3F -> (Contract_vm.GROTH16_VERIFY_BN254 (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2), get_u8 s (p+3)), p+4)
   | 0x5B -> (Contract_vm.FHE_MUL (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2), get_u8 s (p+3)), p+4)
   | 0x5C -> (Contract_vm.FHE_DIV_CONST (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2), get_u8 s (p+3)), p+4)
-  | 0x5D -> (Contract_vm.FHE_PEDERSEN_ADD (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2)), p+3)
-  | 0x5E -> (Contract_vm.FHE_PEDERSEN_SUB (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2)), p+3)
-  | 0x5F -> (Contract_vm.FHE_PEDERSEN_IDENTITY (get_u8 s p), p+1)
+  | 0x5D when active -> (Contract_vm.FHE_PEDERSEN_ADD (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2)), p+3)
+  | 0x5E when active -> (Contract_vm.FHE_PEDERSEN_SUB (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2)), p+3)
+  | 0x5F when active -> (Contract_vm.FHE_PEDERSEN_IDENTITY (get_u8 s p), p+1)
   | 0x40 -> (Contract_vm.PARSE_INTS (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2)), p+3)
   | 0x41 -> (Contract_vm.ISADDR (get_u8 s p, get_u8 s (p+1)), p+2)
   | 0x56 -> (Contract_vm.STATE_PATH_KEY (get_u8 s p, get_u8 s (p+1)), p+2)
@@ -929,13 +928,17 @@ let decode_instr s pos consts pc =
   | 0x78 -> (Contract_vm.ATTENTION_KV_FP (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2), get_u8 s (p+3), get_u8 s (p+4), get_u8 s (p+5), get_u8 s (p+6), get_u8 s (p+7)), p+8)
   | 0x79 -> (Contract_vm.APPEND_VEC_FP (get_u8 s p, get_u8 s (p+1), get_u8 s (p+2), get_u8 s (p+3)), p+4)
   | 0x7A -> (Contract_vm.TXHASH (get_u8 s p), p+1)
-  | _ -> failwith (Printf.sprintf "unknown opcode 0x%02x at pc %d" tag pc)
+  | _ ->
+    if active then
+      failwith (Printf.sprintf "unknown opcode 0x%02x at pc %d" tag pc)
+    else
+      failwith (Printf.sprintf "unknown opcode 0x%02x at %d" tag pos)
 
 let trim_error msg =
   if String.length msg <= 256 then msg
   else String.sub msg 0 256
 
-let decode_image raw =
+let decode_image ?(active = true) raw =
   try
     let s = Bytes.of_string raw in
     let len = Bytes.length s in
@@ -952,16 +955,21 @@ let decode_image raw =
     let pos = ref 12 in
     let const_cells = Array.init n_consts (fun id ->
       let at = !pos in
-      let tag = get_u8 s at in
       let (value, next) = decode_const s at len in
+      let tag = get_u8 s at in
       let data = Bytes.sub_string s (at + 5) (next - at - 5) in
       pos := next;
       { id; at; size = next - at; tag; data; value }
     ) in
-    let state = image_state const_cells in
-    let proof = image_proof const_cells in
-    let emission = image_emission const_cells in
-    let veil = image_veil const_cells in
+    let state, proof, emission, veil =
+      if active then
+        image_state const_cells,
+        image_proof const_cells,
+        image_emission const_cells,
+        image_veil const_cells
+      else
+        None, None, None, None
+    in
     let consts = Array.map (fun cell -> cell.value) const_cells in
     let text_at = !pos in
     let cells = Array.make n_instrs { pc = 0; at = 0; size = 0 } in
@@ -971,29 +979,39 @@ let decode_image raw =
     Array.iteri
       (fun pc _ ->
         if !pos >= len then
-          failwith (Printf.sprintf "truncated instruction at pc %d" pc);
+          if active then
+            failwith (Printf.sprintf "truncated instruction at pc %d" pc)
+          else
+            failwith "OCTB truncated instruction stream";
         let at = !pos in
         let instr, next =
-          try decode_instr s at consts pc
-          with Invalid_argument _ ->
-            failwith (Printf.sprintf "truncated instruction at pc %d" pc)
+          if active then
+            try decode_instr ~active s at consts pc
+            with Invalid_argument _ ->
+              failwith (Printf.sprintf "truncated instruction at pc %d" pc)
+          else
+            decode_instr ~active s at consts pc
         in
         pos := next;
         code.(pc) <- instr;
         cells.(pc) <- { pc; at; size = next - at })
       code;
     if !pos <> len then
-      failwith (Printf.sprintf "OCTB trailing bytes: %d" (len - !pos));
+      if active then
+        failwith (Printf.sprintf "OCTB trailing bytes: %d" (len - !pos))
+      else
+        failwith "OCTB trailing bytes";
     Ok { consts = const_cells; cells; text_at; state; proof; emission; veil; code }
   with Failure msg -> Error (trim_error msg)
+    | (Stack_overflow | Out_of_memory) as error -> raise error
     | exn -> Error (trim_error (Printexc.to_string exn))
 
-let decode raw =
-  match decode_image raw with
+let decode ?(active = true) raw =
+  match decode_image ~active raw with
   | Ok image -> Ok image.code
   | Error error -> Error error
 
-let decode_exn raw =
-  match decode raw with
+let decode_exn ?(active = true) raw =
+  match decode ~active raw with
   | Ok code -> code
   | Error msg -> failwith msg

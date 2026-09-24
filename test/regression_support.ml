@@ -20,12 +20,12 @@ let includes text part =
   part_len = 0 || seek 0
 
 let compile name source =
-  match Source.compile source with
+  match Source.compile ~syntax:Octra_vm.Oct_gen.Source source with
   | Ok value -> value
   | Error reason -> fail name ("compile reason = " ^ reason)
 
 let refuse name part source =
-  match Source.compile source with
+  match Source.compile ~syntax:Octra_vm.Oct_gen.Source source with
   | Error reason when includes reason part -> ()
   | Error reason -> fail name ("unexpected reason = " ^ reason)
   | Ok _ -> fail name "source accepted"

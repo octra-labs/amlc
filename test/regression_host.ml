@@ -370,8 +370,228 @@ let point_checks () =
     | _ -> fail "point host" "operation class differs"
   end
 
+let state_checks () =
+  let reference = String.concat "" (List.init 4 (fun _ -> "0123456789abcdef")) in
+  let key = "814eeb04a0e39472f275b72b6bce0f161932bb06f44cb76a455d0ca884612ad6" in
+  let forms = [reference; String.uppercase_ascii reference;
+    " \t" ^ reference ^ "\r\n"; "\012" ^ reference ^ "\t"] in
+  List.iter (fun raw ->
+    if Octra_vm.Contract_vm_host.state_path_key raw <> Some key then
+      fail "state path" "key differs") forms;
+  let invalid = [""; String.make 63 'a'; String.make 65 'a';
+    "0x" ^ reference; String.make 64 'g'; String.make 64 '\000';
+    "\194\160" ^ reference; reference ^ "\194\160";
+    String.sub reference 0 31 ^ " " ^ String.sub reference 32 32] in
+  List.iter (fun raw ->
+    if Octra_vm.Contract_vm_host.state_path_key raw <> None then
+      fail "state path" "invalid reference accepted") invalid;
+  let source = {|
+program StateRead {
+  public view fn class_of(reference: string): string {
+    return circle_state_class(reference)
+  }
+  public view fn expires(reference: string): int {
+    return circle_state_expire_after(reference)
+  }
+  public view fn is_mutable(reference: string): bool {
+    return circle_state_mutable(reference)
+  }
+}
+|} in
+  let storage = List.sort compare [
+    "state_descriptor:" ^ key ^ ":state_class", "balance_cell";
+    "state_descriptor:" ^ key ^ ":mutable_state", "true";
+    "state_policy:" ^ key ^ ":expire_after_epoch", "42";
+  ] in
+  let methods = ["class_of", "text:balance_cell";
+    "expires", "int:42"; "is_mutable", "bool:true"] in
+  List.iter (fun raw ->
+    let args = [VM.VString raw] in
+    List.iter (fun (method_name, expected) ->
+      let direct = execute ~args ~storage "state source" method_name source in
+      let detached = execute_octb ~args ~storage "state OCTB" method_name source in
+      result "state source" expected direct;
+      same_runtime "state path" direct detached;
+      if direct.storage <> storage || direct.events <> [] || direct.closes <> [] then
+        fail "state path" "read changed state") methods) forms;
+  List.iter (fun raw ->
+    let args = [VM.VString raw] in
+    let direct = attempt ~args ~storage "state invalid" "class_of" source in
+    let detached = attempt_octb ~args ~storage "state invalid" "class_of" source in
+    if direct.stop <> Local.Reverted then fail "state invalid" "reference accepted";
+    if direct.storage <> storage || direct.events <> [] || direct.closes <> [] then
+      fail "state invalid" "refusal changed state";
+    same_runtime "state invalid" direct detached) invalid
+
+let member_reads = {|
+program MemberRead {
+  public view fn size(reference: string): int {
+    return circle_object_member_count(reference)
+  }
+  public view fn contains(reference: string, member: string): bool {
+    return circle_object_has_member(reference, member)
+  }
+  public view fn at(reference: string, index: int): string {
+    return circle_object_member_ref_at(reference, index)
+  }
+}
+|}
+
+let member_checks () =
+  let storage = List.sort compare [
+    "object_member:group:a:state_ref", "invalid";
+    "object_member:group:b:state_ref", " \t" ^ String.make 64 'B' ^ "\n";
+    "object_member:group:c:state_ref", "";
+    "object_member:group:d:status", "active";
+    "object_member:group::state_ref", String.make 64 'a';
+    "object_member:other:x:state_ref", String.make 64 'a';
+    "object_member:nested:a:state_ref", String.make 64 'a';
+    "object_member:nested:a:b:state_ref", String.make 64 'a';
+  ] in
+  let cases = [
+    "size", [VM.VString "group"], "int:3";
+    "size", [VM.VString "absent"], "int:0";
+    "contains", [VM.VString "group"; VM.VString "a"], "bool:false";
+    "contains", [VM.VString "group"; VM.VString "b"], "bool:true";
+    "contains", [VM.VString "group"; VM.VString "d"], "bool:false";
+    "contains", [VM.VString "group"; VM.VString ""], "bool:true";
+    "at", [VM.VString "group"; VM.VInt Z.zero], "text:a";
+    "at", [VM.VString "group"; VM.VInt Z.one], "text:b";
+    "at", [VM.VString "group"; VM.VInt (Z.of_int 3)], "text:";
+    "at", [VM.VString "group"; VM.VInt Z.minus_one], "text:";
+    "at", [VM.VString "nested"; VM.VInt Z.zero], "text:a:b";
+    "at", [VM.VString "nested"; VM.VInt Z.one], "text:a";
+  ] in
+  List.iter (fun (method_name, args, expected) ->
+    let direct = execute ~args ~storage "member source" method_name member_reads in
+    let detached = execute_octb ~args ~storage "member OCTB" method_name member_reads in
+    result "member source" expected direct;
+    same_runtime "member" direct detached;
+    if direct.storage <> storage || direct.events <> [] || direct.closes <> [] then
+      fail "member" "read changed state") cases
+
+let member_costs () =
+  let storage = List.init 100 (fun index ->
+    "object_member:group:" ^ string_of_int index ^ ":state_ref", "invalid") in
+  let execute limit code =
+    let config = Local.config ~limit ~storage ~view:true ~method_name:"read" ~args:[] () in
+    match Local.run_at ~trace:true config ~entry:0 code with
+    | Ok value -> value
+    | Error reason -> fail "member cost" (Local.error_text reason) in
+  List.iter (fun read ->
+    let code = [|VM.LDI (0, VM.VString "group"); VM.LDI (2, VM.VInt Z.zero);
+      read; VM.STOP|] in
+    let limited = execute 100 code in
+    if limited.stop <> Local.Reverted || limited.effort > 100 then
+      fail "member cost" "scan exceeded budget";
+    let enough = execute 1000 code in
+    if enough.stop <> Local.Returned || enough.effort <> 553 then
+      fail "member cost" "scan charge differs";
+    if not (List.exists (fun frame -> frame.Local.op = read
+      && frame.effort_after - frame.effort_before = 550) enough.frames) then
+      fail "member cost" "scan frame differs")
+    [VM.OBJECT_MEMBER_COUNT (1, 0); VM.OBJECT_MEMBER_REF_AT (1, 0, 2)];
+  let code = [|VM.LDI (0, VM.VString "group"); VM.LDI (2, VM.VString "0");
+    VM.OBJECT_HAS_MEMBER (1, 0, 2); VM.STOP|] in
+  let output = execute 100 code in
+  if output.stop <> Local.Returned || output.effort <> 33 then
+    fail "member cost" "presence charged a scan"
+
+let member_edits () =
+  let storage = ["object_member:group:z:state_ref", String.make 64 'a'] in
+  let key = "object_member:group:a:state_ref" in
+  let program = [|
+    VM.LDI (0, VM.VString "group"); VM.OBJECT_MEMBER_COUNT (1, 0);
+    VM.LDI (2, VM.VString (String.make 64 'b')); VM.SSTORE (key, 2);
+    VM.OBJECT_MEMBER_COUNT (3, 0); VM.LDI (4, VM.VInt Z.zero);
+    VM.OBJECT_MEMBER_REF_AT (5, 0, 4); VM.SDEL key;
+    VM.OBJECT_MEMBER_COUNT (6, 0); VM.OBJECT_MEMBER_REF_AT (7, 0, 4);
+    VM.STOP;
+  |] in
+  let config = Local.config ~storage ~method_name:"write" ~args:[] () in
+  let execute code = match Local.run_at ~trace:true config ~entry:0 code with
+    | Ok value -> value
+    | Error reason -> fail "member edits" (Local.error_text reason) in
+  let output = execute program in
+  if output.stop <> Local.Returned || output.storage <> storage
+      || output.regs.(1) <> VM.VInt Z.one || output.regs.(3) <> VM.VInt (Z.of_int 2)
+      || output.regs.(5) <> VM.VString "a" || output.regs.(6) <> VM.VInt Z.one
+      || output.regs.(7) <> VM.VString "z" then
+    fail "member edits" "reads did not follow storage changes";
+  let refused = Array.append (Array.sub program 0 7) [|VM.REVERT|] |> execute in
+  if refused.stop <> Local.Reverted || refused.storage <> storage then
+    fail "member edits" "refusal did not preserve storage";
+  let limited = Local.config ~storage ~limit:220 ~method_name:"write" ~args:[] () in
+  let stopped = Local.config ~storage ~step_cap:4 ~method_name:"write" ~args:[] () in
+  let unavailable = Array.append (Array.sub program 0 7) [|VM.BALANCE (0, 0)|] in
+  List.iter (fun (config, code, reason) ->
+    match Local.run_at ~trace:true config ~entry:0 code with
+    | Ok output when output.stop = reason && output.storage = storage
+        && output.closes = [] -> ()
+    | Ok _ | Error _ -> fail "member edits" "interrupted writes became visible")
+    [limited, program, Local.Reverted;
+     stopped, program, Local.Step_cap;
+     config, unavailable, Local.Host_operation (7, "balance")]
+
+let signature_checks () =
+  let source = {|
+program Verify {
+  public view fn check(key: bytes, message: bytes, signature: bytes): bool {
+    return ed25519_ok(key, message, signature)
+  }
+}
+|} in
+  let hex text =
+    if String.length text mod 2 <> 0 then fail "signature" "odd hex length";
+    String.init (String.length text / 2) (fun index ->
+      Char.chr (int_of_string ("0x" ^ String.sub text (2 * index) 2))) in
+  let key = hex "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a" in
+  let signature = hex
+    ("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+     ^ "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b") in
+  let changed text = String.mapi (fun i ch ->
+    if i = 0 then Char.chr (Char.code ch lxor 1) else ch) text in
+  let cases = [
+    key, "", signature, true;
+    key, "changed", signature, false;
+    changed key, "", signature, false;
+    key, "", changed signature, false;
+    key, "", String.make 64 '\000', false;
+    key, "", String.sub signature 0 32 ^ String.make 32 '\255', false;
+    String.make 32 '\000', "", signature, false;
+    String.make 32 '\255', "", signature, false;
+    "\001" ^ String.make 31 '\000', "", signature, false;
+    String.make 31 '\000', "", signature, false;
+    key, "", String.sub signature 0 63, false;
+  ] in
+  List.iteri (fun index (key, message, signature, expected) ->
+    List.iteri (fun encoding encode ->
+      let args = List.map (fun value -> VM.VBytes value)
+        [encode key; message; encode signature] in
+      List.iter (fun output ->
+        if output.Local.result <> VM.VBool expected then
+          fail "signature" (Printf.sprintf "verification differs case = %d encoding = %d result = %s"
+            index encoding (Local.value_text output.result));
+        if output.storage <> [] || output.events <> [] || output.closes <> [] then
+          fail "signature" "verification changed state";
+        if output.effort < 2000 then fail "signature" "verification effort missing")
+        [execute ~args "signature" "check" source;
+         execute_octb ~args "signature" "check" source])
+      [Fun.id; (fun value -> Base64.encode_exn value)]) cases;
+  let compiled = compile "signature" source in
+  let config = Local.config ~limit:1999 ~method_name:"check"
+    ~args:[VM.VBytes key; VM.VBytes ""; VM.VBytes signature] () in
+  match Local.run ~trace:false config compiled.code with
+  | Ok output when output.stop = Local.Reverted && output.effort <= 1999 -> ()
+  | Ok _ | Error _ -> fail "signature" "effort limit did not refuse"
+
 let run () =
   read_checks ();
   fault_checks ();
   name_checks ();
-  point_checks ()
+  point_checks ();
+  state_checks ();
+  member_checks ();
+  member_costs ();
+  member_edits ();
+  signature_checks ()
