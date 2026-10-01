@@ -347,9 +347,9 @@ Fixpoint shapes_eqb (left right : list shape) : bool :=
   | _, _ => false
   end.
 
-Definition keep_shape (tail after : list shape) : option shape :=
+Definition keep_shape (remainder after : list shape) : option shape :=
   match after with
-  | value :: rest => if shapes_eqb rest tail then Some value else None
+  | value :: rest => if shapes_eqb rest remainder then Some value else None
   | [] => None
   end.
 
@@ -363,73 +363,73 @@ Fixpoint shape_run (value : code) (stack : list shape)
   | Plus rest | Minus rest | Times rest | Quot rest | Rem rest
   | Same rest | Different rest | Order _ rest | Join rest =>
       match stack with
-      | ShAtom :: ShAtom :: tail => shape_run rest (ShAtom :: tail)
+      | ShAtom :: ShAtom :: remainder => shape_run rest (ShAtom :: remainder)
       | _ => None
       end
   | Negate rest | Absolute rest =>
       match stack with
-      | ShAtom :: tail => shape_run rest (ShAtom :: tail)
+      | ShAtom :: remainder => shape_run rest (ShAtom :: remainder)
       | _ => None
       end
   | Clip _ rest | Skip _ rest =>
       match stack with
-      | ShAtom :: tail => shape_run rest (ShAtom :: tail)
+      | ShAtom :: remainder => shape_run rest (ShAtom :: remainder)
       | _ => None
       end
   | Duo rest =>
       match stack with
-      | rhs :: lhs :: tail => shape_run rest (ShPair lhs rhs :: tail)
+      | rhs :: lhs :: remainder => shape_run rest (ShPair lhs rhs :: remainder)
       | _ => None
       end
   | First rest =>
       match stack with
-      | ShPair lhs _ :: tail => shape_run rest (lhs :: tail)
+      | ShPair lhs _ :: remainder => shape_run rest (lhs :: remainder)
       | _ => None
       end
   | Second rest =>
       match stack with
-      | ShPair _ rhs :: tail => shape_run rest (rhs :: tail)
+      | ShPair _ rhs :: remainder => shape_run rest (rhs :: remainder)
       | _ => None
       end
   | Empty item rest => shape_run rest (ShVec 0 item :: stack)
   | Cons rest =>
       match stack with
-      | ShVec len elem :: item :: tail =>
+      | ShVec len elem :: item :: remainder =>
           if shape_eqb item elem
-          then shape_run rest (ShVec (S len) elem :: tail)
+          then shape_run rest (ShVec (S len) elem :: remainder)
           else None
       | _ => None
       end
   | Append rest =>
       match stack with
-      | ShVec rn re :: ShVec ln le :: tail =>
+      | ShVec rn re :: ShVec ln le :: remainder =>
           if shape_eqb le re
-          then shape_run rest (ShVec (ln + rn) le :: tail)
+          then shape_run rest (ShVec (ln + rn) le :: remainder)
           else None
       | _ => None
       end
   | Pick index rest =>
       match stack with
-      | ShVec len elem :: tail =>
-          if Nat.ltb index len then shape_run rest (elem :: tail) else None
+      | ShVec len elem :: remainder =>
+          if Nat.ltb index len then shape_run rest (elem :: remainder) else None
       | _ => None
       end
   | Unhead rest =>
       match stack with
-      | ShVec (S len) elem :: tail =>
-          shape_run rest (ShPair elem (ShVec len elem) :: tail)
+      | ShVec (S len) elem :: remainder =>
+          shape_run rest (ShPair elem (ShVec len elem) :: remainder)
       | _ => None
       end
   | Left rest | Right rest =>
       match stack with
-      | payload :: tail => shape_run rest (ShSum payload :: tail)
+      | payload :: remainder => shape_run rest (ShSum payload :: remainder)
       | [] => None
       end
   | CloseCap kind rest =>
       match stack with
-      | ShCap found :: tail =>
+      | ShCap found :: remainder =>
           if Nat.eqb kind found
-          then shape_run rest (ShUnit :: tail)
+          then shape_run rest (ShUnit :: remainder)
           else None
       | _ => None
       end
@@ -440,11 +440,11 @@ Fixpoint shape_run (value : code) (stack : list shape)
       end
   | Scope _ body rest =>
       match stack with
-      | _ :: tail =>
-          match shape_run body tail with
+      | _ :: remainder =>
+          match shape_run body remainder with
           | Some after =>
-              match keep_shape tail after with
-              | Some out => shape_run rest (out :: tail)
+              match keep_shape remainder after with
+              | Some out => shape_run rest (out :: remainder)
               | None => None
               end
           | None => None
@@ -453,11 +453,11 @@ Fixpoint shape_run (value : code) (stack : list shape)
       end
   | Scope2 _ _ body rest =>
       match stack with
-      | ShPair _ _ :: tail =>
-          match shape_run body tail with
+      | ShPair _ _ :: remainder =>
+          match shape_run body remainder with
           | Some after =>
-              match keep_shape tail after with
-              | Some out => shape_run rest (out :: tail)
+              match keep_shape remainder after with
+              | Some out => shape_run rest (out :: remainder)
               | None => None
               end
           | None => None
@@ -468,16 +468,16 @@ Fixpoint shape_run (value : code) (stack : list shape)
       match bmul item, bmul state, stack, shape_of (bty item),
           shape_of (bty state) with
       | M0, _, _, _, _ | _, M0, _, _, _ => None
-      | _, _, seed :: ShVec found elem :: tail, Some item_shape,
+      | _, _, seed :: ShVec found elem :: remainder, Some item_shape,
           Some state_shape =>
           if Nat.eqb len found && shape_eqb item_shape elem
               && shape_eqb state_shape seed then
-            match shape_run body tail with
+            match shape_run body remainder with
             | Some after =>
-                match keep_shape tail after with
+                match keep_shape remainder after with
                 | Some out =>
                     if shape_eqb seed out
-                    then shape_run rest (out :: tail)
+                    then shape_run rest (out :: remainder)
                     else None
                 | None => None
                 end
@@ -490,14 +490,14 @@ Fixpoint shape_run (value : code) (stack : list shape)
       match bmul left_bind, bmul right_bind, stack, shape_of (bty left_bind),
           shape_of (bty right_bind) with
       | M0, _, _, _, _ | _, M0, _, _, _ => None
-      | _, _, ShSum payload :: tail, Some left_shape, Some right_shape =>
+      | _, _, ShSum payload :: remainder, Some left_shape, Some right_shape =>
           if shape_eqb payload left_shape && shape_eqb payload right_shape then
-            match shape_run yes tail, shape_run no tail with
+            match shape_run yes remainder, shape_run no remainder with
             | Some yafter, Some nafter =>
-                match keep_shape tail yafter, keep_shape tail nafter with
+                match keep_shape remainder yafter, keep_shape remainder nafter with
                 | Some yout, Some nout =>
                     if shape_eqb form yout && shape_eqb form nout
-                    then shape_run rest (form :: tail)
+                    then shape_run rest (form :: remainder)
                     else None
                 | _, _ => None
                 end
@@ -508,13 +508,13 @@ Fixpoint shape_run (value : code) (stack : list shape)
       end
   | Fork form yes no rest =>
       match stack with
-      | ShAtom :: tail =>
-          match shape_run yes tail, shape_run no tail with
+      | ShAtom :: remainder =>
+          match shape_run yes remainder, shape_run no remainder with
           | Some yafter, Some nafter =>
-              match keep_shape tail yafter, keep_shape tail nafter with
+              match keep_shape remainder yafter, keep_shape remainder nafter with
               | Some yout, Some nout =>
                   if shape_eqb form yout && shape_eqb form nout
-                  then shape_run rest (form :: tail)
+                  then shape_run rest (form :: remainder)
                   else None
               | _, _ => None
               end
@@ -651,9 +651,9 @@ Fixpoint build (gamma : list bind) (term : tm) (rest : code) : option code :=
       end
   | Take len value => build gamma value (Clip len rest)
   | Drop len value => build gamma value (Skip len rest)
-  | Vcons first tail =>
-      match build gamma tail (Cons rest) with
-      | Some tail_code => build gamma first tail_code
+  | Vcons first remainder =>
+      match build gamma remainder (Cons rest) with
+      | Some remainder_code => build gamma first remainder_code
       | None => None
       end
   | Vcat lhs rhs =>
@@ -976,7 +976,7 @@ Proof.
     constructor.
   - cbn [collect_values] in accepted.
     destruct (make value) as [item |] eqn:head; try discriminate.
-    destruct (collect_values make rest) as [tail |] eqn:body;
+    destruct (collect_values make rest) as [remainder |] eqn:body;
       try discriminate.
     inversion accepted; subst.
     constructor.
@@ -1171,7 +1171,7 @@ Lemma take_rep : forall sigma rho,
 Proof.
   intros sigma rho related.
   induction related as
-      [|slot_id mode typ value item live sigma rho item_rep tail_rep repeat];
+      [|slot_id mode typ value item live sigma rho item_rep remainder_rep repeat];
     intros wanted out core accepted.
   - cbn [takef] in accepted.
     discriminate.
@@ -1203,12 +1203,12 @@ Proof.
         -- split.
            ++ exact item_rep.
            ++ constructor; assumption.
-    + destruct (takef wanted sigma) as [[tail_value tail_core] |] eqn:tail.
+    + destruct (takef wanted sigma) as [[remainder_value remainder_core] |] eqn:remainder.
       * cbn in accepted.
-        destruct (repeat wanted tail_value tail_core tail)
-          as [found [tail_item [machine [machine_take [value_rep core_rep]]]]].
+        destruct (repeat wanted remainder_value remainder_core remainder)
+          as [found [remainder_item [machine [machine_take [value_rep core_rep]]]]].
         inversion accepted; subst.
-        exists found, tail_item, (MSlot slot_id mode item live :: machine).
+        exists found, remainder_item, (MSlot slot_id mode item live :: machine).
         split.
         -- cbn [take mid mmul mval mlive].
            rewrite Nat.eqb_sym, same, machine_take.
@@ -1266,7 +1266,7 @@ Proof.
   destruct mode.
   - contradiction.
   - destruct related as
-        [|slot_id slot_mode slot_typ value item live sigma rho item_rep tail_rep].
+        [|slot_id slot_mode slot_typ value item live sigma rho item_rep remainder_rep].
     + cbn [closef] in closed.
       discriminate.
     + cbn [closef bmul bid] in closed.
@@ -1281,10 +1281,10 @@ Proof.
            ++ cbn [closem bmul bid mid mmul mlive].
               rewrite Nat.eqb_sym, same.
               reflexivity.
-           ++ exact tail_rep.
+           ++ exact remainder_rep.
       * discriminate.
   - destruct related as
-        [|slot_id slot_mode slot_typ value item live sigma rho item_rep tail_rep].
+        [|slot_id slot_mode slot_typ value item live sigma rho item_rep remainder_rep].
     + cbn [closef] in closed.
       discriminate.
     + cbn [closef bmul bid] in closed.
@@ -1296,7 +1296,7 @@ Proof.
       * cbn [closem bmul bid mid mmul mlive].
         rewrite Nat.eqb_sym, same.
         reflexivity.
-      * exact tail_rep.
+      * exact remainder_rep.
 Qed.
 
 Fixpoint size (value : code) : nat :=
@@ -1336,177 +1336,177 @@ Fixpoint exec (fuel : nat) (value : code) (rho : env) (stack : list mvalue)
           end
       | Plus rest =>
           match stack with
-          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: tail =>
+          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: remainder =>
               exec fuel_left rest rho
-                (MAtom (LInt (Z.add lhs_value rhs_value)) :: tail) plan
+                (MAtom (LInt (Z.add lhs_value rhs_value)) :: remainder) plan
           | _ => None
           end
       | Minus rest =>
           match stack with
-          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: tail =>
+          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: remainder =>
               exec fuel_left rest rho
-                (MAtom (LInt (Z.sub lhs_value rhs_value)) :: tail) plan
+                (MAtom (LInt (Z.sub lhs_value rhs_value)) :: remainder) plan
           | _ => None
           end
       | Times rest =>
           match stack with
-          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: tail =>
+          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: remainder =>
               exec fuel_left rest rho
-                (MAtom (LInt (Z.mul lhs_value rhs_value)) :: tail) plan
+                (MAtom (LInt (Z.mul lhs_value rhs_value)) :: remainder) plan
           | _ => None
           end
       | Quot rest =>
           match stack with
-          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: tail =>
+          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: remainder =>
               if Z.eqb rhs_value Z.zero then None
               else exec fuel_left rest rho
-                (MAtom (LInt (Z.quot lhs_value rhs_value)) :: tail) plan
+                (MAtom (LInt (Z.quot lhs_value rhs_value)) :: remainder) plan
           | _ => None
           end
       | Rem rest =>
           match stack with
-          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: tail =>
+          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: remainder =>
               if Z.eqb rhs_value Z.zero then None
               else exec fuel_left rest rho
-                (MAtom (LInt (Z.rem lhs_value rhs_value)) :: tail) plan
+                (MAtom (LInt (Z.rem lhs_value rhs_value)) :: remainder) plan
           | _ => None
           end
       | Negate rest =>
           match stack with
-          | MAtom (LInt item) :: tail =>
-              exec fuel_left rest rho (MAtom (LInt (Z.opp item)) :: tail) plan
+          | MAtom (LInt item) :: remainder =>
+              exec fuel_left rest rho (MAtom (LInt (Z.opp item)) :: remainder) plan
           | _ => None
           end
       | Absolute rest =>
           match stack with
-          | MAtom (LInt item) :: tail =>
-              exec fuel_left rest rho (MAtom (LInt (Z.abs item)) :: tail) plan
+          | MAtom (LInt item) :: remainder =>
+              exec fuel_left rest rho (MAtom (LInt (Z.abs item)) :: remainder) plan
           | _ => None
           end
       | Same rest =>
           match stack with
-          | MAtom rhs_value :: MAtom lhs_value :: tail =>
+          | MAtom rhs_value :: MAtom lhs_value :: remainder =>
               exec fuel_left rest rho
-                (MAtom (LBool (lit_eqb lhs_value rhs_value)) :: tail) plan
+                (MAtom (LBool (lit_eqb lhs_value rhs_value)) :: remainder) plan
           | _ => None
           end
       | Different rest =>
           match stack with
-          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: tail =>
+          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: remainder =>
               exec fuel_left rest rho
-                (MAtom (LBool (negb (Z.eqb lhs_value rhs_value))) :: tail) plan
+                (MAtom (LBool (negb (Z.eqb lhs_value rhs_value))) :: remainder) plan
           | _ => None
           end
       | Order kind rest =>
           match stack with
-          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: tail =>
+          | MAtom (LInt rhs_value) :: MAtom (LInt lhs_value) :: remainder =>
               exec fuel_left rest rho
-                (MAtom (LBool (relb kind lhs_value rhs_value)) :: tail) plan
+                (MAtom (LBool (relb kind lhs_value rhs_value)) :: remainder) plan
           | _ => None
           end
       | Join rest =>
           match stack with
-          | MAtom (LBytes rhs_value) :: MAtom (LBytes lhs_value) :: tail =>
+          | MAtom (LBytes rhs_value) :: MAtom (LBytes lhs_value) :: remainder =>
               exec fuel_left rest rho
-                (MAtom (LBytes (lhs_value ++ rhs_value)) :: tail) plan
+                (MAtom (LBytes (lhs_value ++ rhs_value)) :: remainder) plan
           | _ => None
           end
       | Clip len rest =>
           match stack with
-          | MAtom (LBytes item) :: tail =>
+          | MAtom (LBytes item) :: remainder =>
               if Nat.leb len (List.length item)
               then exec fuel_left rest rho
-                (MAtom (LBytes (firstn len item)) :: tail) plan
+                (MAtom (LBytes (firstn len item)) :: remainder) plan
               else None
           | _ => None
           end
       | Skip len rest =>
           match stack with
-          | MAtom (LBytes item) :: tail =>
+          | MAtom (LBytes item) :: remainder =>
               if Nat.leb len (List.length item)
               then exec fuel_left rest rho
-                (MAtom (LBytes (skipn len item)) :: tail) plan
+                (MAtom (LBytes (skipn len item)) :: remainder) plan
               else None
           | _ => None
           end
       | Duo rest =>
           match stack with
-          | rhs :: lhs :: tail =>
-              exec fuel_left rest rho (MPair lhs rhs :: tail) plan
+          | rhs :: lhs :: remainder =>
+              exec fuel_left rest rho (MPair lhs rhs :: remainder) plan
           | _ => None
           end
       | First rest =>
           match stack with
-          | MPair lhs _ :: tail => exec fuel_left rest rho (lhs :: tail) plan
+          | MPair lhs _ :: remainder => exec fuel_left rest rho (lhs :: remainder) plan
           | _ => None
           end
       | Second rest =>
           match stack with
-          | MPair _ rhs :: tail => exec fuel_left rest rho (rhs :: tail) plan
+          | MPair _ rhs :: remainder => exec fuel_left rest rho (rhs :: remainder) plan
           | _ => None
           end
       | Empty elem rest => exec fuel_left rest rho (MVec elem [] :: stack) plan
       | Cons rest =>
           match stack with
-          | MVec elem values :: item :: tail =>
+          | MVec elem values :: item :: remainder =>
               if shape_eqb elem (mshape item)
               then exec fuel_left rest rho
-                (MVec elem (item :: values) :: tail) plan
+                (MVec elem (item :: values) :: remainder) plan
               else None
           | _ => None
           end
       | Append rest =>
           match stack with
-          | MVec right_elem rvals :: MVec left_elem lvals :: tail =>
+          | MVec right_elem rvals :: MVec left_elem lvals :: remainder =>
               if shape_eqb left_elem right_elem
               then exec fuel_left rest rho
-                (MVec left_elem (lvals ++ rvals) :: tail) plan
+                (MVec left_elem (lvals ++ rvals) :: remainder) plan
               else None
           | _ => None
           end
       | Pick index rest =>
           match stack with
-          | MVec _ values :: tail =>
+          | MVec _ values :: remainder =>
               match nth_error values index with
-              | Some item => exec fuel_left rest rho (item :: tail) plan
+              | Some item => exec fuel_left rest rho (item :: remainder) plan
               | None => None
               end
           | _ => None
           end
       | Unhead rest =>
           match stack with
-          | MVec elem (first :: tail_values) :: tail =>
+          | MVec elem (first :: remainder_values) :: remainder =>
               exec fuel_left rest rho
-                (MPair first (MVec elem tail_values) :: tail) plan
+                (MPair first (MVec elem remainder_values) :: remainder) plan
           | _ => None
           end
       | Left rest =>
           match stack with
-          | payload :: tail =>
-              exec fuel_left rest rho (MSum true payload :: tail) plan
+          | payload :: remainder =>
+              exec fuel_left rest rho (MSum true payload :: remainder) plan
           | [] => None
           end
       | Right rest =>
           match stack with
-          | payload :: tail =>
-              exec fuel_left rest rho (MSum false payload :: tail) plan
+          | payload :: remainder =>
+              exec fuel_left rest rho (MSum false payload :: remainder) plan
           | [] => None
           end
       | CloseCap kind rest =>
           match stack with
-          | MCap found id :: tail =>
+          | MCap found id :: remainder =>
               if Nat.eqb kind found then
-                exec fuel_left rest rho (MUnit :: tail)
+                exec fuel_left rest rho (MUnit :: remainder)
                   (Action (AClose kind) VUnit (OHeld kind id) :: plan)
               else None
           | _ => None
           end
       | Scope binder body rest =>
           match stack with
-          | item :: tail =>
+          | item :: remainder =>
               match openm binder item rho with
               | Some opened =>
-                match exec fuel_left body opened tail plan with
+                match exec fuel_left body opened remainder plan with
                 | Some (after, prior, next_plan) =>
                     match closem binder prior with
                     | Some next => exec fuel_left rest next after next_plan
@@ -1520,12 +1520,12 @@ Fixpoint exec (fuel : nat) (value : code) (rho : env) (stack : list mvalue)
           end
       | Scope2 lhs_bind rhs_bind body rest =>
           match stack with
-          | MPair lhs rhs :: tail =>
+          | MPair lhs rhs :: remainder =>
               match openm lhs_bind lhs rho with
               | Some first =>
                   match openm rhs_bind rhs first with
                   | Some second =>
-                      match exec fuel_left body second tail plan with
+                      match exec fuel_left body second remainder plan with
                       | Some (after, prior, next_plan) =>
                           match closem rhs_bind prior with
                           | Some last =>
@@ -1547,7 +1547,7 @@ Fixpoint exec (fuel : nat) (value : code) (rho : env) (stack : list mvalue)
           match bmul item_bind, bmul state_bind, stack,
               shape_of (bty item_bind), shape_of (bty state_bind) with
           | M0, _, _, _, _ | _, M0, _, _, _ => None
-          | _, _, state :: MVec elem values :: tail, Some item_shape,
+          | _, _, state :: MVec elem values :: remainder, Some item_shape,
               Some state_shape =>
               if Nat.eqb (List.length values) len
                   && shape_eqb item_shape elem
@@ -1556,15 +1556,15 @@ Fixpoint exec (fuel : nat) (value : code) (rho : env) (stack : list mvalue)
               then
                 let fix loop values current rho next_plan :=
                   match values with
-                  | [] => exec fuel_left rest rho (current :: tail) next_plan
+                  | [] => exec fuel_left rest rho (current :: remainder) next_plan
                   | item :: values =>
                       match openm item_bind item rho with
                       | Some first =>
                           match openm state_bind current first with
                           | Some opened =>
-                              match exec fuel_left body opened tail next_plan with
+                              match exec fuel_left body opened remainder next_plan with
                               | Some (next_state :: after, prior, found_plan) =>
-                                  if mvalues_eqb after tail
+                                  if mvalues_eqb after remainder
                                   then
                                     match closem state_bind prior with
                                     | Some last =>
@@ -1590,17 +1590,17 @@ Fixpoint exec (fuel : nat) (value : code) (rho : env) (stack : list mvalue)
       | Choice left_bind yes right_bind no form rest =>
           match bmul left_bind, bmul right_bind, stack with
           | M0, _, _ | _, M0, _ => None
-          | _, _, MSum side payload :: tail =>
+          | _, _, MSum side payload :: remainder =>
               let binder := if side then left_bind else right_bind in
               let branch := if side then yes else no in
               match openm binder payload rho with
               | Some opened =>
-                  match exec fuel_left branch opened tail plan with
+                  match exec fuel_left branch opened remainder plan with
                   | Some (item :: after, prior, next_plan) =>
                       match closem binder prior with
                       | Some next =>
                           if shape_eqb form (mshape item)
-                              && mvalues_eqb after tail then
+                              && mvalues_eqb after remainder then
                             exec fuel_left rest next (item :: after) next_plan
                           else None
                       | None => None
@@ -1613,8 +1613,8 @@ Fixpoint exec (fuel : nat) (value : code) (rho : env) (stack : list mvalue)
           end
       | Fork form yes no rest =>
           match stack with
-          | MAtom (LBool flag) :: tail =>
-              match exec fuel_left (if flag then yes else no) rho tail plan with
+          | MAtom (LBool flag) :: remainder =>
+              match exec fuel_left (if flag then yes else no) rho remainder plan with
               | Some (item :: after, next, next_plan) =>
                   if shape_eqb form (mshape item)
                   then exec fuel_left rest next (item :: after) next_plan
@@ -1999,9 +1999,9 @@ Proof.
   unfold replay, replay_plan, replay_actions in accepted.
   destruct (exec (S (size value)) value [] [] [])
     as [[[out slots] plan] |] eqn:ran; try discriminate.
-  destruct out as [|first tail]; try discriminate.
+  destruct out as [|first remainder]; try discriminate.
   destruct first; try discriminate.
-  destruct tail as [|second tail]; try discriminate.
+  destruct remainder as [|second remainder]; try discriminate.
   destruct slots as [|slot rest]; try discriminate.
   inversion accepted; subst l.
   exists plan.
@@ -2200,11 +2200,11 @@ Proof.
   - simpl in measured.
     destruct (shape_of (bty value)) as [form |] eqn:formed;
       try discriminate.
-    destruct (input_width rest) as [tail |] eqn:rest_width;
+    destruct (input_width rest) as [remainder |] eqn:rest_width;
       try discriminate.
     inversion measured; subst width.
     simpl.
-    rewrite formed, (repeat tail (first + shape_width form) eq_refl).
+    rewrite formed, (repeat remainder (first + shape_width form) eq_refl).
     rewrite shape_regs_exact, <- seq_app.
     reflexivity.
 Qed.
@@ -2562,13 +2562,13 @@ Definition source_feed_code (source : string) (values : list value)
 Lemma nats_eqb_eq : forall lhs rhs,
   nats_eqb lhs rhs = true -> lhs = rhs.
 Proof.
-  induction lhs as [|lhead ltail IH]; destruct rhs as [|rhead rtail];
+  induction lhs as [|lhead lremainder IH]; destruct rhs as [|rhead rremainder];
     simpl; intros same; try discriminate; try reflexivity.
   rewrite andb_true_iff in same.
-  destruct same as [head tail].
+  destruct same as [head remainder].
   apply Nat.eqb_eq in head.
-  apply IH in tail.
-  subst rhead rtail.
+  apply IH in remainder.
+  subst rhead rremainder.
   reflexivity.
 Qed.
 
@@ -2620,9 +2620,9 @@ Proof.
   induction left as [|lhs lrest IH]; destruct right as [|rhs rrest];
     simpl; intros same; try discriminate; try reflexivity.
   rewrite andb_true_iff in same.
-  destruct same as [head tail].
+  destruct same as [head remainder].
   apply atom_eqb_eq in head.
-  apply IH in tail.
+  apply IH in remainder.
   subst.
   reflexivity.
 Qed.

@@ -297,13 +297,13 @@ Proof.
   induction items as [|item rest IH]; intros absent found.
   - contradiction.
   - simpl in absent.
-    apply orb_false_iff in absent as [head tail].
+    apply orb_false_iff in absent as [head remainder].
     simpl in found.
     destruct found as [same | found].
     + subst.
       rewrite Nat.eqb_refl in head.
       discriminate.
-    + apply (IH tail found).
+    + apply (IH remainder found).
 Qed.
 
 Lemma names_ok : forall items,
@@ -312,13 +312,13 @@ Proof.
   induction items as [|item rest IH]; intros accepted.
   - constructor.
   - simpl in accepted.
-    apply andb_true_iff in accepted as [head tail].
+    apply andb_true_iff in accepted as [head remainder].
     constructor.
     + apply has_name_absent.
       apply negb_true_iff in head.
       exact head.
     + apply IH.
-      exact tail.
+      exact remainder.
 Qed.
 
 Lemma arm_name : forall item choice,
@@ -339,10 +339,10 @@ Proof.
   induction ctors as [|item rest IH]; intros arms accepted;
     destruct arms as [|choice choices]; simpl in accepted; try discriminate.
   - reflexivity.
-  - apply andb_true_iff in accepted as [head tail].
+  - apply andb_true_iff in accepted as [head remainder].
     simpl.
     rewrite (arm_name item choice head).
-    rewrite (IH choices tail).
+    rewrite (IH choices remainder).
     reflexivity.
 Qed.
 

@@ -93,8 +93,8 @@ Fixpoint naexact (ctors : list ctor) (arms : list narm) (body : rtm)
     : option rtm :=
   match ctors, arms with
   | [], [] => Some body
-  | ctor :: rest, arm :: tail =>
-      match naexact rest tail body with
+  | ctor :: rest, arm :: remainder =>
+      match naexact rest remainder body with
       | Some out => Some (RExact (nabind arm) (carg ctor) out)
       | None => None
       end
@@ -146,8 +146,8 @@ Record nitem : Type := NItem {
 Fixpoint nitems_b (fields : list rfield) (items : list nitem) : bool :=
   match fields, items with
   | [], [] => true
-  | field :: rest, item :: tail =>
-      Nat.eqb (rfname field) (niname item) && nitems_b rest tail
+  | field :: rest, item :: remainder =>
+      Nat.eqb (rfname field) (niname item) && nitems_b rest remainder
   | _, _ => false
   end.
 
@@ -180,8 +180,8 @@ Record npick : Type := NPick {
 Fixpoint npicks_b (fields : list rfield) (items : list npick) : bool :=
   match fields, items with
   | [], [] => true
-  | field :: rest, item :: tail =>
-      Nat.eqb (rfname field) (npname item) && npicks_b rest tail
+  | field :: rest, item :: remainder =>
+      Nat.eqb (rfname field) (npname item) && npicks_b rest remainder
   | _, _ => false
   end.
 
@@ -189,8 +189,8 @@ Fixpoint npexact (fields : list rfield) (items : list npick) (body : rtm)
     : option rtm :=
   match fields, items with
   | [], [] => Some body
-  | field :: rest, item :: tail =>
-      match npexact rest tail body with
+  | field :: rest, item :: remainder =>
+      match npexact rest remainder body with
       | Some out => Some (RExact (npbind item) (rftyp field) out)
       | None => None
       end
@@ -214,11 +214,11 @@ Fixpoint nrbody (seed : nat) (fields : list rfield) (items : list npick)
     (value body : rtm) : option rtm :=
   match fields, items with
   | [_], [item] => Some (RLet (npbind item) value body)
-  | _ :: rest, item :: tail =>
+  | _ :: rest, item :: remainder =>
       match prodt rest with
       | Some rhs =>
           match ylift rhs,
-              nrbody (S seed) rest tail (RVar (did seed)) body with
+              nrbody (S seed) rest remainder (RVar (did seed)) body with
           | Some raw, Some out => Some (RUnpair value (npbind item)
               (RBind (did seed) (paym rhs) raw) out)
           | _, _ => None

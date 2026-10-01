@@ -62,10 +62,10 @@ Proof.
   intros pc line values.
   induction values as [|value rest IH]; simpl; intros accepted; try discriminate.
   rewrite Bool.orb_true_iff in accepted.
-  destruct accepted as [head | tail].
+  destruct accepted as [head | remainder].
   - exists value.
     split; [left; reflexivity | exact head].
-  - destruct (IH tail) as [found [inside hit]].
+  - destruct (IH remainder) as [found [inside hit]].
     exists found.
     split; [right; exact inside | exact hit].
 Qed.

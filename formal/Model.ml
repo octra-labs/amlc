@@ -83,7 +83,7 @@ let seq () =
         let changed = Array.of_list (List.map (fun v -> Eval.Int v) packed) in
         changed.(len) <- Eval.Int Z.one;
         let hidden = Eval.Pair (Eval.Int count, Eval.Vec changed) in
-        if Eval.typed typ hidden then fail "sequence model tail"
+        if Eval.typed typ hidden then fail "sequence model remainder"
       end
     done;
     let values = List.init (cap + 1) (fun index -> Z.of_int (index + 1)) in
@@ -835,11 +835,11 @@ let otb_scalar () =
       done;
       if native.code.(!pc) <> Octra_vm.Contract_vm.NOP then
         fail "scalar artifact body";
-      let tail_count = List.length (Otb.out_code Z.zero scalar) in
-      let first = Array.length image.code - tail_count in
+      let remainder_count = List.length (Otb.out_code Z.zero scalar) in
+      let first = Array.length image.code - remainder_count in
       if first < 0 then fail "scalar output length";
-      let tail = Array.sub image.code first tail_count in
-      let proved = Array.to_list tail |> List.map otb_local_xop in
+      let remainder = Array.sub image.code first remainder_count in
+      let proved = Array.to_list remainder |> List.map otb_local_xop in
       let model_first = Z.of_int first in
       if Otb.out_code model_first scalar <> proved then
         fail "scalar native output code";
@@ -852,7 +852,7 @@ let otb_scalar () =
         Array.fold_left
           (fun total op ->
             total + Octra_vm.Contract_vm.effort_cost (otb_local_vm op))
-          0 tail
+          0 remainder
       in
       if not
           (Z.equal (Otb.xops_cost proved) (Z.of_int native_cost)
@@ -871,8 +871,8 @@ let otb_scalar () =
       Array.iteri
         (fun at op ->
           let changed_op = if op = Octb.Noop then Octb.Stop else Octb.Noop in
-          let changed_tail = array_set at changed_op tail in
-          let changed = Array.to_list changed_tail |> List.map otb_local_xop in
+          let changed_remainder = array_set at changed_op remainder in
+          let changed = Array.to_list changed_remainder |> List.map otb_local_xop in
           if Option.is_some (Otb.out_read model_first changed) then
             fail "scalar native output mutation";
           let native_op =
@@ -884,7 +884,7 @@ let otb_scalar () =
           in
           otb_refuse native changed_code;
           incr mutations)
-        tail;
+        remainder;
       let wrong = otb_wrong_value typ in
       let wrong_args = wrong :: List.tl args in
       let wrong_value = otb_xvalue wrong in

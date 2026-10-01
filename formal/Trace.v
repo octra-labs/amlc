@@ -36,8 +36,8 @@ Record vm : Type := Vm {
 Fixpoint nats_eqb (left right : list nat) : bool :=
   match left, right with
   | [], [] => true
-  | lhead :: ltail, rhead :: rtail =>
-      Nat.eqb lhead rhead && nats_eqb ltail rtail
+  | lhead :: lremainder, rhead :: rremainder =>
+      Nat.eqb lhead rhead && nats_eqb lremainder rremainder
   | _, _ => false
   end.
 
@@ -88,7 +88,7 @@ Definition source_trace (source : string) : option (list frame) :=
 
 Lemma nats_eqb_refl : forall values, nats_eqb values values = true.
 Proof.
-  induction values as [|head tail IH]; simpl.
+  induction values as [|head remainder IH]; simpl.
   - reflexivity.
   - rewrite Nat.eqb_refl, IH.
     reflexivity.

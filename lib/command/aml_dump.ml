@@ -394,8 +394,8 @@ let bytes_text value =
     List.init shown (fun index -> Printf.sprintf "%02x" (Char.code value.[index]))
     |> String.concat ""
   in
-  let tail = if shown < String.length value then "..." else "" in
-  Printf.sprintf "hex:%s%s/%d" body tail (String.length value)
+  let remainder = if shown < String.length value then "..." else "" in
+  Printf.sprintf "hex:%s%s/%d" body remainder (String.length value)
 
 let data_rows item =
   let rec walk out = function

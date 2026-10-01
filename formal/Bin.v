@@ -27,12 +27,12 @@ Fixpoint get_pos (input : bits) : option (positive * bits) :=
   | false :: false :: rest => Some (xH, rest)
   | false :: true :: rest =>
       match get_pos rest with
-      | Some (value, tail) => Some (xO value, tail)
+      | Some (value, remainder) => Some (xO value, remainder)
       | None => None
       end
   | true :: false :: rest =>
       match get_pos rest with
-      | Some (value, tail) => Some (xI value, tail)
+      | Some (value, remainder) => Some (xI value, remainder)
       | None => None
       end
   | _ => None
@@ -55,7 +55,7 @@ Definition get_n (input : bits) : option (N * bits) :=
   | false :: false :: rest => Some (N0, rest)
   | false :: true :: rest =>
       match get_pos rest with
-      | Some (value, tail) => Some (Npos value, tail)
+      | Some (value, remainder) => Some (Npos value, remainder)
       | None => None
       end
   | _ => None
@@ -97,12 +97,12 @@ Definition get_z (input : bits) : option (Z * bits) :=
   | false :: false :: rest => Some (Z0, rest)
   | false :: true :: rest =>
       match get_pos rest with
-      | Some (value, tail) => Some (Zpos value, tail)
+      | Some (value, remainder) => Some (Zpos value, remainder)
       | None => None
       end
   | true :: false :: rest =>
       match get_pos rest with
-      | Some (value, tail) => Some (Zneg value, tail)
+      | Some (value, remainder) => Some (Zneg value, remainder)
       | None => None
       end
   | _ => None
@@ -168,19 +168,19 @@ Fixpoint get_code_f (fuel : nat) (input : bits) : option (code * bits) :=
       match input with
       | false :: false :: rest =>
           match get_nat rest with
-          | Some (number, tail) => Some (CNum number, tail)
+          | Some (number, remainder) => Some (CNum number, remainder)
           | None => None
           end
       | false :: true :: rest =>
           match get_z rest with
-          | Some (number, tail) => Some (CInt number, tail)
+          | Some (number, remainder) => Some (CInt number, remainder)
           | None => None
           end
       | true :: false :: rest => Some (CNil, rest)
       | true :: true :: false :: rest =>
           match get_code_f fuel' rest with
-          | Some (first, tail) =>
-              match get_code_f fuel' tail with
+          | Some (first, remainder) =>
+              match get_code_f fuel' remainder with
               | Some (last, final) => Some (CCons first last, final)
               | None => None
               end
@@ -188,8 +188,8 @@ Fixpoint get_code_f (fuel : nat) (input : bits) : option (code * bits) :=
           end
       | true :: true :: true :: rest =>
           match get_nat rest with
-          | Some (tag, tail) =>
-              match get_code_f fuel' tail with
+          | Some (tag, remainder) =>
+              match get_code_f fuel' remainder with
               | Some (body, final) => Some (CTag tag body, final)
               | None => None
               end

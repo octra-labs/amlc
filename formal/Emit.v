@@ -102,12 +102,12 @@ Proof.
   - intros _.
     constructor.
   - rewrite andb_true_iff.
-    intros [head tail].
+    intros [head remainder].
     constructor.
     + apply Nat.ltb_lt.
       exact head.
     + apply IH.
-      exact tail.
+      exact remainder.
 Qed.
 
 Theorem lit_of_sound : forall typ value out,

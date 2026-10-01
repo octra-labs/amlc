@@ -143,7 +143,7 @@ Proof.
   induction terms as [|term rest IH]; intros values accepted; simpl in accepted.
   - inversion accepted. reflexivity.
   - destruct (ieval env term); try discriminate.
-    destruct (ivals env rest) as [tail |] eqn:run; try discriminate.
+    destruct (ivals env rest) as [remainder |] eqn:run; try discriminate.
     inversion accepted; subst.
     simpl. f_equal. apply IH. reflexivity.
 Qed.

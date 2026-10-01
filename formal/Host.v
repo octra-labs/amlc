@@ -147,10 +147,10 @@ Proof.
   induction bytes as [|byte rest repeat]; intros valid; simpl in valid.
   - constructor.
   - apply andb_true_iff in valid.
-    destruct valid as [head tail].
+    destruct valid as [head remainder].
     constructor.
     + apply Nat.ltb_lt. exact head.
-    + apply repeat. exact tail.
+    + apply repeat. exact remainder.
 Qed.
 
 Theorem typed_sound : forall typ item,
@@ -187,9 +187,9 @@ Proof.
     subst.
     constructor.
   - apply andb_true_iff in valid.
-    destruct valid as [same_key tail].
-    apply andb_true_iff in tail.
-    destruct tail as [same_rem valid_field].
+    destruct valid as [same_key remainder].
+    apply andb_true_iff in remainder.
+    destruct remainder as [same_rem valid_field].
     apply Nat.eqb_eq in same_key.
     apply Nat.eqb_eq in same_rem.
     subst.

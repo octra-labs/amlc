@@ -1234,12 +1234,12 @@ Fixpoint run_fuel (fuel : nat) (sigma : env) (term : tm) {struct fuel} : ans :=
           match run_fuel rest sigma value with
           | Done out next =>
               match rv out with
-              | VVec (first :: tail) =>
+              | VVec (first :: remainder) =>
                   keep fuel
-                    (Run (VPair first (VVec tail)) (rp out)
+                    (Run (VPair first (VVec remainder)) (rp out)
                       (ra out)
-                      (S (rs out + length tail))
-                      (S (rw out + length tail))) next
+                      (S (rs out + length remainder))
+                      (S (rw out + length remainder))) next
               | _ => Stuck
               end
           | Rejected reason => Rejected reason
@@ -1338,12 +1338,12 @@ with fold_fuel (fuel : nat) (sigma : env) (item state : bind) (body : tm)
                           match closef item after_state with
                           | Some outer =>
                               match fold_fuel fuel_rest outer item state body rest (rv head) with
-                              | Done tail next =>
+                              | Done remainder next =>
                                   keep fuel
-                                    (Run (rv tail) (rp head ++ rp tail)
-                                      (ra head ++ ra tail)
-                                      (S (rs head + rs tail))
-                                      (S (rw head + rw tail))) next
+                                    (Run (rv remainder) (rp head ++ rp remainder)
+                                      (ra head ++ ra remainder)
+                                      (S (rs head + rs remainder))
+                                      (S (rw head + rw remainder))) next
                               | Rejected reason => Rejected reason
                               | OutOfFuel => OutOfFuel
                               | Stuck => Stuck
@@ -1610,17 +1610,17 @@ Inductive evalR : env -> tm -> run -> env -> Prop :=
 with foldR : env -> bind -> bind -> tm -> list value -> value -> run -> env -> Prop :=
 | FRNil : forall sigma item state body value,
     foldR sigma item state body [] value (Run value [] [] 0 0) sigma
-| FRCons : forall sigma item state body first rest value opened_item opened_state head prior after_state outer tail next,
+| FRCons : forall sigma item state body first rest value opened_item opened_state head prior after_state outer remainder next,
     openv item first sigma opened_item ->
     openv state value opened_item opened_state ->
     evalR opened_state body head prior ->
     closev state prior after_state ->
     closev item after_state outer ->
-    foldR outer item state body rest (rv head) tail next ->
+    foldR outer item state body rest (rv head) remainder next ->
     foldR sigma item state body (first :: rest) value
-      (Run (rv tail) (rp head ++ rp tail)
-        (ra head ++ ra tail)
-        (S (rs head + rs tail)) (S (rw head + rw tail))) next.
+      (Run (rv remainder) (rp head ++ rp remainder)
+        (ra head ++ ra remainder)
+        (S (rs head + rs remainder)) (S (rw head + rw remainder))) next.
 
 Scheme evalR_ind' := Induction for evalR Sort Prop
 with foldR_ind' := Induction for foldR Sort Prop.
@@ -1774,18 +1774,18 @@ Proof.
   intros id gamma typ next sigma taken.
   revert sigma.
   induction taken; intros sigma matched.
-  - inversion matched as [|id' mode' typ' live' item gamma' sigma' item_has tail_ok]; subst.
+  - inversion matched as [|id' mode' typ' live' item gamma' sigma' item_has remainder_ok]; subst.
     exists item, (Slot id M1 typ item false :: sigma').
     split.
     + constructor.
     + split; [assumption | constructor; assumption].
-  - inversion matched as [|id' mode' typ' live' item gamma' sigma' item_has tail_ok]; subst.
+  - inversion matched as [|id' mode' typ' live' item gamma' sigma' item_has remainder_ok]; subst.
     exists item, (Slot id MM typ item live :: sigma').
     split.
     + constructor.
     + split; [assumption | constructor; assumption].
-  - inversion matched as [|id' mode' typ' live' item gamma' sigma' item_has tail_ok]; subst.
-    destruct (IHtaken sigma' tail_ok) as [found [out [read [typed rest_ok]]]].
+  - inversion matched as [|id' mode' typ' live' item gamma' sigma' item_has remainder_ok]; subst.
+    destruct (IHtaken sigma' remainder_ok) as [found [out [read [typed rest_ok]]]].
     exists found, (Slot id' mode' typ' item live' :: out).
     split.
     + apply TVNext.
@@ -1933,7 +1933,7 @@ Proof.
     + repeat split; try assumption.
       * constructor.
       * rlia.
-  - inversion values_ok as [|head tail first_has rest_has].
+  - inversion values_ok as [|head remainder first_has rest_has].
     assert (first_bind : hasv first (bty item)) by (rewrite item_ty; exact first_has).
     assert (seed_bind : hasv seed (bty state)) by (rewrite state_ty; exact seed_has).
     destruct (open_ok item outer opened_item first sigma item_open first_bind sigma_ok)
@@ -1948,17 +1948,17 @@ Proof.
       as [outer_env [item_done outer_ok]].
     destruct (repeat (rv head_out) outer_env item_open state_open state_close item_close
       item_ty state_ty body_safe rest_has head_has outer_ok)
-      as [tail_out [next [tail_run [next_ok [tail_has [tail_eff tail_cost]]]]]].
-    exists (Run (rv tail_out) (rp head_out ++ rp tail_out)
-      (ra head_out ++ ra tail_out)
-      (S (rs head_out + rs tail_out))
-      (S (rw head_out + rw tail_out))), next.
+      as [remainder_out [next [remainder_run [next_ok [remainder_has [remainder_eff remainder_cost]]]]]].
+    exists (Run (rv remainder_out) (rp head_out ++ rp remainder_out)
+      (ra head_out ++ ra remainder_out)
+      (S (rs head_out + rs remainder_out))
+      (S (rw head_out + rw remainder_out))), next.
     split.
     + eapply FRCons; eauto.
     + repeat split; try assumption.
       * apply within_app.
         -- exact head_eff.
-        -- exact tail_eff.
+        -- exact remainder_eff.
       * rnia.
 Qed.
 
@@ -2007,7 +2007,7 @@ Proof.
     + repeat split; try assumption.
       * constructor.
       * rlia.
-  - inversion values_ok as [|head tail first_has rest_has].
+  - inversion values_ok as [|head remainder first_has rest_has].
     destruct fuel as [|fuel]; [simpl in enough; nia |].
     cbn [fold_fuel].
     assert (first_bind : hasv first (bty item)) by
@@ -2033,11 +2033,11 @@ Proof.
       rewrite (closef_run _ _ _ item_done).
       pose proof (repeat (rv head_out) outer_env item_open state_open
         state_close item_close item_ty state_ty body_safe rest_has head_has
-        outer_ok fuel ltac:(rnia)) as tail_answer.
+        outer_ok fuel ltac:(rnia)) as remainder_answer.
       destruct (fold_fuel fuel outer_env item state body rest (rv head_out)) as
-        [tail_out next|tail_reason| |] eqn:tail_run.
-      * cbn in tail_answer.
-        destruct tail_answer as [next_ok [tail_has [tail_eff tail_cost]]].
+        [remainder_out next|remainder_reason| |] eqn:remainder_run.
+      * cbn in remainder_answer.
+        destruct remainder_answer as [next_ok [remainder_has [remainder_eff remainder_cost]]].
         rewrite keep_run by rnia.
         repeat split; try assumption.
         -- apply within_app; assumption.

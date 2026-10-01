@@ -339,8 +339,8 @@ Proof.
   - intros sigma item state body value fuel enough.
     destruct fuel; reflexivity.
   - intros sigma item state body first rest value opened_item opened_state head
-      prior after_state outer tail next item_open state_open body_run body_ih
-      state_close item_close tail_run tail_ih fuel enough.
+      prior after_state outer remainder next item_open state_open body_run body_ih
+      state_close item_close remainder_run remainder_ih fuel enough.
     destruct fuel as [|fuel]; [simpl in enough; lia |].
     cbn [fold_fuel].
     rewrite (openf_run _ _ _ _ item_open).
@@ -348,7 +348,7 @@ Proof.
     rewrite (body_ih fuel) by (simpl in enough; lia).
     rewrite (closef_run _ _ _ state_close).
     rewrite (closef_run _ _ _ item_close).
-    rewrite (tail_ih fuel) by (simpl in enough; lia).
+    rewrite (remainder_ih fuel) by (simpl in enough; lia).
     apply keep_run.
     exact enough.
 Qed.

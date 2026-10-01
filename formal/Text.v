@@ -124,7 +124,7 @@ Theorem take_sound : forall want input rest,
   take want input = Some rest -> input = want :: rest.
 Proof.
   intros want input rest H.
-  destruct input as [| got tail]; try discriminate.
+  destruct input as [| got remainder]; try discriminate.
   destruct want, got; simpl in H; try discriminate;
     try (inversion H; reflexivity).
   destruct m, m0; simpl in H; try discriminate;
@@ -144,18 +144,18 @@ Fixpoint pidx_add (fuel : nat) (input : list tok) {struct fuel} : out :=
   | O => None
   | S fuel' =>
       match pidx_mul fuel' input with
-      | Some rest => pidx_add_tail fuel' rest
+      | Some rest => pidx_add_remainder fuel' rest
       | None => None
       end
   end
-with pidx_add_tail (fuel : nat) (input : list tok) {struct fuel} : out :=
+with pidx_add_remainder (fuel : nat) (input : list tok) {struct fuel} : out :=
   match fuel with
   | O => None
   | S fuel' =>
       match input with
       | TPlus :: rest | TMinus :: rest =>
           match pidx_mul fuel' rest with
-          | Some next => pidx_add_tail fuel' next
+          | Some next => pidx_add_remainder fuel' next
           | None => None
           end
       | _ => Some input
@@ -166,18 +166,18 @@ with pidx_mul (fuel : nat) (input : list tok) {struct fuel} : out :=
   | O => None
   | S fuel' =>
       match pidx_atom fuel' input with
-      | Some rest => pidx_mul_tail fuel' rest
+      | Some rest => pidx_mul_remainder fuel' rest
       | None => None
       end
   end
-with pidx_mul_tail (fuel : nat) (input : list tok) {struct fuel} : out :=
+with pidx_mul_remainder (fuel : nat) (input : list tok) {struct fuel} : out :=
   match fuel with
   | O => None
   | S fuel' =>
       match input with
       | TStar :: rest =>
           match pidx_atom fuel' rest with
-          | Some next => pidx_mul_tail fuel' next
+          | Some next => pidx_mul_remainder fuel' next
           | None => None
           end
       | _ => Some input
@@ -601,18 +601,18 @@ with padd (fuel : nat) (input : list tok) {struct fuel} : out :=
   | O => None
   | S fuel' =>
       match pprod fuel' input with
-      | Some rest => padd_tail fuel' rest
+      | Some rest => padd_remainder fuel' rest
       | None => None
       end
   end
-with padd_tail (fuel : nat) (input : list tok) {struct fuel} : out :=
+with padd_remainder (fuel : nat) (input : list tok) {struct fuel} : out :=
   match fuel with
   | O => None
   | S fuel' =>
       match input with
       | TPlus :: rest | TMinus :: rest =>
           match pprod fuel' rest with
-          | Some next => padd_tail fuel' next
+          | Some next => padd_remainder fuel' next
           | None => None
           end
       | _ => Some input
@@ -623,18 +623,18 @@ with pprod (fuel : nat) (input : list tok) {struct fuel} : out :=
   | O => None
   | S fuel' =>
       match patom fuel' input with
-      | Some rest => pprod_tail fuel' rest
+      | Some rest => pprod_remainder fuel' rest
       | None => None
       end
   end
-with pprod_tail (fuel : nat) (input : list tok) {struct fuel} : out :=
+with pprod_remainder (fuel : nat) (input : list tok) {struct fuel} : out :=
   match fuel with
   | O => None
   | S fuel' =>
       match input with
       | TStar :: rest | TSlash :: rest | TPercent :: rest =>
           match patom fuel' rest with
-              | Some next => pprod_tail fuel' next
+              | Some next => pprod_remainder fuel' next
           | None => None
           end
       | _ => Some input
@@ -915,8 +915,8 @@ Fixpoint plaws (fuel : nat) (input : list tok) {struct fuel} : out :=
       match pidx_add fuel' input with
       | Some (TEq :: rest) | Some (TLe :: rest) =>
           match pidx_add fuel' rest with
-          | Some (TComma :: tail) => plaws fuel' tail
-          | Some (TRbrack :: tail) => Some tail
+          | Some (TComma :: remainder) => plaws fuel' remainder
+          | Some (TRbrack :: remainder) => Some remainder
           | _ => None
           end
       | _ => None
@@ -971,7 +971,7 @@ Definition pform_size (fuel : nat) (input : list tok) : out :=
   match input with
   | TLaw :: TLbrack :: rest =>
       match plaws fuel rest with
-      | Some tail => pform_body fuel tail
+      | Some remainder => pform_body fuel remainder
       | None => None
       end
   | _ => pform_body fuel input

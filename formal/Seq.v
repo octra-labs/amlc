@@ -94,7 +94,7 @@ Proof.
   reflexivity.
 Qed.
 
-Theorem pack_tail : forall A cap (zero : A) values,
+Theorem pack_remainder : forall A cap (zero : A) values,
   length values <= cap ->
   skipn (length values) (pack cap zero values)
   = repeat zero (cap - length values).
@@ -115,7 +115,7 @@ Proof.
   repeat split.
   - exact fits.
   - apply pack_length.
-  - apply pack_tail.
+  - apply pack_remainder.
     exact fits.
 Qed.
 
@@ -123,9 +123,9 @@ Theorem split_zero : forall A cap (zero : A) count values,
   skipn count values = repeat zero (cap - count) ->
   values = firstn count values ++ repeat zero (cap - count).
 Proof.
-  intros A cap zero count values tail_ok.
+  intros A cap zero count values remainder_ok.
   rewrite <- (firstn_skipn count values) at 1.
-  rewrite tail_ok.
+  rewrite remainder_ok.
   reflexivity.
 Qed.
 
@@ -136,7 +136,7 @@ Proof.
   intros A cap zero [count values] accepted.
   unfold valid in accepted.
   simpl in accepted.
-  destruct accepted as [count_ok [length_ok tail_ok]].
+  destruct accepted as [count_ok [length_ok remainder_ok]].
   unfold make, active.
   simpl.
   assert (prefix_length : length (firstn count values) = count).
@@ -151,7 +151,7 @@ Proof.
     rewrite pack_eq by exact prefix_ok.
     rewrite prefix_length.
     apply split_zero with (cap := cap).
-    exact tail_ok.
+    exact remainder_ok.
   }
   rewrite prefix_length, <- values_eq.
   reflexivity.

@@ -128,7 +128,7 @@ Lemma nth_depth_fit : forall values peak index,
 Proof.
   intros values peak index fit.
   revert index.
-  induction fit as [|value rest head tail repeat]; intros [|index]; simpl.
+  induction fit as [|value rest head remainder repeat]; intros [|index]; simpl.
   - lia.
   - lia.
   - exact head.
@@ -369,13 +369,13 @@ Fixpoint map_layers (all live : list bool) (values : list layer)
   | keep :: lrest, value :: rest =>
       match map_layers all lrest rest with
       | None => None
-      | Some tail =>
+      | Some remainder =>
           if keep then
             match map_layer all value with
-            | Some next => Some (next :: tail)
+            | Some next => Some (next :: remainder)
             | None => None
             end
-          else Some tail
+          else Some remainder
       end
   | _, _ => None
   end.
@@ -393,7 +393,7 @@ Fixpoint map_edges (live : list bool) (values : list edge)
   | [] => Some []
   | value :: rest =>
       match map_edge live value, map_edges live rest with
-      | Some next, Some tail => Some (next :: tail)
+      | Some next, Some remainder => Some (next :: remainder)
       | _, _ => None
       end
   end.

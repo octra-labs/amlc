@@ -46,7 +46,7 @@ Fixpoint plan_at (sources : list src) (roots : list root)
   | [] => Some []
   | value :: rest =>
       match item_at sources value, plan_at sources rest with
-      | Some first, Some tail => Some (first :: tail)
+      | Some first, Some remainder => Some (first :: remainder)
       | _, _ => None
       end
   end.
@@ -117,7 +117,7 @@ Proof.
   induction roots as [|value rest IH]; intros items accepted; simpl in accepted.
   - inversion accepted. reflexivity.
   - destruct (item_at sources value) as [first|] eqn:head.
-    + destruct (plan_at sources rest) as [tail|] eqn:next.
+    + destruct (plan_at sources rest) as [remainder|] eqn:next.
       * inversion accepted. simpl. f_equal.
         -- apply item_at_root in head. exact head.
         -- apply IH. reflexivity.
@@ -137,7 +137,7 @@ Proof.
   induction roots as [|value rest IH]; intros items accepted; simpl in accepted.
   - inversion accepted. constructor.
   - destruct (item_at sources value) as [first|] eqn:head.
-    + destruct (plan_at sources rest) as [tail|] eqn:next.
+    + destruct (plan_at sources rest) as [remainder|] eqn:next.
       * inversion accepted. constructor.
         -- apply item_at_exact in head. exact head.
         -- apply IH. reflexivity.

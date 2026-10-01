@@ -109,11 +109,11 @@ Fixpoint pix_add (fuel : nat) (input : list lex) {struct fuel} : pout ix :=
   | O => None
   | S fuel' =>
       match pix_mul fuel' input with
-      | Some (lhs, rest) => pix_add_tail fuel' lhs rest
+      | Some (lhs, rest) => pix_add_remainder fuel' lhs rest
       | None => None
       end
   end
-with pix_add_tail (fuel : nat) (lhs : ix) (input : list lex)
+with pix_add_remainder (fuel : nat) (lhs : ix) (input : list lex)
     {struct fuel} : pout ix :=
   match fuel with
   | O => None
@@ -121,12 +121,12 @@ with pix_add_tail (fuel : nat) (lhs : ix) (input : list lex)
       match input with
       | LKey TPlus :: rest =>
           match pix_mul fuel' rest with
-          | Some (rhs, next) => pix_add_tail fuel' (IAdd lhs rhs) next
+          | Some (rhs, next) => pix_add_remainder fuel' (IAdd lhs rhs) next
           | None => None
           end
       | LKey TMinus :: rest =>
           match pix_mul fuel' rest with
-          | Some (rhs, next) => pix_add_tail fuel' (ISub lhs rhs) next
+          | Some (rhs, next) => pix_add_remainder fuel' (ISub lhs rhs) next
           | None => None
           end
       | _ => Some (lhs, input)
@@ -137,11 +137,11 @@ with pix_mul (fuel : nat) (input : list lex) {struct fuel} : pout ix :=
   | O => None
   | S fuel' =>
       match pix_atom fuel' input with
-      | Some (lhs, rest) => pix_mul_tail fuel' lhs rest
+      | Some (lhs, rest) => pix_mul_remainder fuel' lhs rest
       | None => None
       end
   end
-with pix_mul_tail (fuel : nat) (lhs : ix) (input : list lex)
+with pix_mul_remainder (fuel : nat) (lhs : ix) (input : list lex)
     {struct fuel} : pout ix :=
   match fuel with
   | O => None
@@ -149,7 +149,7 @@ with pix_mul_tail (fuel : nat) (lhs : ix) (input : list lex)
       match input with
       | LKey TStar :: rest =>
           match pix_atom fuel' rest with
-          | Some (rhs, next) => pix_mul_tail fuel' (IMul lhs rhs) next
+          | Some (rhs, next) => pix_mul_remainder fuel' (IMul lhs rhs) next
           | None => None
           end
       | _ => Some (lhs, input)
@@ -167,15 +167,15 @@ with pix_atom (fuel : nat) (input : list lex) {struct fuel} : pout ix :=
           match pix_add fuel' rest with
           | Some (lhs, LKey TComma :: next) =>
               match pix_add fuel' next with
-              | Some (rhs, LKey TRparen :: tail) =>
-                  Some (IMax lhs rhs, tail)
+              | Some (rhs, LKey TRparen :: remainder) =>
+                  Some (IMax lhs rhs, remainder)
               | _ => None
               end
           | _ => None
           end
       | LKey TLparen :: rest =>
           match pix_add fuel' rest with
-          | Some (value, LKey TRparen :: tail) => Some (value, tail)
+          | Some (value, LKey TRparen :: remainder) => Some (value, remainder)
           | _ => None
           end
       | _ => None
@@ -252,8 +252,8 @@ with pty_atom (fuel : nat) (env : ienv) (types : tenv)
           match pix_add fuel' rest with
           | Some (index, LKey TComma :: next) =>
               match ieval env index, pty fuel' env types next with
-              | Some len, Some (elem, LKey TRbrack :: tail) =>
-                  Some (Uni.TVec len elem, tail)
+              | Some len, Some (elem, LKey TRbrack :: remainder) =>
+                  Some (Uni.TVec len elem, remainder)
               | _, _ => None
               end
           | _ => None
@@ -265,8 +265,8 @@ with pty_atom (fuel : nat) (env : ienv) (types : tenv)
           match pty fuel' env types rest with
           | Some (good, LKey TComma :: next) =>
               match pty fuel' env types next with
-              | Some (bad, LKey TRbrack :: tail) =>
-                  Some (Uni.TSum good bad, tail)
+              | Some (bad, LKey TRbrack :: remainder) =>
+                  Some (Uni.TSum good bad, remainder)
               | _ => None
               end
           | _ => None
@@ -278,7 +278,7 @@ with pty_atom (fuel : nat) (env : ienv) (types : tenv)
           end
       | LKey TLparen :: rest =>
           match pty fuel' env types rest with
-          | Some (value, LKey TRparen :: tail) => Some (value, tail)
+          | Some (value, LKey TRparen :: remainder) => Some (value, remainder)
           | _ => None
           end
       | _ => None
@@ -343,8 +343,8 @@ with pity_atom (fuel : nat) (vars : list nat) (types : tenv) (input : list lex)
           match pix_add fuel' rest with
           | Some (index, LKey TComma :: next) =>
               match pity fuel' vars types next with
-              | Some (elem, LKey TRbrack :: tail) =>
-                  Some (YVec index elem, tail)
+              | Some (elem, LKey TRbrack :: remainder) =>
+                  Some (YVec index elem, remainder)
               | _ => None
               end
           | _ => None
@@ -356,8 +356,8 @@ with pity_atom (fuel : nat) (vars : list nat) (types : tenv) (input : list lex)
           match pity fuel' vars types rest with
           | Some (good, LKey TComma :: next) =>
               match pity fuel' vars types next with
-              | Some (bad, LKey TRbrack :: tail) =>
-                  Some (YSum good bad, tail)
+              | Some (bad, LKey TRbrack :: remainder) =>
+                  Some (YSum good bad, remainder)
               | _ => None
               end
           | _ => None
@@ -375,7 +375,7 @@ with pity_atom (fuel : nat) (vars : list nat) (types : tenv) (input : list lex)
             end
       | LKey TLparen :: rest =>
           match pity fuel' vars types rest with
-          | Some (value, LKey TRparen :: tail) => Some (value, tail)
+          | Some (value, LKey TRparen :: remainder) => Some (value, remainder)
           | _ => None
           end
       | _ => None
@@ -434,18 +434,18 @@ Definition plaw (fuel : nat) (env : ienv)
   match pix_add fuel input with
   | Some (lhs, LKey TEq :: next) =>
       match pix_add fuel next with
-      | Some (rhs, tail) =>
+      | Some (rhs, remainder) =>
           match ihold env IEq lhs rhs with
-          | Some true => Some tail
+          | Some true => Some remainder
           | _ => None
           end
       | None => None
       end
   | Some (lhs, LKey TLe :: next) =>
       match pix_add fuel next with
-      | Some (rhs, tail) =>
+      | Some (rhs, remainder) =>
           match ihold env ILe lhs rhs with
-          | Some true => Some tail
+          | Some true => Some remainder
           | _ => None
           end
       | None => None
@@ -603,7 +603,7 @@ Definition pone (next : eparse) (make : stm -> stm)
   match input with
   | LKey TLparen :: rest =>
       match next rest with
-      | Some (value, LKey TRparen :: tail) => Some (make value, tail)
+      | Some (value, LKey TRparen :: remainder) => Some (make value, remainder)
       | _ => None
       end
   | _ => None
@@ -616,8 +616,8 @@ Definition ptwo (next : eparse) (make : stm -> stm -> stm)
       match next rest with
       | Some (lhs, LKey TComma :: more) =>
           match next more with
-          | Some (rhs, LKey TRparen :: tail) =>
-              Some (make lhs rhs, tail)
+          | Some (rhs, LKey TRparen :: remainder) =>
+              Some (make lhs rhs, remainder)
           | _ => None
           end
       | _ => None
@@ -633,7 +633,7 @@ Definition ptyped_one (fuel : nat) (env : ienv) (types : tenv)
       match pty fuel env types rest with
       | Some (typ, LKey TRbrack :: LKey TLparen :: more) =>
           match next more with
-          | Some (value, LKey TRparen :: tail) => Some (make typ value, tail)
+          | Some (value, LKey TRparen :: remainder) => Some (make typ value, remainder)
           | _ => None
           end
       | _ => None
@@ -651,8 +651,8 @@ Definition ptyped_two (fuel : nat) (env : ienv) (types : tenv)
           match next more with
           | Some (lhs, LKey TComma :: after) =>
               match next after with
-              | Some (rhs, LKey TRparen :: tail) =>
-                  Some (make typ lhs rhs, tail)
+              | Some (rhs, LKey TRparen :: remainder) =>
+                  Some (make typ lhs rhs, remainder)
               | _ => None
               end
           | _ => None
@@ -669,7 +669,7 @@ Definition pindexed (next : eparse) (make : nat -> stm -> stm)
       LKey TLparen :: rest =>
       if ifit index then
         match next rest with
-        | Some (value, LKey TRparen :: tail) => Some (make index value, tail)
+        | Some (value, LKey TRparen :: remainder) => Some (make index value, remainder)
         | _ => None
         end
       else None
@@ -689,12 +689,12 @@ Fixpoint pdarms (fuel : nat) (env : ienv) (types : tenv)
               match next body with
               | Some (term, LKey TBar :: more) =>
                   match pdarms fuel' env types next more with
-                  | Some (items, tail) =>
-                      Some (Data.Arm name item term :: items, tail)
+                  | Some (items, remainder) =>
+                      Some (Data.Arm name item term :: items, remainder)
                   | None => None
                   end
-              | Some (term, LKey TRbrace :: tail) =>
-                  Some ([Data.Arm name item term], tail)
+              | Some (term, LKey TRbrace :: remainder) =>
+                  Some ([Data.Arm name item term], remainder)
               | _ => None
               end
           | _ => None
@@ -713,12 +713,12 @@ Fixpoint pritems (fuel : nat) (next : eparse) (input : list lex)
           match next rest with
           | Some (term, LKey TComma :: more) =>
               match pritems fuel' next more with
-              | Some (items, tail) =>
-                  Some (Rec.RItem name term :: items, tail)
+              | Some (items, remainder) =>
+                  Some (Rec.RItem name term :: items, remainder)
               | None => None
               end
-          | Some (term, LKey TRbrace :: tail) =>
-              Some ([Rec.RItem name term], tail)
+          | Some (term, LKey TRbrace :: remainder) =>
+              Some ([Rec.RItem name term], remainder)
           | _ => None
           end
       | _ => None
@@ -735,12 +735,12 @@ Fixpoint prpicks (fuel : nat) (env : ienv) (types : tenv)
           match pbind fuel' env types rest with
           | Some (item, LKey TComma :: more) =>
               match prpicks fuel' env types more with
-              | Some (items, tail) =>
-                  Some (Rec.RPick name item :: items, tail)
+              | Some (items, remainder) =>
+                  Some (Rec.RPick name item :: items, remainder)
               | None => None
               end
-          | Some (item, LKey TRbrace :: tail) =>
-              Some ([Rec.RPick name item], tail)
+          | Some (item, LKey TRbrace :: remainder) =>
+              Some ([Rec.RPick name item], remainder)
           | _ => None
           end
       | _ => None
@@ -760,7 +760,7 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
               match pexpr fuel' env types data shapes more with
               | Some (value, LKey TIn :: after) =>
                   match pexpr fuel' env types data shapes after with
-                  | Some (body, tail) => Some (SLet item value body, tail)
+                  | Some (body, remainder) => Some (SLet item value body, remainder)
                   | None => None
                   end
               | _ => None
@@ -777,9 +777,9 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                       match prpicks fuel' env types fields with
                       | Some (items, LKey TIn :: body) =>
                           match pexpr fuel' env types data shapes body with
-                          | Some (out, tail) =>
+                          | Some (out, remainder) =>
                               match Rec.rsplit item value items out with
-                              | Some term => Some (term, tail)
+                              | Some term => Some (term, remainder)
                               | None => None
                               end
                           | None => None
@@ -794,8 +794,8 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                       match pbind fuel' env types more with
                       | Some (rhs, LKey TIn :: body) =>
                           match pexpr fuel' env types data shapes body with
-                          | Some (out, tail) =>
-                              Some (SUnpair value lhs rhs out, tail)
+                          | Some (out, remainder) =>
+                              Some (SUnpair value lhs rhs out, remainder)
                           | None => None
                           end
                       | _ => None
@@ -811,7 +811,7 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
               match pexpr fuel' env types data shapes more with
               | Some (yes, LKey TElse :: after) =>
                   match pexpr fuel' env types data shapes after with
-                  | Some (no, tail) => Some (SIf guard yes no, tail)
+                  | Some (no, remainder) => Some (SIf guard yes no, remainder)
                   | None => None
                   end
               | _ => None
@@ -830,8 +830,8 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                           match pbind fuel' env types more with
                           | Some (bad, LKey TArrow :: no) =>
                               match pexpr fuel' env types data shapes no with
-                              | Some (rhs, tail) =>
-                                  Some (SCase value good lhs bad rhs, tail)
+                              | Some (rhs, remainder) =>
+                                  Some (SCase value good lhs bad rhs, remainder)
                               | None => None
                               end
                           | _ => None
@@ -846,9 +846,9 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                   | Some item =>
                       match pdarms fuel' env types
                           (pexpr fuel' env types data shapes) arms with
-                      | Some (items, tail) =>
+                      | Some (items, remainder) =>
                           match Data.dcase item value items with
-                          | Some term => Some (term, tail)
+                          | Some term => Some (term, remainder)
                           | None => None
                           end
                       | None => None
@@ -869,9 +869,9 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                       match pbind fuel' env types bind with
                       | Some (item, LKey TArrow :: body) =>
                           match pexpr fuel' env types data shapes body with
-                          | Some (term, tail) =>
+                          | Some (term, remainder) =>
                               match Weave.wterm (did 0) count out value item term with
-                              | Some result => Some (result, tail)
+                              | Some result => Some (result, remainder)
                               | None => None
                               end
                           | None => None
@@ -898,10 +898,10 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                               match pbind fuel' env types second with
                               | Some (two, LKey TArrow :: body) =>
                                   match pexpr fuel' env types data shapes body with
-                                  | Some (term, tail) =>
+                                  | Some (term, remainder) =>
                                       match Braid.bterm (did 0) (did 1) count
                                           out lhs rhs one two term with
-                                      | Some result => Some (result, tail)
+                                      | Some result => Some (result, remainder)
                                       | None => None
                                       end
                                   | None => None
@@ -926,9 +926,9 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                   match pbind fuel' env types bind with
                   | Some (item, LKey TArrow :: body) =>
                       match pexpr fuel' env types data shapes body with
-                      | Some (term, tail) =>
+                      | Some (term, remainder) =>
                           match Loom.lterm count out item term with
-                          | Some result => Some (result, tail)
+                          | Some result => Some (result, remainder)
                           | None => None
                           end
                       | None => None
@@ -949,9 +949,9 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                       match pbind fuel' env types bind with
                       | Some (item, LKey TArrow :: body) =>
                           match pexpr fuel' env types data shapes body with
-                          | Some (term, tail) =>
+                          | Some (term, remainder) =>
                               match Orbit.oterm count value item term with
-                              | Some result => Some (result, tail)
+                              | Some result => Some (result, remainder)
                               | None => None
                               end
                           | None => None
@@ -971,7 +971,7 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                       match pbind fuel' env types bind with
                       | Some (item, LKey TArrow :: body) =>
                           match pexpr fuel' env types data shapes body with
-                          | Some (term, tail) =>
+                          | Some (term, remainder) =>
                               match rpick [] [item] [rounds; value; term] with
                               | Some turn_name =>
                                   match rpick [turn_name] [item]
@@ -987,7 +987,7 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                                               match Orbit.oterm_to left_name
                                                   right_name delta_name turn_name
                                                   count rounds value item term with
-                                              | Some result => Some (result, tail)
+                                              | Some result => Some (result, remainder)
                                               | None => None
                                               end
                                           | None => None
@@ -1018,9 +1018,9 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                       match pbind fuel' env types bind with
                       | Some (item, LKey TArrow :: body) =>
                           match pexpr fuel' env types data shapes body with
-                          | Some (term, tail) =>
+                          | Some (term, remainder) =>
                               match Wake.kterm (did 0) count value item term with
-                              | Some result => Some (result, tail)
+                              | Some result => Some (result, remainder)
                               | None => None
                               end
                           | None => None
@@ -1043,9 +1043,9 @@ Fixpoint pexpr (fuel : nat) (env : ienv) (types : tenv)
                   | Some cut, Some rest,
                       Some (elem, LKey TRbrack :: LKey TLparen :: source) =>
                       match pexpr fuel' env types data shapes source with
-                      | Some (value, LKey TRparen :: tail) =>
+                      | Some (value, LKey TRparen :: remainder) =>
                           match Rift.rift_make cut rest elem value with
-                          | Some result => Some (result, tail)
+                          | Some result => Some (result, remainder)
                           | None => None
                           end
                       | _ => None
@@ -1070,9 +1070,9 @@ with porder (fuel : nat) (env : ienv) (types : tenv)
           match order_rel rest with
           | Some (relation, more) =>
               match padd fuel' env types data shapes more with
-              | Some (rhs, tail) =>
+              | Some (rhs, remainder) =>
                   match rcmp relation lhs rhs with
-                  | Some out => Some (out, tail)
+                  | Some out => Some (out, remainder)
                   | None => None
                   end
               | None => None
@@ -1089,11 +1089,11 @@ with padd (fuel : nat) (env : ienv) (types : tenv)
   | O => None
   | S fuel' =>
       match pmul fuel' env types data shapes input with
-      | Some (lhs, rest) => padd_tail fuel' env types data shapes lhs rest
+      | Some (lhs, rest) => padd_remainder fuel' env types data shapes lhs rest
       | None => None
       end
   end
-with padd_tail (fuel : nat) (env : ienv) (types : tenv)
+with padd_remainder (fuel : nat) (env : ienv) (types : tenv)
     (data : list dtype) (shapes : list rtype)
     (lhs : stm) (input : list lex) {struct fuel} : pout stm :=
   match fuel with
@@ -1103,13 +1103,13 @@ with padd_tail (fuel : nat) (env : ienv) (types : tenv)
       | LKey TPlus :: rest =>
           match pmul fuel' env types data shapes rest with
           | Some (rhs, next) =>
-              padd_tail fuel' env types data shapes (SAdd lhs rhs) next
+              padd_remainder fuel' env types data shapes (SAdd lhs rhs) next
           | None => None
           end
       | LKey TMinus :: rest =>
           match pmul fuel' env types data shapes rest with
           | Some (rhs, next) =>
-              padd_tail fuel' env types data shapes (SSub lhs rhs) next
+              padd_remainder fuel' env types data shapes (SSub lhs rhs) next
           | None => None
           end
       | _ => Some (lhs, input)
@@ -1122,11 +1122,11 @@ with pmul (fuel : nat) (env : ienv) (types : tenv)
   | O => None
   | S fuel' =>
       match patom fuel' env types data shapes input with
-      | Some (lhs, rest) => pmul_tail fuel' env types data shapes lhs rest
+      | Some (lhs, rest) => pmul_remainder fuel' env types data shapes lhs rest
       | None => None
       end
   end
-with pmul_tail (fuel : nat) (env : ienv) (types : tenv)
+with pmul_remainder (fuel : nat) (env : ienv) (types : tenv)
     (data : list dtype) (shapes : list rtype)
     (lhs : stm) (input : list lex) {struct fuel} : pout stm :=
   match fuel with
@@ -1136,19 +1136,19 @@ with pmul_tail (fuel : nat) (env : ienv) (types : tenv)
       | LKey TStar :: rest =>
           match patom fuel' env types data shapes rest with
           | Some (rhs, next) =>
-              pmul_tail fuel' env types data shapes (SMul lhs rhs) next
+              pmul_remainder fuel' env types data shapes (SMul lhs rhs) next
           | None => None
           end
       | LKey TSlash :: rest =>
           match patom fuel' env types data shapes rest with
           | Some (rhs, next) =>
-              pmul_tail fuel' env types data shapes (SDiv lhs rhs) next
+              pmul_remainder fuel' env types data shapes (SDiv lhs rhs) next
           | None => None
           end
       | LKey TPercent :: rest =>
           match patom fuel' env types data shapes rest with
           | Some (rhs, next) =>
-              pmul_tail fuel' env types data shapes (SMod lhs rhs) next
+              pmul_remainder fuel' env types data shapes (SMod lhs rhs) next
           | None => None
           end
       | _ => Some (lhs, input)
@@ -1168,7 +1168,7 @@ with patom (fuel : nat) (env : ienv) (types : tenv)
           Some (SK (VInt (Z.opp (Z.of_nat value))) Uni.TInt, rest)
       | LKey TMinus :: rest =>
           match patom fuel' env types data shapes rest with
-          | Some (value, tail) => Some (SNeg value, tail)
+          | Some (value, remainder) => Some (SNeg value, remainder)
           | None => None
           end
       | LHex value :: rest => Some (SBytes value, rest)
@@ -1182,18 +1182,18 @@ with patom (fuel : nat) (env : ienv) (types : tenv)
           match next rest with
           | Some (lhs, LKey TComma :: more) =>
               match next more with
-              | Some (rhs, LKey TRparen :: tail) =>
-                  Some (SPair lhs rhs, tail)
+              | Some (rhs, LKey TRparen :: remainder) =>
+                  Some (SPair lhs rhs, remainder)
               | _ => None
               end
-          | Some (value, LKey TRparen :: tail) => Some (value, tail)
+          | Some (value, LKey TRparen :: remainder) => Some (value, remainder)
           | _ => None
           end
       | LKey TVec :: LKey TLbrack :: rest =>
           match pty fuel' env types rest with
           | Some (typ, LKey TRbrack :: LKey TLparen :: more) =>
               match pvals fuel' env types data shapes more with
-              | Some (items, tail) => Some (svec typ items, tail)
+              | Some (items, remainder) => Some (svec typ items, remainder)
               | None => None
               end
           | _ => None
@@ -1204,9 +1204,9 @@ with patom (fuel : nat) (env : ienv) (types : tenv)
               match rest with
               | LName ctor :: LKey TLparen :: more =>
                   match next more with
-                  | Some (value, LKey TRparen :: tail) =>
+                  | Some (value, LKey TRparen :: remainder) =>
                       match Data.make item ctor value with
-                      | Some term => Some (term, tail)
+                      | Some term => Some (term, remainder)
                       | None => None
                       end
                   | _ => None
@@ -1217,9 +1217,9 @@ with patom (fuel : nat) (env : ienv) (types : tenv)
               match rest with
               | LKey TLbrace :: fields =>
                   match pritems fuel' next fields with
-                  | Some (items, tail) =>
+                  | Some (items, remainder) =>
                       match Rec.rmake item items with
-                      | Some term => Some (term, tail)
+                      | Some term => Some (term, remainder)
                       | None => None
                       end
                   | None => None
@@ -1270,7 +1270,7 @@ with pvals (fuel : nat) (env : ienv) (types : tenv)
           match pexpr fuel' env types data shapes input with
           | Some (item, LKey TComma :: more) =>
               match pvals fuel' env types data shapes more with
-              | Some (items, tail) => Some (item :: items, tail)
+              | Some (items, remainder) => Some (item :: items, remainder)
               | None => None
               end
           | Some (item, LKey TRparen :: rest) => Some ([item], rest)
@@ -1290,7 +1290,7 @@ Definition rpone (next : list lex -> pout rtm) (make : rtm -> rtm)
   match input with
   | LKey TLparen :: rest =>
       match next rest with
-      | Some (value, LKey TRparen :: tail) => Some (make value, tail)
+      | Some (value, LKey TRparen :: remainder) => Some (make value, remainder)
       | _ => None
       end
   | _ => None
@@ -1303,8 +1303,8 @@ Definition rptwo (next : list lex -> pout rtm)
       match next rest with
       | Some (lhs, LKey TComma :: more) =>
           match next more with
-          | Some (rhs, LKey TRparen :: tail) =>
-              Some (make lhs rhs, tail)
+          | Some (rhs, LKey TRparen :: remainder) =>
+              Some (make lhs rhs, remainder)
           | _ => None
           end
       | _ => None
@@ -1320,7 +1320,7 @@ Definition rptyped_one (fuel : nat) (vars : list nat) (types : tenv)
       match pity fuel vars types rest with
       | Some (typ, LKey TRbrack :: LKey TLparen :: more) =>
           match next more with
-          | Some (value, LKey TRparen :: tail) => Some (make typ value, tail)
+          | Some (value, LKey TRparen :: remainder) => Some (make typ value, remainder)
           | _ => None
           end
       | _ => None
@@ -1338,8 +1338,8 @@ Definition rptyped_two (fuel : nat) (vars : list nat) (types : tenv)
           match next more with
           | Some (lhs, LKey TComma :: after) =>
               match next after with
-              | Some (rhs, LKey TRparen :: tail) =>
-                  Some (make typ lhs rhs, tail)
+              | Some (rhs, LKey TRparen :: remainder) =>
+                  Some (make typ lhs rhs, remainder)
               | _ => None
               end
           | _ => None
@@ -1356,7 +1356,7 @@ Definition rpindexed (next : list lex -> pout rtm)
       LKey TLparen :: rest =>
       if ifit index then
         match next rest with
-        | Some (value, LKey TRparen :: tail) => Some (make index value, tail)
+        | Some (value, LKey TRparen :: remainder) => Some (make index value, remainder)
         | _ => None
         end
       else None
@@ -1374,12 +1374,12 @@ Fixpoint prnpicks (fuel : nat) (vars : list nat) (types : tenv)
           match prbind fuel' vars types rest with
           | Some (item, LKey TComma :: more) =>
               match prnpicks fuel' vars types more with
-              | Some (items, tail) =>
-                  Some (NPick name item :: items, tail)
+              | Some (items, remainder) =>
+                  Some (NPick name item :: items, remainder)
               | None => None
               end
-          | Some (item, LKey TRbrace :: tail) =>
-              Some ([NPick name item], tail)
+          | Some (item, LKey TRbrace :: remainder) =>
+              Some ([NPick name item], remainder)
           | _ => None
           end
       | _ => None
@@ -1405,7 +1405,7 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
               match prexpr fuel' vars types data shapes more with
               | Some (value, LKey TIn :: after) =>
                   match prexpr fuel' vars types data shapes after with
-                  | Some (body, tail) => Some (RLet item value body, tail)
+                  | Some (body, remainder) => Some (RLet item value body, remainder)
                   | None => None
                   end
               | _ => None
@@ -1422,8 +1422,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                       match prnpicks fuel' vars types fields with
                       | Some (items, LKey TIn :: body) =>
                           match prexpr fuel' vars types data shapes body with
-                          | Some (out, tail) =>
-                              Some (nraw (nrsplit item value items out), tail)
+                          | Some (out, remainder) =>
+                              Some (nraw (nrsplit item value items out), remainder)
                           | None => None
                           end
                       | _ => None
@@ -1436,8 +1436,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                       match prbind fuel' vars types more with
                       | Some (rhs, LKey TIn :: body) =>
                           match prexpr fuel' vars types data shapes body with
-                          | Some (out, tail) =>
-                              Some (RUnpair value lhs rhs out, tail)
+                          | Some (out, remainder) =>
+                              Some (RUnpair value lhs rhs out, remainder)
                           | None => None
                           end
                       | _ => None
@@ -1453,7 +1453,7 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
               match prexpr fuel' vars types data shapes more with
               | Some (yes, LKey TElse :: after) =>
                   match prexpr fuel' vars types data shapes after with
-                  | Some (no, tail) => Some (RIf guard yes no, tail)
+                  | Some (no, remainder) => Some (RIf guard yes no, remainder)
                   | None => None
                   end
               | _ => None
@@ -1472,8 +1472,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                           match prbind fuel' vars types more with
                           | Some (bad, LKey TArrow :: no) =>
                               match prexpr fuel' vars types data shapes no with
-                              | Some (rhs, tail) =>
-                                  Some (RCase value good lhs bad rhs, tail)
+                              | Some (rhs, remainder) =>
+                                  Some (RCase value good lhs bad rhs, remainder)
                               | None => None
                               end
                           | _ => None
@@ -1487,8 +1487,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                   match dfind name data with
                   | Some item =>
                       match prnarms fuel' vars types data shapes arms with
-                      | Some (items, tail) =>
-                          Some (nraw (ncase item value items), tail)
+                      | Some (items, remainder) =>
+                          Some (nraw (ncase item value items), remainder)
                       | None => None
                       end
                   | None => None
@@ -1507,8 +1507,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                       match prbind fuel' vars types second with
                       | Some (state, LKey TArrow :: body) =>
                           match prexpr fuel' vars types data shapes body with
-                          | Some (term, tail) =>
-                              Some (RFoldI source init item state term, tail)
+                          | Some (term, remainder) =>
+                              Some (RFoldI source init item state term, remainder)
                           | None => None
                           end
                       | _ => None
@@ -1525,8 +1525,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
               match prbind fuel' vars types bind with
               | Some (item, LKey TArrow :: body) =>
                   match prexpr fuel' vars types data shapes body with
-                  | Some (term, tail) =>
-                      Some (RQuant QEvery source item term, tail)
+                  | Some (term, remainder) =>
+                      Some (RQuant QEvery source item term, remainder)
                   | None => None
                   end
               | _ => None
@@ -1539,8 +1539,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
               match prbind fuel' vars types bind with
               | Some (item, LKey TArrow :: body) =>
                   match prexpr fuel' vars types data shapes body with
-                  | Some (term, tail) =>
-                      Some (RQuant QSome source item term, tail)
+                  | Some (term, remainder) =>
+                      Some (RQuant QSome source item term, remainder)
                   | None => None
                   end
               | _ => None
@@ -1553,8 +1553,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
               match prbind fuel' vars types bind with
               | Some (item, LKey TArrow :: body) =>
                   match prexpr fuel' vars types data shapes body with
-                  | Some (term, tail) =>
-                      Some (RQuant QCount source item term, tail)
+                  | Some (term, remainder) =>
+                      Some (RQuant QCount source item term, remainder)
                   | None => None
                   end
               | _ => None
@@ -1567,8 +1567,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
               match prbind fuel' vars types bind with
               | Some (item, LKey TArrow :: body) =>
                   match prexpr fuel' vars types data shapes body with
-                  | Some (term, tail) =>
-                      Some (RQuant QSum source item term, tail)
+                  | Some (term, remainder) =>
+                      Some (RQuant QSum source item term, remainder)
                   | None => None
                   end
               | _ => None
@@ -1585,9 +1585,9 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                       match prbind fuel' vars types bind with
                       | Some (item, LKey TArrow :: body) =>
                           match prexpr fuel' vars types data shapes body with
-                          | Some (term, tail) =>
+                          | Some (term, remainder) =>
                               Some (RWeave raw_count raw_out value item term,
-                                tail)
+                                remainder)
                           | None => None
                           end
                       | _ => None
@@ -1612,9 +1612,9 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                               match prbind fuel' vars types second with
                               | Some (two, LKey TArrow :: body) =>
                                   match prexpr fuel' vars types data shapes body with
-                                  | Some (term, tail) =>
+                                  | Some (term, remainder) =>
                                       Some (RBraid raw_count raw_out lhs rhs
-                                        one two term, tail)
+                                        one two term, remainder)
                                   | None => None
                                   end
                               | _ => None
@@ -1637,8 +1637,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                   match prbind fuel' vars types bind with
                   | Some (item, LKey TArrow :: body) =>
                       match prexpr fuel' vars types data shapes body with
-                      | Some (term, tail) =>
-                          Some (RLoom raw_count raw_out item term, tail)
+                      | Some (term, remainder) =>
+                          Some (RLoom raw_count raw_out item term, remainder)
                       | None => None
                       end
                   | _ => None
@@ -1655,8 +1655,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                   match prbind fuel' vars types bind with
                   | Some (item, LKey TArrow :: body) =>
                       match prexpr fuel' vars types data shapes body with
-                      | Some (term, tail) =>
-                          Some (ROrbit raw_count value item term, tail)
+                      | Some (term, remainder) =>
+                          Some (ROrbit raw_count value item term, remainder)
                       | None => None
                       end
                   | _ => None
@@ -1671,9 +1671,9 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                       match prbind fuel' vars types bind with
                       | Some (item, LKey TArrow :: body) =>
                           match prexpr fuel' vars types data shapes body with
-                          | Some (term, tail) =>
+                          | Some (term, remainder) =>
                               Some (ROrbitTo raw_count rounds value item term,
-                                tail)
+                                remainder)
                           | None => None
                           end
                       | _ => None
@@ -1692,8 +1692,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                   match prbind fuel' vars types bind with
                   | Some (item, LKey TArrow :: body) =>
                       match prexpr fuel' vars types data shapes body with
-                      | Some (term, tail) =>
-                          Some (RWake raw_count value item term, tail)
+                      | Some (term, remainder) =>
+                          Some (RWake raw_count value item term, remainder)
                       | None => None
                       end
                   | _ => None
@@ -1710,8 +1710,8 @@ Fixpoint prexpr (fuel : nat) (vars : list nat) (types : tenv)
                   match pity fuel' vars types input with
                   | Some (elem, LKey TRbrack :: LKey TLparen :: source) =>
                       match prexpr fuel' vars types data shapes source with
-                      | Some (value, LKey TRparen :: tail) =>
-                          Some (RRift raw_cut raw_rest elem value, tail)
+                      | Some (value, LKey TRparen :: remainder) =>
+                          Some (RRift raw_cut raw_rest elem value, remainder)
                       | _ => None
                       end
                   | _ => None
@@ -1734,7 +1734,7 @@ with prorder (fuel : nat) (vars : list nat) (types : tenv)
           match order_rel rest with
           | Some (relation, more) =>
               match pradd fuel' vars types data shapes more with
-              | Some (rhs, tail) => Some (RCmp relation lhs rhs, tail)
+              | Some (rhs, remainder) => Some (RCmp relation lhs rhs, remainder)
               | None => None
               end
           | None => Some (lhs, rest)
@@ -1749,11 +1749,11 @@ with pradd (fuel : nat) (vars : list nat) (types : tenv)
   | O => None
   | S fuel' =>
       match prmul fuel' vars types data shapes input with
-      | Some (lhs, rest) => pradd_tail fuel' vars types data shapes lhs rest
+      | Some (lhs, rest) => pradd_remainder fuel' vars types data shapes lhs rest
       | None => None
       end
   end
-with pradd_tail (fuel : nat) (vars : list nat) (types : tenv)
+with pradd_remainder (fuel : nat) (vars : list nat) (types : tenv)
     (data : list dtype) (shapes : list rtype) (lhs : rtm)
     (input : list lex) {struct fuel} : pout rtm :=
   match fuel with
@@ -1763,13 +1763,13 @@ with pradd_tail (fuel : nat) (vars : list nat) (types : tenv)
       | LKey TPlus :: rest =>
           match prmul fuel' vars types data shapes rest with
           | Some (rhs, next) =>
-              pradd_tail fuel' vars types data shapes (RAdd lhs rhs) next
+              pradd_remainder fuel' vars types data shapes (RAdd lhs rhs) next
           | None => None
           end
       | LKey TMinus :: rest =>
           match prmul fuel' vars types data shapes rest with
           | Some (rhs, next) =>
-              pradd_tail fuel' vars types data shapes (RSub lhs rhs) next
+              pradd_remainder fuel' vars types data shapes (RSub lhs rhs) next
           | None => None
           end
       | _ => Some (lhs, input)
@@ -1782,11 +1782,11 @@ with prmul (fuel : nat) (vars : list nat) (types : tenv)
   | O => None
   | S fuel' =>
       match pratom fuel' vars types data shapes input with
-      | Some (lhs, rest) => prmul_tail fuel' vars types data shapes lhs rest
+      | Some (lhs, rest) => prmul_remainder fuel' vars types data shapes lhs rest
       | None => None
       end
   end
-with prmul_tail (fuel : nat) (vars : list nat) (types : tenv)
+with prmul_remainder (fuel : nat) (vars : list nat) (types : tenv)
     (data : list dtype) (shapes : list rtype) (lhs : rtm)
     (input : list lex) {struct fuel} : pout rtm :=
   match fuel with
@@ -1796,19 +1796,19 @@ with prmul_tail (fuel : nat) (vars : list nat) (types : tenv)
       | LKey TStar :: rest =>
           match pratom fuel' vars types data shapes rest with
           | Some (rhs, next) =>
-              prmul_tail fuel' vars types data shapes (RMul lhs rhs) next
+              prmul_remainder fuel' vars types data shapes (RMul lhs rhs) next
           | None => None
           end
       | LKey TSlash :: rest =>
           match pratom fuel' vars types data shapes rest with
           | Some (rhs, next) =>
-              prmul_tail fuel' vars types data shapes (RDiv lhs rhs) next
+              prmul_remainder fuel' vars types data shapes (RDiv lhs rhs) next
           | None => None
           end
       | LKey TPercent :: rest =>
           match pratom fuel' vars types data shapes rest with
           | Some (rhs, next) =>
-              prmul_tail fuel' vars types data shapes (RMod lhs rhs) next
+              prmul_remainder fuel' vars types data shapes (RMod lhs rhs) next
           | None => None
           end
       | _ => Some (lhs, input)
@@ -1827,7 +1827,7 @@ with pratom (fuel : nat) (vars : list nat) (types : tenv)
           Some (RInt (Z.opp (Z.of_nat value)), rest)
       | LKey TMinus :: rest =>
           match pratom fuel' vars types data shapes rest with
-          | Some (value, tail) => Some (RNeg value, tail)
+          | Some (value, remainder) => Some (RNeg value, remainder)
           | None => None
           end
       | LHex value :: rest => Some (RBytes value, rest)
@@ -1840,18 +1840,18 @@ with pratom (fuel : nat) (vars : list nat) (types : tenv)
           match next rest with
           | Some (lhs, LKey TComma :: more) =>
               match next more with
-              | Some (rhs, LKey TRparen :: tail) =>
-                  Some (RPair lhs rhs, tail)
+              | Some (rhs, LKey TRparen :: remainder) =>
+                  Some (RPair lhs rhs, remainder)
               | _ => None
               end
-          | Some (value, LKey TRparen :: tail) => Some (value, tail)
+          | Some (value, LKey TRparen :: remainder) => Some (value, remainder)
           | _ => None
           end
       | LKey TVec :: LKey TLbrack :: rest =>
           match pity fuel' vars types rest with
           | Some (typ, LKey TRbrack :: LKey TLparen :: more) =>
               match prvals fuel' vars types data shapes more with
-              | Some (items, tail) => Some (rvec typ items, tail)
+              | Some (items, remainder) => Some (rvec typ items, remainder)
               | None => None
               end
           | _ => None
@@ -1862,8 +1862,8 @@ with pratom (fuel : nat) (vars : list nat) (types : tenv)
               match rest with
               | LName ctor :: LKey TLparen :: more =>
                   match next more with
-                  | Some (value, LKey TRparen :: tail) =>
-                      Some (nraw (nmake item ctor value), tail)
+                  | Some (value, LKey TRparen :: remainder) =>
+                      Some (nraw (nmake item ctor value), remainder)
                   | _ => None
                   end
               | _ => None
@@ -1872,8 +1872,8 @@ with pratom (fuel : nat) (vars : list nat) (types : tenv)
               match rest with
               | LKey TLbrace :: fields =>
                   match prnitems fuel' vars types data shapes fields with
-                  | Some (items, tail) =>
-                      Some (nraw (nrmake item items), tail)
+                  | Some (items, remainder) =>
+                      Some (nraw (nrmake item items), remainder)
                   | None => None
                   end
               | _ => None
@@ -1923,7 +1923,7 @@ with prvals (fuel : nat) (vars : list nat) (types : tenv)
           match prexpr fuel' vars types data shapes input with
           | Some (item, LKey TComma :: more) =>
               match prvals fuel' vars types data shapes more with
-              | Some (items, tail) => Some (item :: items, tail)
+              | Some (items, remainder) => Some (item :: items, remainder)
               | None => None
               end
           | Some (item, LKey TRparen :: rest) => Some ([item], rest)
@@ -1944,12 +1944,12 @@ with prnarms (fuel : nat) (vars : list nat) (types : tenv)
               match prexpr fuel' vars types data shapes body with
               | Some (term, LKey TBar :: more) =>
                   match prnarms fuel' vars types data shapes more with
-                  | Some (items, tail) =>
-                      Some (NArm name item term :: items, tail)
+                  | Some (items, remainder) =>
+                      Some (NArm name item term :: items, remainder)
                   | None => None
                   end
-              | Some (term, LKey TRbrace :: tail) =>
-                  Some ([NArm name item term], tail)
+              | Some (term, LKey TRbrace :: remainder) =>
+                  Some ([NArm name item term], remainder)
               | _ => None
               end
           | _ => None
@@ -1968,12 +1968,12 @@ with prnitems (fuel : nat) (vars : list nat) (types : tenv)
           match prexpr fuel' vars types data shapes rest with
           | Some (term, LKey TComma :: more) =>
               match prnitems fuel' vars types data shapes more with
-              | Some (items, tail) =>
-                  Some (NItem name term :: items, tail)
+              | Some (items, remainder) =>
+                  Some (NItem name term :: items, remainder)
               | None => None
               end
-          | Some (term, LKey TRbrace :: tail) =>
-              Some ([NItem name term], tail)
+          | Some (term, LKey TRbrace :: remainder) =>
+              Some ([NItem name term], remainder)
           | _ => None
           end
       | _ => None
@@ -2074,7 +2074,7 @@ Fixpoint pcaps (fuel : nat) (env : ienv) (types : tenv)
           match pbind fuel' env types input with
           | Some (item, LKey TComma :: more) =>
               match pcaps fuel' env types more with
-              | Some (items, tail) => Some (item :: items, tail)
+              | Some (items, remainder) => Some (item :: items, remainder)
               | None => None
               end
           | Some (item, LKey TRbrack :: rest) => Some ([item], rest)
@@ -2103,19 +2103,19 @@ Definition pform (fuel : nat) (env : ienv) (types : tenv)
                               match punder next with
                               | Some (lim, LKey TEq :: body) =>
                                   match pexpr fuel env types data shapes body with
-                                  | Some (term, tail) =>
+                                  | Some (term, remainder) =>
                                       Some (Fn name
                                         (Arr mode caps arg out row (Some lim))
-                                        term, tail)
+                                        term, remainder)
                                   | None => None
                                   end
                               | _ => None
                               end
                           | LKey TEq :: body =>
                               match pexpr fuel env types data shapes body with
-                              | Some (term, tail) =>
+                              | Some (term, remainder) =>
                                   Some (Fn name (Arr mode caps arg out row None)
-                                    term, tail)
+                                    term, remainder)
                               | None => None
                               end
                           | _ => None
@@ -2141,7 +2141,7 @@ Fixpoint ppars (fuel : nat) (input : list lex)
       match input with
       | LName name :: LKey TComma :: rest =>
           match ppars fuel' rest with
-          | Some (names, tail) => Some (name :: names, tail)
+          | Some (names, remainder) => Some (name :: names, remainder)
           | None => None
           end
       | LName name :: LKey TRbrack :: rest => Some ([name], rest)
@@ -2161,7 +2161,7 @@ Fixpoint prcaps (fuel : nat) (vars : list nat) (types : tenv)
           match pibind fuel' vars types input with
           | Some (item, LKey TComma :: more) =>
               match prcaps fuel' vars types more with
-              | Some (items, tail) => Some (item :: items, tail)
+              | Some (items, remainder) => Some (item :: items, remainder)
               | None => None
               end
           | Some (item, LKey TRbrack :: rest) => Some ([item], rest)
@@ -2178,12 +2178,12 @@ Fixpoint pkinds (fuel : nat) (input : list lex) {struct fuel}
       match input with
       | LName name :: LKey TColon :: LKey TData :: LKey TComma :: rest =>
           match pkinds fuel' rest with
-          | Some (items, tail) => Some (PPar name PData :: items, tail)
+          | Some (items, remainder) => Some (PPar name PData :: items, remainder)
           | None => None
           end
       | LName name :: LKey TColon :: LKey TRes :: LKey TComma :: rest =>
           match pkinds fuel' rest with
-          | Some (items, tail) => Some (PPar name PRes :: items, tail)
+          | Some (items, remainder) => Some (PPar name PRes :: items, remainder)
           | None => None
           end
       | LName name :: LKey TColon :: LKey TData :: LKey TRbrack :: rest =>
@@ -2202,24 +2202,24 @@ Fixpoint plaws (fuel : nat) (input : list lex) {struct fuel}
       match pix_add fuel' input with
       | Some (lhs, LKey TEq :: rest) =>
           match pix_add fuel' rest with
-          | Some (rhs, LKey TComma :: tail) =>
-              match plaws fuel' tail with
+          | Some (rhs, LKey TComma :: remainder) =>
+              match plaws fuel' remainder with
               | Some (items, out) => Some (Law IEq lhs rhs :: items, out)
               | None => None
               end
-          | Some (rhs, LKey TRbrack :: tail) =>
-              Some ([Law IEq lhs rhs], tail)
+          | Some (rhs, LKey TRbrack :: remainder) =>
+              Some ([Law IEq lhs rhs], remainder)
           | _ => None
           end
       | Some (lhs, LKey TLe :: rest) =>
           match pix_add fuel' rest with
-          | Some (rhs, LKey TComma :: tail) =>
-              match plaws fuel' tail with
+          | Some (rhs, LKey TComma :: remainder) =>
+              match plaws fuel' remainder with
               | Some (items, out) => Some (Law ILe lhs rhs :: items, out)
               | None => None
               end
-          | Some (rhs, LKey TRbrack :: tail) =>
-              Some ([Law ILe lhs rhs], tail)
+          | Some (rhs, LKey TRbrack :: remainder) =>
+              Some ([Law ILe lhs rhs], remainder)
           | _ => None
           end
       | _ => None
@@ -2246,11 +2246,11 @@ Definition pigen (fuel : nat) (vars : list nat) (types : tenv)
                               match punder next with
                               | Some (lim, LKey TEq :: body) =>
                                   match prexpr fuel vars types data shapes body with
-                                  | Some (term, tail) =>
+                                  | Some (term, remainder) =>
                                       let item := IFn name pars laws
                                         (IArr mode caps arg out row (Some lim))
                                         term in
-                                      if ifn_b item then Some (item, tail)
+                                      if ifn_b item then Some (item, remainder)
                                       else None
                                   | None => None
                                   end
@@ -2258,10 +2258,10 @@ Definition pigen (fuel : nat) (vars : list nat) (types : tenv)
                               end
                           | LKey TEq :: body =>
                               match prexpr fuel vars types data shapes body with
-                              | Some (term, tail) =>
+                              | Some (term, remainder) =>
                                   let item := IFn name pars laws
                                     (IArr mode caps arg out row None) term in
-                                  if ifn_b item then Some (item, tail)
+                                  if ifn_b item then Some (item, remainder)
                                   else None
                               | None => None
                               end
@@ -2286,14 +2286,14 @@ Definition piform (fuel : nat) (types : tenv)
   match input with
   | LName name :: LKey TSize :: LKey TLbrack :: rest =>
       match ppars fuel rest with
-      | Some (pars, LKey TLaw :: LKey TLbrack :: tail) =>
-          match plaws fuel tail with
+      | Some (pars, LKey TLaw :: LKey TLbrack :: remainder) =>
+          match plaws fuel remainder with
           | Some (laws, out) =>
               pigen fuel [] types data shapes name pars laws out
           | None => None
           end
-      | Some (pars, tail) =>
-          pigen fuel [] types data shapes name pars [] tail
+      | Some (pars, remainder) =>
+          pigen fuel [] types data shapes name pars [] remainder
       | None => None
       end
   | _ => None
@@ -2307,21 +2307,21 @@ Definition ppform (fuel : nat) (types : tenv)
       match pkinds fuel rest with
       | Some (kinds, LKey TSize :: LKey TLbrack :: sized) =>
           match ppars fuel sized with
-          | Some (pars, LKey TLaw :: LKey TLbrack :: tail) =>
-              match plaws fuel tail with
+          | Some (pars, LKey TLaw :: LKey TLbrack :: remainder) =>
+              match plaws fuel remainder with
               | Some (laws, out) =>
                   match pigen fuel (map ppname kinds) types data shapes name
                       pars laws out with
-                  | Some (base, tail) =>
+                  | Some (base, remainder) =>
                       let item := PFn kinds base in
-                      if pfn_b item then Some (item, tail) else None
+                      if pfn_b item then Some (item, remainder) else None
                   | None => None
                   end
               | None => None
               end
-          | Some (pars, tail) =>
+          | Some (pars, remainder) =>
               match pigen fuel (map ppname kinds) types data shapes name pars
-                  [] tail with
+                  [] remainder with
               | Some (base, out) =>
                   let item := PFn kinds base in
                   if pfn_b item then Some (item, out) else None
@@ -2329,8 +2329,8 @@ Definition ppform (fuel : nat) (types : tenv)
               end
           | None => None
           end
-      | Some (kinds, tail) =>
-          match pigen fuel (map ppname kinds) types data shapes name [] [] tail with
+      | Some (kinds, remainder) =>
+          match pigen fuel (map ppname kinds) types data shapes name [] [] remainder with
           | Some (base, out) =>
               let item := PFn kinds base in
               if pfn_b item then Some (item, out) else None
@@ -2408,7 +2408,7 @@ Fixpoint pactuals (fuel : nat) (env : ienv) (types : tenv)
           match pelab fuel' env types data shapes scope input with
           | Some (item, LKey TComma :: more) =>
               match pactuals fuel' env types data shapes scope more with
-              | Some (items, tail) => Some (item :: items, tail)
+              | Some (items, remainder) => Some (item :: items, remainder)
               | None => None
               end
           | Some (item, LKey TRbrack :: rest) => Some ([item], rest)
@@ -2425,7 +2425,7 @@ Fixpoint piacts (fuel : nat) (input : list lex)
       match pix_add fuel' input with
       | Some (item, LKey TComma :: more) =>
           match piacts fuel' more with
-          | Some (items, tail) => Some (item :: items, tail)
+          | Some (items, remainder) => Some (item :: items, remainder)
           | None => None
           end
       | Some (item, LKey TRbrack :: rest) => Some ([item], rest)
@@ -2441,7 +2441,7 @@ Fixpoint pitacts (fuel : nat) (types : tenv) (input : list lex)
       match pity fuel' [] types input with
       | Some (item, LKey TComma :: more) =>
           match pitacts fuel' types more with
-          | Some (items, tail) => Some (item :: items, tail)
+          | Some (items, remainder) => Some (item :: items, remainder)
           | None => None
           end
       | Some (item, LKey TRbrack :: rest) => Some ([item], rest)
@@ -2657,8 +2657,8 @@ Fixpoint pflow (fuel : nat) (env : ienv) (types : tenv)
               | Some (value, LKey TIn :: body) =>
                   match pflow fuel' env types data shapes
                       (spush scope result) ctx body with
-                  | Some ((next, last_ctx), tail) =>
-                      Some ((FLet result value next, last_ctx), tail)
+                  | Some ((next, last_ctx), remainder) =>
+                      Some ((FLet result value next, last_ctx), remainder)
                   | None => None
                   end
               | _ => None
@@ -2671,8 +2671,8 @@ Fixpoint pflow (fuel : nat) (env : ienv) (types : tenv)
               match pflow fuel' env types data shapes scope ctx more with
               | Some ((yes, yes_ctx), LKey TElse :: after) =>
                   match pflow fuel' env types data shapes scope yes_ctx after with
-                  | Some ((no, no_ctx), tail) =>
-                      Some ((FIf guard yes no, no_ctx), tail)
+                  | Some ((no, no_ctx), remainder) =>
+                      Some ((FIf guard yes no, no_ctx), remainder)
                   | None => None
                   end
               | _ => None
@@ -2686,10 +2686,10 @@ Fixpoint pflow (fuel : nat) (env : ienv) (types : tenv)
                 match rest with
                 | LKey TSize :: LKey TLbrack :: sized =>
                     match piacts fuel' sized with
-                    | Some (actuals, tail) =>
+                    | Some (actuals, remainder) =>
                         match fresolve env name actuals ctx with
                         | Some (fresh, next_ctx) =>
-                            Some ((fresh, next_ctx), tail)
+                            Some ((fresh, next_ctx), remainder)
                         | None => None
                         end
                     | None => None
@@ -2702,18 +2702,18 @@ Fixpoint pflow (fuel : nat) (env : ienv) (types : tenv)
                     match pitacts fuel' types typed with
                     | Some (type_args, LKey TSize :: LKey TLbrack :: sized) =>
                         match piacts fuel' sized with
-                        | Some (size_args, tail) =>
+                        | Some (size_args, remainder) =>
                             match presolve env name type_args size_args ctx with
                             | Some (fresh, next_ctx) =>
-                                Some ((fresh, next_ctx), tail)
+                                Some ((fresh, next_ctx), remainder)
                             | None => None
                             end
                         | None => None
                         end
-                    | Some (type_args, tail) =>
+                    | Some (type_args, remainder) =>
                         match presolve env name type_args [] ctx with
                         | Some (fresh, next_ctx) =>
-                            Some ((fresh, next_ctx), tail)
+                            Some ((fresh, next_ctx), remainder)
                         | None => None
                         end
                     | None => None
@@ -2732,9 +2732,9 @@ Fixpoint pflow (fuel : nat) (env : ienv) (types : tenv)
                       | Some (result, LKey TIn :: body) =>
                           match pflow fuel' env types data shapes
                               (spush scope result) next_ctx body with
-                          | Some ((next, last_ctx), tail) =>
+                          | Some ((next, last_ctx), remainder) =>
                               Some ((FCall result call caps arg next, last_ctx),
-                                tail)
+                                remainder)
                           | None => None
                           end
                       | _ => None
@@ -2747,10 +2747,10 @@ Fixpoint pflow (fuel : nat) (env : ienv) (types : tenv)
           end
       | _ =>
           match pelab fuel' env types data shapes scope input with
-          | Some (term, tail) =>
+          | Some (term, remainder) =>
               @Some ((Fun.ftm * fctx) * list lex)
                 (@pair (Fun.ftm * fctx) (list lex)
-                  (@pair Fun.ftm fctx (FRet term) ctx) tail)
+                  (@pair Fun.ftm fctx (FRet term) ctx) remainder)
           | None => None
           end
       end
@@ -2785,7 +2785,7 @@ Definition pvfield (fuel : nat) (env : ienv) (word : nat)
   match pword word input with
   | Some (LKey TLbrack :: rest) =>
       match pvval fuel env rest with
-      | Some (value, LKey TRbrack :: tail) => Some (value, tail)
+      | Some (value, LKey TRbrack :: remainder) => Some (value, remainder)
       | _ => None
       end
   | _ => None
@@ -2795,7 +2795,7 @@ Definition pvdepth (fuel : nat) (env : ienv) (input : list lex) : pout nat :=
   match input with
   | LKey TDepth :: LKey TLbrack :: rest =>
       match pvval fuel env rest with
-      | Some (value, LKey TRbrack :: tail) => Some (value, tail)
+      | Some (value, LKey TRbrack :: remainder) => Some (value, remainder)
       | _ => None
       end
   | _ => None
@@ -2807,11 +2807,11 @@ Fixpoint pvadd (fuel : nat) (words : vocab) (env : ienv)
   | O => None
   | S fuel' =>
       match pvmul fuel' words env input with
-      | Some (lhs, rest) => pvadd_tail fuel' words env lhs rest
+      | Some (lhs, rest) => pvadd_remainder fuel' words env lhs rest
       | None => None
       end
   end
-with pvadd_tail (fuel : nat) (words : vocab) (env : ienv)
+with pvadd_remainder (fuel : nat) (words : vocab) (env : ienv)
     (lhs : Fhe.ftm) (input : list lex) {struct fuel} : pout Fhe.ftm :=
   match fuel with
   | O => None
@@ -2820,7 +2820,7 @@ with pvadd_tail (fuel : nat) (words : vocab) (env : ienv)
       | LKey TPlus :: rest =>
           match pvmul fuel' words env rest with
           | Some (rhs, next) =>
-              pvadd_tail fuel' words env (Fhe.FAdd lhs rhs) next
+              pvadd_remainder fuel' words env (Fhe.FAdd lhs rhs) next
           | None => None
           end
       | _ => Some (lhs, input)
@@ -2832,11 +2832,11 @@ with pvmul (fuel : nat) (words : vocab) (env : ienv)
   | O => None
   | S fuel' =>
       match pvatom fuel' words env input with
-      | Some (lhs, rest) => pvmul_tail fuel' words env lhs rest
+      | Some (lhs, rest) => pvmul_remainder fuel' words env lhs rest
       | None => None
       end
   end
-with pvmul_tail (fuel : nat) (words : vocab) (env : ienv)
+with pvmul_remainder (fuel : nat) (words : vocab) (env : ienv)
     (lhs : Fhe.ftm) (input : list lex) {struct fuel} : pout Fhe.ftm :=
   match fuel with
   | O => None
@@ -2845,7 +2845,7 @@ with pvmul_tail (fuel : nat) (words : vocab) (env : ienv)
       | LKey TStar :: rest =>
           match pvatom fuel' words env rest with
           | Some (rhs, next) =>
-              pvmul_tail fuel' words env (Fhe.FMul lhs rhs) next
+              pvmul_remainder fuel' words env (Fhe.FMul lhs rhs) next
           | None => None
           end
       | _ => Some (lhs, input)
@@ -2862,8 +2862,8 @@ with pvatom (fuel : nat) (words : vocab) (env : ienv)
             match rest with
             | LKey TLparen :: more =>
                 match pvadd fuel' words env more with
-                | Some (term, LKey TRparen :: tail) =>
-                    Some (Fhe.FRe term, tail)
+                | Some (term, LKey TRparen :: remainder) =>
+                    Some (Fhe.FRe term, remainder)
                 | _ => None
                 end
             | _ => None
@@ -2874,8 +2874,8 @@ with pvatom (fuel : nat) (words : vocab) (env : ienv)
                 match pvval fuel' env more with
                 | Some (cut, LKey TRbrack :: LKey TLparen :: body) =>
                     match pvadd fuel' words env body with
-                    | Some (term, LKey TRparen :: tail) =>
-                        Some (Fhe.FTrim cut term, tail)
+                    | Some (term, LKey TRparen :: remainder) =>
+                        Some (Fhe.FTrim cut term, remainder)
                     | _ => None
                     end
                 | _ => None
@@ -2885,7 +2885,7 @@ with pvatom (fuel : nat) (words : vocab) (env : ienv)
           else Some (Fhe.FVar name, rest)
       | LKey TLparen :: rest =>
           match pvadd fuel' words env rest with
-          | Some (term, LKey TRparen :: tail) => Some (term, tail)
+          | Some (term, LKey TRparen :: remainder) => Some (term, remainder)
           | _ => None
           end
       | _ => None
@@ -2899,7 +2899,7 @@ Definition pvparam (fuel : nat) (words : vocab) (env : ienv) (key : nat)
       match pvval fuel env rest with
       | Some (id, LKey TRbrack :: more) =>
           match pvfield fuel env (wroom words) more with
-          | Some (room, tail) => Some (Param.Fparam id key room, tail)
+          | Some (room, remainder) => Some (Param.Fparam id key room, remainder)
           | None => None
           end
       | _ => None
@@ -2916,8 +2916,8 @@ Definition pvstate (fuel : nat) (words : vocab) (env : ienv)
           match pvfield fuel env (wslots words) more with
           | Some (slots, LKey TComma :: after) =>
               match pvfield fuel env (wquery words) after with
-              | Some (query, LKey TRbrace :: tail) =>
-                  Some (Hfhe.hmake terms slots query, tail)
+              | Some (query, LKey TRbrace :: remainder) =>
+                  Some (Hfhe.hmake terms slots query, remainder)
               | _ => None
               end
           | _ => None
@@ -2939,15 +2939,15 @@ Definition pvinput (fuel : nat) (words : vocab) (env : ienv) (staged : bool)
               match pvval fuel env sized with
               | Some (key, LKey TComma :: after) =>
                   match pvval fuel env after with
-                  | Some (rem, LKey TRbrack :: tail) =>
+                  | Some (rem, LKey TRbrack :: remainder) =>
                       if staged then
-                        match pvstate fuel words env tail with
+                        match pvstate fuel words env remainder with
                         | Some (shape, next) =>
                             Some (((name, Fhe.Enc key rem),
                               Some (name, shape)), next)
                         | None => None
                         end
-                      else Some (((name, Fhe.Enc key rem), None), tail)
+                      else Some (((name, Fhe.Enc key rem), None), remainder)
                   | _ => None
                   end
               | _ => None
@@ -2991,8 +2991,8 @@ Fixpoint pvitems (fuel : nat) (words : vocab) (env : ienv) (key : nat)
           end
       | LKey TTerm :: rest =>
           match pvadd fuel' words env rest with
-          | Some (term, LKey TRbrace :: tail) =>
-              Some (VRaw (rev pars) (rev fenv) (rev henv) term, tail)
+          | Some (term, LKey TRbrace :: remainder) =>
+              Some (VRaw (rev pars) (rev fenv) (rev henv) term, remainder)
           | _ => None
           end
       | _ => None
@@ -3022,8 +3022,8 @@ Definition pvdecl (fuel : nat) (words : vocab) (env : ienv)
                                       match pword (wstage words) after with
                                       | Some (LKey TLbrack :: stage) =>
                                           match pword (wprod words) stage with
-                                          | Some (LKey TRbrack :: tail) =>
-                                              Some (true, tail)
+                                          | Some (LKey TRbrack :: remainder) =>
+                                              Some (true, remainder)
                                           | _ => None
                                           end
                                       | _ => None
@@ -3035,7 +3035,7 @@ Definition pvdecl (fuel : nat) (words : vocab) (env : ienv)
                               | Some (staged, LKey TLbrace :: body) =>
                                   match pvitems fuel words env key staged
                                       [] [] [] body with
-                                  | Some (raw, tail) =>
+                                  | Some (raw, remainder) =>
                                       let cfg := Fhe.Fcfg full add mul renew in
                                       let profile := [(key, cfg)] in
                                       let catalog := vrpars raw in
@@ -3051,7 +3051,7 @@ Definition pvdecl (fuel : nat) (words : vocab) (env : ienv)
                                                   Some (VDecl name
                                                     (Hpar.lfhe link)
                                                     (Hpar.lparam link) host
-                                                    (Some (Hpar.lhfhe link)), tail)
+                                                    (Some (Hpar.lhfhe link)), remainder)
                                               | None => None
                                               end
                                             else
@@ -3061,7 +3061,7 @@ Definition pvdecl (fuel : nat) (words : vocab) (env : ienv)
                                                   match Param.params catalog info with
                                                   | Some param =>
                                                       Some (VDecl name info param host
-                                                        None, tail)
+                                                        None, remainder)
                                                   | None => None
                                                   end
                                               | None => None
@@ -3133,11 +3133,11 @@ Fixpoint pheads (fuel : nat) (words : vocab) (name : nat) (state : hstate)
       | LKey TSize :: rest =>
           if early (hphasev state) then
             match psize (hsizes state) rest with
-            | Some (next, tail) =>
+            | Some (next, remainder) =>
                 pheads fuel' words name
                   (HState HOpen next (htypes state) (hcodes state)
                     (hbinds state) (hperms state) (hdata state)
-                    (hshapes state) (hforms state) (hveils state)) tail
+                    (hshapes state) (hforms state) (hveils state)) remainder
             | None => None
             end
           else
@@ -3145,11 +3145,11 @@ Fixpoint pheads (fuel : nat) (words : vocab) (name : nat) (state : hstate)
       | LKey TMeasure :: rest =>
           if early (hphasev state) then
             match pmeasure fuel' (hsizes state) rest with
-            | Some (next, tail) =>
+            | Some (next, remainder) =>
                 pheads fuel' words name
                   (HState HOpen next (htypes state) (hcodes state)
                     (hbinds state) (hperms state) (hdata state)
-                    (hshapes state) (hforms state) (hveils state)) tail
+                    (hshapes state) (hforms state) (hveils state)) remainder
             | None => None
             end
           else
@@ -3157,7 +3157,7 @@ Fixpoint pheads (fuel : nat) (words : vocab) (name : nat) (state : hstate)
       | LKey TLaw :: rest =>
           if early (hphasev state) then
             match plaw fuel' (hsizes state) rest with
-            | Some tail => pheads fuel' words name state tail
+            | Some remainder => pheads fuel' words name state remainder
             | None => None
             end
           else
@@ -3247,12 +3247,12 @@ Fixpoint pheads (fuel : nat) (words : vocab) (name : nat) (state : hstate)
           let ctx := FCtx (hforms state) [] [] 0 in
           match pflow fuel' (hsizes state) (htypes state)
               (hdata state) (hshapes state) (rev (hbinds state)) ctx rest with
-          | Some ((body, last), LKey TRbrace :: LKey TEof :: tail) =>
+          | Some ((body, last), LKey TRbrace :: LKey TEof :: remainder) =>
               let forms := rev (hforms state) in
               let ready := fmono forms ++ rev (fcmade last) in
               Some (RawHead name (rev (hbinds state)) (rev (hperms state))
                 (rev (hdata state)) (rev (hshapes state)) forms ready
-                (rev (hveils state)) body, tail)
+                (rev (hveils state)) body, remainder)
           | _ => None
           end
       | _ => None

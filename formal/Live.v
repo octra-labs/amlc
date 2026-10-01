@@ -217,8 +217,8 @@ Definition cell_b (left right : cell) : bool :=
 Fixpoint cells_b (left right : list cell) : bool :=
   match left, right with
   | [], [] => true
-  | lhead :: ltail, rhead :: rtail =>
-      cell_b lhead rhead && cells_b ltail rtail
+  | lhead :: lremainder, rhead :: rremainder =>
+      cell_b lhead rhead && cells_b lremainder rremainder
   | _, _ => false
   end.
 
@@ -299,8 +299,8 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
   | Mach.Same rest | Mach.Different rest | Mach.Order _ rest
   | Mach.Join rest =>
       match depth with
-      | S (S tail) =>
-          match scan rest (S tail) env with
+      | S (S remainder) =>
+          match scan rest (S remainder) env with
           | Some (next_depth, next_env, rows) =>
               Some (next_depth, next_env, cell_row env :: rows)
           | None => None
@@ -309,8 +309,8 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Negate rest | Mach.Absolute rest =>
       match depth with
-      | S tail =>
-          match scan rest (S tail) env with
+      | S remainder =>
+          match scan rest (S remainder) env with
           | Some (next_depth, next_env, rows) =>
               Some (next_depth, next_env, cell_row env :: rows)
           | None => None
@@ -319,8 +319,8 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Clip _ rest =>
       match depth with
-      | S tail =>
-          match scan rest (S tail) env with
+      | S remainder =>
+          match scan rest (S remainder) env with
           | Some (next_depth, next_env, rows) =>
               Some (next_depth, next_env,
                 cell_row env :: cell_row env :: cell_row env :: rows)
@@ -330,8 +330,8 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Skip _ rest =>
       match depth with
-      | S tail =>
-          match scan rest (S tail) env with
+      | S remainder =>
+          match scan rest (S remainder) env with
           | Some (next_depth, next_env, rows) =>
               Some (next_depth, next_env,
                 cell_row env :: cell_row env :: cell_row env
@@ -342,19 +342,19 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Duo rest | Mach.Cons rest | Mach.Append rest =>
       match depth with
-      | S (S tail) => scan rest (S tail) env
+      | S (S remainder) => scan rest (S remainder) env
       | _ => None
       end
   | Mach.First rest | Mach.Second rest | Mach.Pick _ rest
   | Mach.Unhead rest =>
       match depth with
-      | S tail => scan rest (S tail) env
+      | S remainder => scan rest (S remainder) env
       | 0 => None
       end
   | Mach.Left rest | Mach.Right rest =>
       match depth with
-      | S tail =>
-          match scan rest (S tail) env with
+      | S remainder =>
+          match scan rest (S remainder) env with
           | Some (next_depth, next_env, rows) =>
               Some (next_depth, next_env, cell_row env :: rows)
           | None => None
@@ -363,8 +363,8 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.CloseCap _ rest =>
       match depth with
-      | S tail =>
-          match scan rest tail env with
+      | S remainder =>
+          match scan rest remainder env with
           | Some (next_depth, next_env, rows) =>
               Some (next_depth, next_env, cell_row env :: rows)
           | None => None
@@ -384,12 +384,12 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Scope binder body rest =>
       match depth with
-      | S tail =>
+      | S remainder =>
           match cell_open binder env with
           | Some opened =>
-              match scan body tail opened with
+              match scan body remainder opened with
               | Some (body_depth, body_env, body_rows) =>
-                  if Nat.eqb body_depth (S tail) then
+                  if Nat.eqb body_depth (S remainder) then
                     match cell_close binder body_env with
                     | Some closed =>
                         match scan rest body_depth closed with
@@ -409,14 +409,14 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Scope2 lhs rhs body rest =>
       match depth with
-      | S tail =>
+      | S remainder =>
           match cell_open lhs env with
           | Some first =>
               match cell_open rhs first with
               | Some opened =>
-                  match scan body tail opened with
+                  match scan body remainder opened with
                   | Some (body_depth, body_env, body_rows) =>
-                      if Nat.eqb body_depth (S tail) then
+                      if Nat.eqb body_depth (S remainder) then
                         match cell_close rhs body_env with
                         | Some last =>
                             match cell_close lhs last with
@@ -442,11 +442,11 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Iter len item state body rest =>
       match depth with
-      | S (S tail) =>
+      | S (S remainder) =>
           let fix loop count current rows :=
             match count with
             | 0 =>
-                match scan rest (S tail) current with
+                match scan rest (S remainder) current with
                 | Some (next_depth, next_env, rest_rows) =>
                     Some (next_depth, next_env, rows ++ rest_rows)
                 | None => None
@@ -456,9 +456,9 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
                 | Some first =>
                     match cell_open state first with
                     | Some opened =>
-                        match scan body tail opened with
+                        match scan body remainder opened with
                         | Some (body_depth, body_env, body_rows) =>
-                            if Nat.eqb body_depth (S tail) then
+                            if Nat.eqb body_depth (S remainder) then
                               match cell_close state body_env with
                               | Some last =>
                                   match cell_close item last with
@@ -481,19 +481,19 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Choice left_bind yes right_bind no form rest =>
       match depth with
-      | S tail =>
+      | S remainder =>
           match cell_open right_bind env, cell_open left_bind env with
           | Some no_open, Some yes_open =>
-              match scan no tail no_open, scan yes tail yes_open with
+              match scan no remainder no_open, scan yes remainder yes_open with
               | Some (no_depth, no_env, no_rows),
                   Some (yes_depth, yes_env, yes_rows) =>
-                  if Nat.eqb no_depth (S tail)
-                      && Nat.eqb yes_depth (S tail) then
+                  if Nat.eqb no_depth (S remainder)
+                      && Nat.eqb yes_depth (S remainder) then
                     match cell_close right_bind no_env,
                         cell_close left_bind yes_env with
                     | Some no_closed, Some yes_closed =>
                         if cells_b no_closed yes_closed then
-                          match scan rest (S tail) no_closed with
+                          match scan rest (S remainder) no_closed with
                           | Some (next_depth, next_env, rest_rows) =>
                               Some (next_depth, next_env,
                                 [cell_row env] ++ no_rows
@@ -519,14 +519,14 @@ Fixpoint scan (value : Mach.code) (depth : nat) (env : list cell)
       end
   | Mach.Fork form yes no rest =>
       match depth with
-      | S tail =>
-          match scan no tail env, scan yes tail env with
+      | S remainder =>
+          match scan no remainder env, scan yes remainder env with
           | Some (no_depth, no_env, no_rows),
               Some (yes_depth, yes_env, yes_rows) =>
-              if Nat.eqb no_depth (S tail)
-                  && Nat.eqb yes_depth (S tail)
+              if Nat.eqb no_depth (S remainder)
+                  && Nat.eqb yes_depth (S remainder)
                   && cells_b no_env yes_env then
-                match scan rest (S tail) no_env with
+                match scan rest (S remainder) no_env with
                 | Some (next_depth, next_env, rest_rows) =>
                     Some (next_depth, next_env,
                       [cell_row env] ++ no_rows
@@ -553,16 +553,16 @@ Definition slot_same (left right : slot) : bool :=
 Fixpoint row_same (left right : list slot) : bool :=
   match left, right with
   | [], [] => true
-  | lhead :: ltail, rhead :: rtail =>
-      slot_same lhead rhead && row_same ltail rtail
+  | lhead :: lremainder, rhead :: rremainder =>
+      slot_same lhead rhead && row_same lremainder rremainder
   | _, _ => false
   end.
 
 Fixpoint rows_same (left right : list (list slot)) : bool :=
   match left, right with
   | [], [] => true
-  | lhead :: ltail, rhead :: rtail =>
-      row_same lhead rhead && rows_same ltail rtail
+  | lhead :: lremainder, rhead :: rremainder =>
+      row_same lhead rhead && rows_same lremainder rremainder
   | _, _ => false
   end.
 
@@ -593,24 +593,24 @@ Qed.
 Lemma row_same_eq : forall left right,
   row_same left right = true -> left = right.
 Proof.
-  induction left as [|lhead ltail IH]; destruct right as [|rhead rtail];
+  induction left as [|lhead lremainder IH]; destruct right as [|rhead rremainder];
     simpl; intros same; try discriminate; try reflexivity.
   apply andb_true_iff in same.
-  destruct same as [head tail].
+  destruct same as [head remainder].
   apply slot_same_eq in head.
-  apply IH in tail.
+  apply IH in remainder.
   now subst.
 Qed.
 
 Lemma rows_same_eq : forall left right,
   rows_same left right = true -> left = right.
 Proof.
-  induction left as [|lhead ltail IH]; destruct right as [|rhead rtail];
+  induction left as [|lhead lremainder IH]; destruct right as [|rhead rremainder];
     simpl; intros same; try discriminate; try reflexivity.
   apply andb_true_iff in same.
-  destruct same as [head tail].
+  destruct same as [head remainder].
   apply row_same_eq in head.
-  apply IH in tail.
+  apply IH in remainder.
   now subst.
 Qed.
 
@@ -865,9 +865,9 @@ Proof.
   apply analyze_shape in accepted.
   destruct accepted as [prefix shape].
   subst rows.
-  induction prefix as [|head tail IH].
+  induction prefix as [|head remainder IH].
   - reflexivity.
-  - destruct tail as [|next rest].
+  - destruct remainder as [|next rest].
     + reflexivity.
     + simpl in *.
       exact IH.

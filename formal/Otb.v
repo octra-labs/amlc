@@ -594,9 +594,9 @@ Proof.
   - destruct right; simpl in accepted; try discriminate.
     reflexivity.
   - destruct right as [|rhs right_rest]; simpl in accepted; try discriminate.
-    apply andb_true_iff in accepted as [head tail].
+    apply andb_true_iff in accepted as [head remainder].
     apply xop_b_true in head.
-    apply IH in tail.
+    apply IH in remainder.
     subst.
     reflexivity.
 Qed.

@@ -109,9 +109,9 @@ Fixpoint event_values (types : list ty) (payload : value)
       if scalar_value typ payload then Some [payload] else None
   | typ :: rest =>
       match payload with
-      | VPair head tail =>
+      | VPair head remainder =>
           if scalar_value typ head then
-            match event_values rest tail with
+            match event_values rest remainder with
             | Some values => Some (head :: values)
             | None => None
             end
@@ -157,7 +157,7 @@ Fixpoint event_type (types : list ty) : option ty :=
   | typ :: rest =>
       if scalar typ then
         match event_type rest with
-        | Some tail => Some (TPair typ tail)
+        | Some remainder => Some (TPair typ remainder)
         | None => None
         end
       else None
@@ -210,7 +210,7 @@ Definition action_site (selected : action) (expected : site) : bool :=
 
 Definition path_join (first second : list (list site)) : list (list site) :=
   flat_map
-    (fun head => map (fun tail => head ++ tail) second)
+    (fun head => map (fun remainder => head ++ remainder) second)
     first.
 
 Fixpoint path_power (turns : nat) (body : list (list site))
@@ -675,9 +675,9 @@ Fixpoint lower_places (bindings : list binding) (selected : list place)
     (layouts : list layout) : option (list vmblock) :=
   match selected, layouts with
   | [], [] => Some []
-  | Place index site :: rest, Layout payload scratch :: tail =>
+  | Place index site :: rest, Layout payload scratch :: remainder =>
       match lower bindings index site payload scratch,
-        lower_places bindings rest tail with
+        lower_places bindings rest remainder with
       | Some block, Some blocks => Some (block :: blocks)
       | _, _ => None
       end
@@ -692,8 +692,8 @@ Definition lower_all (bindings : list binding) (index : nat)
 Fixpoint fit (selected : list place) (blocks : list vmblock) : Prop :=
   match selected, blocks with
   | [], [] => True
-  | Place index site :: rest, block :: tail =>
-      vi block = index /\ vs block = site /\ fit rest tail
+  | Place index site :: rest, block :: remainder =>
+      vi block = index /\ vs block = site /\ fit rest remainder
   | _, _ => False
   end.
 
@@ -737,7 +737,7 @@ Proof.
     destruct (lower bindings index site payload scratch)
       as [block |] eqn:lowered; try discriminate.
     destruct (lower_places bindings rest layouts)
-      as [tail |] eqn:more; try discriminate.
+      as [remainder |] eqn:more; try discriminate.
     inversion accepted.
     subst blocks.
     cbn.
@@ -745,7 +745,7 @@ Proof.
       (lower_identity bindings index site payload scratch block lowered)
       as [same_index same_site].
     repeat split; try assumption.
-    exact (repeat layouts tail more).
+    exact (repeat layouts remainder more).
 Qed.
 
 Lemma lower_places_length : forall bindings selected layouts blocks,
@@ -762,11 +762,11 @@ Proof.
       cbn in accepted; try discriminate.
     destruct (lower bindings index site payload scratch); try discriminate.
     destruct (lower_places bindings rest layouts)
-      as [tail |] eqn:more; try discriminate.
+      as [remainder |] eqn:more; try discriminate.
     inversion accepted.
     subst blocks.
     cbn.
-    rewrite (repeat layouts tail more).
+    rewrite (repeat layouts remainder more).
     reflexivity.
 Qed.
 
@@ -855,7 +855,7 @@ Fixpoint plan (bindings : list binding) (selected : list action)
       | Some first =>
           if continueb head rest then
             match plan bindings rest with
-            | Some tail => Some (first :: tail)
+            | Some remainder => Some (first :: remainder)
             | None => None
             end
           else None
@@ -882,23 +882,23 @@ Proof.
     intros next accepted; cbn in accepted; try discriminate.
   destruct (action_site selected expected) eqn:matched.
   - destruct count as [|remaining].
-    + destruct (consume_one selected rest) as [tail |] eqn:used;
+    + destruct (consume_one selected rest) as [remainder |] eqn:used;
         try discriminate.
       inversion accepted.
       subst.
       cbn.
-      specialize (repeat tail eq_refl).
+      specialize (repeat remainder eq_refl).
       lia.
     + inversion accepted.
       subst.
       cbn.
       lia.
-  - destruct (consume_one selected rest) as [tail |] eqn:used;
+  - destruct (consume_one selected rest) as [remainder |] eqn:used;
       try discriminate.
     inversion accepted.
     subst.
     cbn.
-    specialize (repeat tail eq_refl).
+    specialize (repeat remainder eq_refl).
     lia.
 Qed.
 
@@ -1019,7 +1019,7 @@ Proof.
     destruct (resolve bindings head) as [first |] eqn:resolved;
       try discriminate.
     destruct (continueb head rest); try discriminate.
-    destruct (plan bindings rest) as [tail |] eqn:planned;
+    destruct (plan bindings rest) as [remainder |] eqn:planned;
       try discriminate.
     inversion accepted.
     subst.
@@ -1042,7 +1042,7 @@ Proof.
     destruct (resolve bindings head) as [first |] eqn:resolved;
       try discriminate.
     destruct (continueb head rest); try discriminate.
-    destruct (plan bindings rest) as [tail |] eqn:planned;
+    destruct (plan bindings rest) as [remainder |] eqn:planned;
       try discriminate.
     inversion accepted.
     subst.
@@ -1093,11 +1093,11 @@ Proof.
     destruct (resolve bindings head) as [first |] eqn:resolved;
       try discriminate.
     destruct (continueb head rest); try discriminate.
-    destruct (plan bindings rest) as [tail |] eqn:planned;
+    destruct (plan bindings rest) as [remainder |] eqn:planned;
       try discriminate.
     constructor.
     + apply (resolve_no_close _ _ _ resolved).
-    + apply repeat with (items := tail).
+    + apply repeat with (items := remainder).
       reflexivity.
 Qed.
 

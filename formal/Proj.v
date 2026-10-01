@@ -245,10 +245,10 @@ Proof.
   revert seen.
   induction values as [|value rest IH]; intros seen accepted; simpl in accepted.
   - constructor.
-  - apply andb_true_iff in accepted as [head tail].
+  - apply andb_true_iff in accepted as [head remainder].
     constructor.
     + exact head.
-    + apply IH. exact tail.
+    + apply IH. exact remainder.
 Qed.
 
 Theorem proj_order : forall value,

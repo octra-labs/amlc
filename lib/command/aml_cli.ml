@@ -102,7 +102,7 @@ let fail command reason =
 
 let version () =
   Printf.printf
-    "language = AML compiler = amlc release = preview octb = 1\n"
+    "language = AML version = 2.0 compiler = amlc release = preview octb = 1\n"
 
 let source path =
   try read path with Sys_error reason -> fail "read" reason

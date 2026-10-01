@@ -705,14 +705,14 @@ let decoder_checks int_artifact bool_artifact =
       ])
     |> List.concat
   in
-  let tail = [
+  let remainder = [
     Vm.NOP;
     Vm.LDI (61, Vm.VInt Z.zero);
     Vm.SUB (0, 0, 61);
     Vm.STOP;
   ] in
   register_refused "input count"
-    (Array.of_list (head @ inputs @ tail))
+    (Array.of_list (head @ inputs @ remainder))
 
 let typed_open name artifact raws =
   let image = decoded name artifact in
@@ -880,7 +880,7 @@ let range_checks () =
         let changed = Array.copy values in
         changed.(len) <- Eval.Int Z.one;
         let hidden = Eval.Pair (Eval.Int (Z.of_int len), Eval.Vec changed) in
-        if Eval.typed typ hidden then fail "sequence generated tail"
+        if Eval.typed typ hidden then fail "sequence generated remainder"
       end
     done
   done;
@@ -989,8 +989,8 @@ let range_checks () =
   refused "sequence active range"
     (local "sequence active range" sequence "main"
       (seq_args 1 [256; 0; 0; 0; 0; 0; 0; 0]));
-  refused "sequence hidden tail"
-    (local "sequence hidden tail" sequence "main"
+  refused "sequence hidden remainder"
+    (local "sequence hidden remainder" sequence "main"
       (seq_args 0 [1; 0; 0; 0; 0; 0; 0; 0]));
   let image = decoded "sequence identity image" identity in
   let raw = raw_image "sequence identity raw" identity in
@@ -1009,7 +1009,7 @@ let range_checks () =
     (Vm.LDI (image.results.(0), Vm.VInt (Z.of_int 5)));
   reject_output "sequence output range" 1
     (Vm.LDI (image.results.(1), Vm.VInt (Z.of_int 256)));
-  reject_output "sequence output tail" 4
+  reject_output "sequence output remainder" 4
     (Vm.LDI (image.results.(4), Vm.VInt Z.one))
 
 let structural_checks () =

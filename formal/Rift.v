@@ -21,7 +21,7 @@ Import ListNotations.
 
 Record rstep : Type := RStep {
   rhead : nat;
-  rtail : nat
+  rremainder : nat
 }.
 
 Record rpath : Type := RPath {
@@ -40,17 +40,17 @@ Fixpoint rbody (steps : list rstep) (rest : nat) (elem : ty)
   match steps with
   | [] => SPair (rvec elem (rev held)) (SVar source)
   | step :: more =>
-      let tail_ty := TVec (length more + rest) elem in
+      let remainder_ty := TVec (length more + rest) elem in
       SUnpair (SUncons (SVar source))
         (SBind (rhead step) (paym elem) elem)
-        (SBind (rtail step) (paym tail_ty) tail_ty)
-        (rbody more rest elem (rhead step :: held) (rtail step))
+        (SBind (rremainder step) (paym remainder_ty) remainder_ty)
+        (rbody more rest elem (rhead step :: held) (rremainder step))
   end.
 
 Fixpoint rids (steps : list rstep) : list nat :=
   match steps with
   | [] => []
-  | step :: rest => rhead step :: rtail step :: rids rest
+  | step :: rest => rhead step :: rremainder step :: rids rest
   end.
 
 Fixpoint runiq (items : list nat) : bool :=
@@ -81,9 +81,9 @@ Fixpoint rslots (fuel left index : nat) (source : stm) : option (list nat) :=
 Fixpoint rpairs (items : list nat) : option (list rstep) :=
   match items with
   | [] => Some []
-  | head :: tail :: rest =>
+  | head :: remainder :: rest =>
       match rpairs rest with
-      | Some steps => Some (RStep head tail :: steps)
+      | Some steps => Some (RStep head remainder :: steps)
       | None => None
       end
   | _ => None
@@ -187,7 +187,7 @@ Proof.
       contradiction.
     + reflexivity.
   - rewrite IH by discriminate.
-    destruct more as [|next tail]; simpl; lia.
+    destruct more as [|next remainder]; simpl; lia.
 Qed.
 
 Theorem rbody_depth : forall steps rest elem source,
@@ -201,7 +201,7 @@ Proof.
   destruct steps as [|step more]; simpl.
   - reflexivity.
   - rewrite rbody_depth_held by discriminate.
-    destruct more as [|next tail]; simpl; lia.
+    destruct more as [|next remainder]; simpl; lia.
 Qed.
 
 Theorem rout_nodes : forall path rest elem source,

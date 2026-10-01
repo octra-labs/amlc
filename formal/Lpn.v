@@ -8,8 +8,8 @@ Import ListNotations.
 
 Fixpoint dot (row key : list bool) : bool :=
   match row, key with
-  | head :: rest, bit :: tail =>
-      xorb (andb head bit) (dot rest tail)
+  | head :: rest, bit :: remainder =>
+      xorb (andb head bit) (dot rest remainder)
   | _, _ => false
   end.
 
@@ -50,11 +50,11 @@ Lemma row_at : forall (pos : nat) (row key : list bool),
 Proof.
   induction pos as [|pos IH].
   - intros row key same found.
-    destruct row as [|head rest]; destruct key as [|bit tail];
+    destruct row as [|head rest]; destruct key as [|bit remainder];
       simpl in *; try discriminate.
     exists head. reflexivity.
   - intros row key same found.
-    destruct row as [|head rest]; destruct key as [|bit tail];
+    destruct row as [|head rest]; destruct key as [|bit remainder];
       simpl in *; try discriminate.
     injection same as same.
     eapply IH; eauto.
@@ -66,12 +66,12 @@ Theorem dot_flip : forall (pos : nat) (row key : list bool) (bit : bool),
   dot (flip pos row) key = negb (dot row key).
 Proof.
   induction pos as [|pos IH]; intros row key bit row_bit key_bit;
-    destruct row as [|head rest]; destruct key as [|mark tail];
+    destruct row as [|head rest]; destruct key as [|mark remainder];
     simpl in row_bit, key_bit; try discriminate.
   - inversion row_bit. inversion key_bit. subst. simpl.
-    destruct bit; destruct (dot rest tail); reflexivity.
-  - simpl. rewrite (IH rest tail bit row_bit key_bit).
-    destruct head; destruct mark; destruct (dot rest tail); reflexivity.
+    destruct bit; destruct (dot rest remainder); reflexivity.
+  - simpl. rewrite (IH rest remainder bit row_bit key_bit).
+    destruct head; destruct mark; destruct (dot rest remainder); reflexivity.
 Qed.
 
 Theorem noisy_flip : forall (pos : nat) (row key : list bool)

@@ -90,7 +90,7 @@ Proof.
   - split; intros; constructor.
   - rewrite andb_true_iff, Nat.ltb_lt, repeat.
     split.
-    + intros [head tail].
+    + intros [head remainder].
       constructor; assumption.
     + intros accepted.
       inversion accepted; subst.
@@ -143,7 +143,7 @@ Proof.
         apply data_b_spec.
         exact kind.
     + apply Nat.eqb_neq in same.
-      destruct (takeb id rest) as [[tail_ty tail_next] |] eqn:tail; try discriminate.
+      destruct (takeb id rest) as [[remainder_ty remainder_next] |] eqn:remainder; try discriminate.
       inversion found; subst.
       apply TCNext.
       * exact same.

@@ -83,8 +83,8 @@ Definition rdecl_b (item : rtype) : bool :=
 Fixpoint items_b (fields : list rfield) (items : list ritem) : bool :=
   match fields, items with
   | [], [] => true
-  | field :: rest, item :: tail =>
-      Nat.eqb (rfname field) (riname item) && items_b rest tail
+  | field :: rest, item :: remainder =>
+      Nat.eqb (rfname field) (riname item) && items_b rest remainder
   | _, _ => false
   end.
 
@@ -113,10 +113,10 @@ Fixpoint rbody (seed : nat) (fields : list rfield) (items : list rpick)
     (value body : stm) : option stm :=
   match fields, items with
   | [_], [item] => Some (SLet (rpbind item) value body)
-  | _ :: rest, item :: tail =>
+  | _ :: rest, item :: remainder =>
       match prodt rest with
       | Some rhs =>
-          match rbody (S seed) rest tail (SVar (did seed)) body with
+          match rbody (S seed) rest remainder (SVar (did seed)) body with
           | Some out => Some (SUnpair value (rpbind item)
               (SBind (did seed) (paym rhs) rhs) out)
           | None => None
@@ -134,8 +134,8 @@ Definition pick_b (field : rfield) (item : rpick) : bool :=
 Fixpoint picks_b (fields : list rfield) (items : list rpick) : bool :=
   match fields, items with
   | [], [] => true
-  | field :: rest, item :: tail =>
-      pick_b field item && picks_b rest tail
+  | field :: rest, item :: remainder =>
+      pick_b field item && picks_b rest remainder
   | _, _ => false
   end.
 
@@ -176,13 +176,13 @@ Fixpoint rbranch (env : senv) (next : nat) (fields : list rfield)
       | Some (out, last) => Some (Let (put next (rpbind item)) value out, last)
       | None => None
       end
-  | _ :: rest, item :: tail =>
+  | _ :: rest, item :: remainder =>
       match prodt rest with
       | Some rhs =>
           let left_id := next in
           let right_id := S left_id in
           match rbranch ((sname (rpbind item), left_id) :: env)
-              (S right_id) rest tail (Var right_id) body with
+              (S right_id) rest remainder (Var right_id) body with
           | Some (out, last) =>
               Some (Unpair value (put left_id (rpbind item))
                 (Bind right_id (paym rhs) rhs) out, last)
@@ -253,13 +253,13 @@ Proof.
   induction items as [|item rest IH]; intros absent found.
   - contradiction.
   - simpl in absent.
-    apply orb_false_iff in absent as [head tail].
+    apply orb_false_iff in absent as [head remainder].
     simpl in found.
     destruct found as [same | found].
     + subst.
       rewrite Nat.eqb_refl in head.
       discriminate.
-    + apply (IH tail found).
+    + apply (IH remainder found).
 Qed.
 
 Lemma rnames_ok : forall items,
@@ -268,13 +268,13 @@ Proof.
   induction items as [|item rest IH]; intros accepted.
   - constructor.
   - simpl in accepted.
-    apply andb_true_iff in accepted as [head tail].
+    apply andb_true_iff in accepted as [head remainder].
     constructor.
     + apply has_rname_absent.
       apply negb_true_iff in head.
       exact head.
     + apply IH.
-      exact tail.
+      exact remainder.
 Qed.
 
 Lemma rdecl_unique_b : forall item,
@@ -341,12 +341,12 @@ Theorem items_names : forall fields items,
   items_b fields items = true -> map riname items = map rfname fields.
 Proof.
   induction fields as [|field rest IH]; intros items accepted;
-    destruct items as [|item tail]; simpl in accepted; try discriminate.
+    destruct items as [|item remainder]; simpl in accepted; try discriminate.
   - reflexivity.
   - apply andb_true_iff in accepted as [head next].
     simpl.
     rewrite (item_name field item head).
-    rewrite (IH tail next).
+    rewrite (IH remainder next).
     reflexivity.
 Qed.
 
@@ -376,12 +376,12 @@ Theorem picks_names : forall fields items,
   picks_b fields items = true -> map rpname items = map rfname fields.
 Proof.
   induction fields as [|field rest IH]; intros items accepted;
-    destruct items as [|item tail]; simpl in accepted; try discriminate.
+    destruct items as [|item remainder]; simpl in accepted; try discriminate.
   - reflexivity.
   - apply andb_true_iff in accepted as [head next].
     simpl.
     rewrite (pick_name field item head).
-    rewrite (IH tail next).
+    rewrite (IH remainder next).
     reflexivity.
 Qed.
 
@@ -391,12 +391,12 @@ Theorem picks_modes : forall fields items,
   map (fun field => paym (rftyp field)) fields.
 Proof.
   induction fields as [|field rest IH]; intros items accepted;
-    destruct items as [|item tail]; simpl in accepted; try discriminate.
+    destruct items as [|item remainder]; simpl in accepted; try discriminate.
   - reflexivity.
   - apply andb_true_iff in accepted as [head next].
     simpl.
     rewrite (pick_mode field item head).
-    rewrite (IH tail next).
+    rewrite (IH remainder next).
     reflexivity.
 Qed.
 
@@ -408,13 +408,13 @@ Proof.
   induction items as [|item rest IH]; intros absent found.
   - contradiction.
   - simpl in absent.
-    apply orb_false_iff in absent as [head tail].
+    apply orb_false_iff in absent as [head remainder].
     simpl in found.
     destruct found as [same | found].
     + subst.
       rewrite Nat.eqb_refl in head.
       discriminate.
-    + apply (IH tail found).
+    + apply (IH remainder found).
 Qed.
 
 Lemma bnames_ok : forall items,
@@ -424,13 +424,13 @@ Proof.
   induction items as [|item rest IH]; intros accepted.
   - constructor.
   - simpl in accepted.
-    apply andb_true_iff in accepted as [head tail].
+    apply andb_true_iff in accepted as [head remainder].
     constructor.
     + apply has_bname_absent.
       apply negb_true_iff in head.
       exact head.
     + apply IH.
-      exact tail.
+      exact remainder.
 Qed.
 
 Lemma rsplit_accepts : forall item value picks body out,

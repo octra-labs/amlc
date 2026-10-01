@@ -116,7 +116,7 @@ Fixpoint norm (env : ienv) (scope : list sbind) (term : rtm) : option rtm :=
   | RVnil typ => Some (RVnil typ)
   | RVcons value rest =>
       match norm env scope value, norm env scope rest with
-      | Some out, Some tail => Some (RVcons out tail)
+      | Some out, Some remainder => Some (RVcons out remainder)
       | _, _ => None
       end
   | RVar name => Some (RVar name)

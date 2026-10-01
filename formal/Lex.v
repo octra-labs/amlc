@@ -313,29 +313,29 @@ Definition punct (src : string) : option pcut :=
       else if byte value 37 then single value rest TPercent Stay
       else if byte value 45 then
         match rest with
-        | String next tail =>
-            if byte next 62 then pair value next tail TThin
+        | String next remainder =>
+            if byte next 62 then pair value next remainder TThin
             else single value rest TMinus Stay
         | EmptyString => single value rest TMinus Stay
         end
       else if byte value 60 then
         match rest with
-        | String next tail =>
-            if byte next 61 then pair value next tail TLe
+        | String next remainder =>
+            if byte next 61 then pair value next remainder TLe
             else single value rest TLt Stay
         | EmptyString => single value rest TLt Stay
         end
       else if byte value 62 then
         match rest with
-        | String next tail =>
-            if byte next 61 then pair value next tail TGe
+        | String next remainder =>
+            if byte next 61 then pair value next remainder TGe
             else single value rest TGt Stay
         | EmptyString => single value rest TGt Stay
         end
       else if byte value 61 then
         match rest with
-        | String next tail =>
-            if byte next 62 then pair value next tail TArrow
+        | String next remainder =>
+            if byte next 62 then pair value next remainder TArrow
             else single value rest TEq Stay
         | EmptyString => single value rest TEq Stay
         end

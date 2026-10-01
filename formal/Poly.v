@@ -71,8 +71,8 @@ Fixpoint pvals (base : ienv) (pars : list ppar) (actuals : list ity)
     : option (list ity) :=
   match pars, actuals with
   | [], [] => Some []
-  | par :: rest, raw :: tail =>
-      match pnorm base (ppkind par) raw, pvals base rest tail with
+  | par :: rest, raw :: remainder =>
+      match pnorm base (ppkind par) raw, pvals base rest remainder with
       | Some typ, Some types => Some (typ :: types)
       | _, _ => None
       end
@@ -92,8 +92,8 @@ Fixpoint ptys (values : list ity) : option (list ty) :=
 Fixpoint pzip (pars : list ppar) (types : list ity) : option penv :=
   match pars, types with
   | [], [] => Some []
-  | par :: rest, typ :: tail =>
-      match pzip rest tail with
+  | par :: rest, typ :: remainder =>
+      match pzip rest remainder with
       | Some env => Some ((ppname par, typ) :: env)
       | None => None
       end
@@ -144,7 +144,7 @@ Fixpoint rsub (env : penv) (term : rtm) : option rtm :=
       end
   | RVcons value rest =>
       match rsub env value, rsub env rest with
-      | Some out, Some tail => Some (RVcons out tail)
+      | Some out, Some remainder => Some (RVcons out remainder)
       | _, _ => None
       end
   | RVar name => Some (RVar name)
@@ -410,11 +410,11 @@ Lemma pvals_length : forall base pars actuals vals,
 Proof.
   intros base pars.
   induction pars as [|par rest IH]; intros actuals vals accepted;
-    destruct actuals as [|raw tail]; simpl in accepted; try discriminate.
+    destruct actuals as [|raw remainder]; simpl in accepted; try discriminate.
   - inversion accepted. auto.
   - destruct (pnorm base (ppkind par) raw) as [typ |] eqn:one;
       try discriminate.
-    destruct (pvals base rest tail) as [types |] eqn:more; try discriminate.
+    destruct (pvals base rest remainder) as [types |] eqn:more; try discriminate.
     inversion accepted; subst.
     apply IH in more as [Hpars Hvals].
     simpl. auto.
@@ -427,7 +427,7 @@ Proof.
     simpl in accepted.
   - inversion accepted. reflexivity.
   - destruct (yelab [] value); try discriminate.
-    destruct (ptys rest) as [tail |] eqn:made; try discriminate.
+    destruct (ptys rest) as [remainder |] eqn:made; try discriminate.
     inversion accepted. simpl. f_equal. apply IH. reflexivity.
 Qed.
 
@@ -436,11 +436,11 @@ Theorem pvals_sound : forall base pars actuals vals,
 Proof.
   intros base pars.
   induction pars as [|par rest IH]; intros actuals vals accepted;
-    destruct actuals as [|raw tail]; simpl in accepted; try discriminate.
+    destruct actuals as [|raw remainder]; simpl in accepted; try discriminate.
   - inversion accepted. constructor.
   - destruct (pnorm base (ppkind par) raw) as [typ |] eqn:one;
       try discriminate.
-    destruct (pvals base rest tail) as [types |] eqn:more; try discriminate.
+    destruct (pvals base rest remainder) as [types |] eqn:more; try discriminate.
     inversion accepted; subst.
     unfold pnorm in one.
     destruct (yelab base raw) as [kind |] eqn:typed; try discriminate.
@@ -461,9 +461,9 @@ Lemma pzip_length : forall pars vals env,
   pzip pars vals = Some env -> length pars = length vals.
 Proof.
   induction pars as [|par rest IH]; intros vals env accepted;
-    destruct vals as [|typ tail]; simpl in accepted; try discriminate;
+    destruct vals as [|typ remainder]; simpl in accepted; try discriminate;
     try reflexivity.
-  destruct (pzip rest tail) as [next |] eqn:more; try discriminate.
+  destruct (pzip rest remainder) as [next |] eqn:more; try discriminate.
   simpl. f_equal. eapply IH. exact more.
 Qed.
 
