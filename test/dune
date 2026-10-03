@@ -9,6 +9,36 @@
  (libraries octra_vm zarith))
 
 (test
+ (name test_byte_work)
+ (modules test_byte_work)
+ (libraries octra_vm zarith))
+
+(test
+ (name test_decode_work)
+ (modules test_decode_work)
+ (libraries octra_vm zarith base64))
+
+(test
+ (name test_int_text)
+ (modules test_int_text)
+ (libraries octra_vm zarith))
+
+(test
+ (name test_index_work)
+ (modules test_index_work)
+ (libraries octra_vm zarith))
+
+(test
+ (name test_mem_span)
+ (modules test_mem_span)
+ (libraries octra_vm zarith))
+
+(test
+ (name test_vector_space)
+ (modules test_vector_space)
+ (libraries octra_vm zarith))
+
+(test
  (name test_program_abi)
  (modules test_program_abi)
  (libraries octra_vm yojson))
