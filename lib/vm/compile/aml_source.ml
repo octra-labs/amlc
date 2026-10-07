@@ -147,6 +147,7 @@ let shape syntax ast =
 
 let compile_ast ~syntax ast =
   let ( let* ) = Result.bind in
+  let* () = Oct_scope.check_loops ast in
   let* () = shape syntax ast in
   let program = ast.Oct_lang.declaration = Oct_lang.ProgramDecl in
   let functions = List.length ast.funcs + List.length ast.forms in

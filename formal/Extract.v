@@ -75,9 +75,11 @@ Require Import Path.
 Require Import Folio.
 Require Import Dbg.
 Require Import Dbin.
+Require Import Scope.
 
 Extraction Language OCaml.
 Set Extraction Output Directory ".".
+Extraction "scope_model.ml" Scope.check Scope.writes.
 Extract Inductive comparison => "[ `CEq | `CLt | `CGt ]"
   ["`CEq" "`CLt" "`CGt"].
 Extract Constant Nat.compare =>

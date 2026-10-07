@@ -4,6 +4,11 @@
  (libraries octra_vm zarith))
 
 (test
+ (name test_pure_loop)
+ (modules test_pure_loop)
+ (libraries octra_vm zarith))
+
+(test
  (name test_byte_modes)
  (modules test_byte_modes)
  (libraries octra_vm zarith))
@@ -49,15 +54,15 @@
  (libraries octra_vm))
 
 (test
- (name compiler_regression)
+ (name compiler_cases)
  (modules
-  compiler_regression
-  regression_support
-  regression_storage
-  regression_types
-  regression_source
-  regression_host
-  regression_action
-  regression_effect
-  regression_emission)
+  compiler_cases
+  case_support
+  case_storage
+  case_types
+  case_source
+  case_host
+  case_action
+  case_effect
+  case_emission)
  (libraries octra_vm amlc_command zarith))
